@@ -1,0 +1,15 @@
+[package]
+name = "pumgye-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Bounded deterministic service and network authorization for Hangang"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+ipnet = { version = "2", features = ["serde"] }
+guard-core = { git = "https://github.com/ziozzang/hangang-guard", rev = "ee34be662cb04fb4c199e977127338e0ea8247ec" }
+
+[dev-dependencies]
+serde_json = "1"
