@@ -1,18 +1,51 @@
-# 품계 (Pumgye)
+# Pumgye (품계)
 
-Hangang의 결정적 서비스 권한 관리자다. 호패가 신원과 세션을, 수문장이 네트워크
-근거를 소유하고 품계는 서비스별 역할·권한·정보등급을 관리한다.
+[English](README.md)
 
-불변 비트셋과 수문장의 압축 IP 트라이를 사용한다. 사용자와 네트워크 모두의
-권한을 만족해야 한다. 미배정 사용자는 guest다. 네트워크 차단이 우선하며,
-필수 집행 설정에서 observe 또는 근거 불가는 거부한다.
+품계는 서비스별 역할·권한·정보등급·사용자/IP 매트릭스와 결정적 권한 판단을 담당합니다.
+호패는 검증된 신원·세션을, 수문장은 네트워크 근거를 소유하고 Hangang이 결과를 집행합니다.
 
-게이트웨이 집행·설정 CAS 게시·관리자 매트릭스는
-[Hangang에 통합되었습니다](https://github.com/ziozzang/hangang/pull/5).
-격리된 HOP1/HGD1 근거와 배포된 Linux 바이너리를 검증했습니다.
-종단간 HTTP 10만 QPS를 입증했다고 주장하지 않습니다. 호출자는 검증된 신원·전송 IP·수문장 근거를 전달해야 한다.
-이 라이브러리의 enum 자체가 상대 서버를 인증하는 것은 아니다.
+네 패키지를 분리합니다.
 
-`cargo test`, `cargo clippy --all-targets -- -D warnings`로 검증한다.
+- `pumgye-core`: 제한된 정책 컴파일·판단. HTTP·TLS·비동기 런타임·DB 의존성이 없습니다.
+- `pumgye-server`: 독립 `pumgye` 서버, SQLite 저장·트랜잭션 감사·HTTP/PPG1 리스너.
+- `pumgye-protocol`: 크기가 제한된 PPG1 코덱, 문자열을 복사하지 않는 요청 해석과 고정 응답.
+- `pumgye-client`: 인증된 지속 연결, 제한된 풀·기한·배치, 요청 상관 검증과 단조 증가 리비전 하한.
 
-`python3 tools/hangang_smoke.py --gateway-binary /path/to/hangang`으로 실제 격리 프로세스의 guest/observe/차단 거부·CAS 게시·스트림 철회를 검증합니다. 운영 자격 증명은 사용하지 않습니다.
+정책 원본은 SQLite입니다. 시작 시 커밋된 정책을 복구·컴파일하고, CAS 게시 시 정책·
+리비전·감사를 한 트랜잭션으로 저장한 뒤 불변 `ArcSwap` 메모리 스냅샷을 교체합니다.
+일반 판단은 DB를 읽지 않습니다. 정책 스냅샷은 다음 게시까지 유지하며 1–5초짜리 판단
+결과 캐시와 다릅니다. 현재 판단 결과 TTL은 0입니다. HTTP 요청 취소가 승인된 게시의
+완료를 중단하지 않습니다. 저장 결과가 불확실하면 복구/재시작 전까지 판단을 차단합니다.
+DB마다 런타임 소유자는 하나이며, SQLite 직접 수정 대신 품계 API로 정책을 변경합니다.
+
+권한·정보등급 비트셋과 수문장의 압축 prefix trie를 사용합니다. 사용자와 네트워크 권한이
+모두 요청을 허용해야 합니다. 미할당 신원은 guest이고 네트워크 deny가 우선합니다.
+필수 집행은 observe/판단 불가 근거를 거부합니다. 호출자는 인증된 신원·신뢰된 출발 IP·
+검증된 근거를 제공해야 하며, 전송된 enum만으로 사실이 검증되지는 않습니다.
+
+원격 리스너는 명시적으로 공급한 클라이언트 CA의 mTLS와 별도 관리자/판단 자격 증명을
+필수로 적용합니다. 평문은 루프백에서만 허용합니다. 네이티브 클라이언트는 고정 endpoint·
+서버 이름·CA를 검증하고 클라이언트 인증서를 제시합니다. [서버 계약](docs/SERVER.ko.md)을 참조하세요.
+
+```sh
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo build --locked --release --workspace
+cargo build --locked --release -p pumgye-client --example qualify
+python3 tools/server_smoke.py --binary target/release/pumgye --client target/release/examples/qualify
+```
+
+독립 프로세스 fixture는 mTLS 거부, 역할별 자격 증명, HTTP/네이티브 일치, 지속 파이프라인,
+리비전 하한, CAS 경쟁, 게시 후 권한 회수, 감사, DB 소유권과 재시작 복구를 검증합니다.
+`--benchmark 1000000`을 추가하면 합성 네이티브 전송을 측정합니다. 이 결과는 전체
+Hangang/호패/수문장 HTTP 처리량이나 복제본 검증을 의미하지 않습니다.
+
+이전 내장 게이트웨이·매트릭스 구현은 [Hangang #5](https://github.com/ziozzang/hangang/pull/5)에서
+검증했습니다. 독립 Hangang 클라이언트·관리 위임 연결, 복제본 lease·회수, 사람/기계 혼합 인증은
+계속 구현해야 합니다. 패키지 존재만으로 전체 제로트러스트 완성을 의미하지 않습니다.
+
+이전 게이트웨이 기준 구현 검증은
+`python3 tools/hangang_smoke.py --gateway-binary /path/to/hangang`으로 수행합니다.
+
+[네이티브 측정](docs/PERFORMANCE.ko.md)에 mTLS 10초 측정 3회의 범위·제약을 기록했습니다.

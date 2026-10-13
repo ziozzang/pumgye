@@ -1,0 +1,9 @@
+[package]
+name = "pumgye-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pumgye-core = { path = "../pumgye-core" }
+anyhow = "1"
