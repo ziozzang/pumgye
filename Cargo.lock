@@ -11,7 +11,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "guard-core"
 version = "0.3.1"
-source = "git+https://github.com/ziozzang/hangang-guard?rev=ee34be662cb04fb4c199e977127338e0ea8247ec#ee34be662cb04fb4c199e977127338e0ea8247ec"
+source = "git+https://github.com/ziozzang/sumunjang?rev=ee34be662cb04fb4c199e977127338e0ea8247ec#ee34be662cb04fb4c199e977127338e0ea8247ec"
 dependencies = [
  "anyhow",
  "ipnet",
