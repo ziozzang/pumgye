@@ -1,0 +1,20 @@
+name: Independent Pumgye qualification
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo +1.96.0 fmt --all --check
+      - run: cargo +1.96.0 clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo +1.96.0 test --locked --workspace
+      - run: cargo +1.96.0 build --locked --workspace
+      - run: cargo +1.96.0 build --locked -p pumgye-client --example qualify
+      - name: Owned remote mTLS and publication lifecycle
+        run: python3 tools/server_smoke.py --binary target/debug/pumgye --client target/debug/examples/qualify
