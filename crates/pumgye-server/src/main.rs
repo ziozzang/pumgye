@@ -1,5 +1,6 @@
 //! Standalone Pumgye control/decision authority.
 mod kubernetes;
+mod kubernetes_api;
 mod store;
 mod transport;
 use arc_swap::ArcSwap;
@@ -24,10 +25,21 @@ use std::{
 #[derive(Parser)]
 #[command(name = "pumgye", version)]
 struct Args {
+    /// Continuously collect read-only Kubernetes RBAC observations over verified HTTPS.
+    #[arg(long, requires_all = ["kubernetes_cluster", "kubernetes_api", "kubernetes_ca", "kubernetes_token"], conflicts_with = "inspect_kubernetes_rbac")]
+    observe_kubernetes_rbac: bool,
+    #[arg(long, requires = "observe_kubernetes_rbac")]
+    kubernetes_api: Option<String>,
+    #[arg(long, requires = "observe_kubernetes_rbac")]
+    kubernetes_ca: Option<PathBuf>,
+    #[arg(long, requires = "observe_kubernetes_rbac")]
+    kubernetes_token: Option<PathBuf>,
+    #[arg(long, requires = "observe_kubernetes_rbac")]
+    kubernetes_namespace: Option<String>,
     /// Inspect a bounded complete RBAC List without opening the database or listeners.
     #[arg(long, requires = "kubernetes_cluster")]
     inspect_kubernetes_rbac: Option<PathBuf>,
-    #[arg(long, requires = "inspect_kubernetes_rbac")]
+    #[arg(long)]
     kubernetes_cluster: Option<String>,
     #[arg(long, default_value = "127.0.0.1:9084")]
     listen: SocketAddr,
@@ -335,6 +347,39 @@ async fn main() -> anyhow::Result<()> {
         let inventory = kubernetes::inspect(args.kubernetes_cluster.as_deref().unwrap(), &bytes)?;
         println!("{}", serde_json::to_string_pretty(&inventory)?);
         return Ok(());
+    }
+    if args.observe_kubernetes_rbac {
+        let mut collector = kubernetes_api::Collector::new(
+            args.kubernetes_api.as_deref().unwrap(),
+            args.kubernetes_namespace,
+            args.kubernetes_cluster.unwrap(),
+        )?;
+        let epoch = std::time::Instant::now();
+        loop {
+            let now = u64::try_from(epoch.elapsed().as_millis())?;
+            let refresh = collector.refresh(
+                args.kubernetes_ca.as_deref().unwrap(),
+                args.kubernetes_token.as_deref().unwrap(),
+                now,
+            );
+            let result = tokio::select! {
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+                result = refresh => result,
+            };
+            if result.is_ok() {
+                let now = u64::try_from(epoch.elapsed().as_millis())?;
+                if let Some(view) = collector.fresh(now) {
+                    println!("{}", serde_json::to_string(&*view)?);
+                }
+            } else {
+                // Never print upstream bodies, credentials or token-bearing request URLs.
+                println!(r#"{{"version":1,"mode":"observe","available":false}}"#);
+            }
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return Ok(()),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+            }
+        }
     }
     anyhow::ensure!(
         args.tls_cert.is_some()

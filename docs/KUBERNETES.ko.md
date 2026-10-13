@@ -28,3 +28,46 @@ resourceVersion을 숫자로 해석하지 않습니다.
 후속 구현은 인증된 list/watch·완전한 재조회·명시적 앱 권한 매핑·원천별 게시·
 TokenReview·회수/복제본 fence·실제 클러스터 검증입니다. 이 목록을 allow 판정으로
 사용하지 않습니다. 공통 책임과 의미는 [ADR 0015](https://github.com/ziozzang/hangang-zerotrust/blob/main/docs/ko/0015-kubernetes-iam-authority.md)에 있습니다.
+
+## 실제 HTTPS 읽기 전용 수집
+
+```sh
+pumgye --observe-kubernetes-rbac --kubernetes-cluster example-cluster \
+  --kubernetes-api https://kubernetes.example.test \
+  --kubernetes-namespace example \
+  --kubernetes-ca /run/secrets/kubernetes-ca.pem \
+  --kubernetes-token /run/secrets/kubernetes-token
+```
+
+별도 관찰 명령이며 권한 DB·판정 리스너를 열지 않습니다. 네 RBAC 종류를 수집해
+줄별 JSON을 출력합니다. namespace는 Role/RoleBinding에 적용하고 ClusterRole/
+ClusterRoleBinding은 명시적 클러스터 읽기 권한이 필요합니다. namespace 생략 시
+모든 namespace를 수집합니다. Secret은 읽지 않습니다. 별도 읽기 전용 계정을
+사용하며 Ingress 컨트롤러의 인증 정보를 무조건 재사용하지 않습니다.
+
+설정 CA로 검증되는 HTTPS origin만 허용하며 기본 공개 root·리다이렉트·환경
+프록시를 사용하지 않습니다. 제한된 토큰·CA 파일을 매 수집 주기 다시 읽습니다.
+요청당 3초·전체 15초 기한, 종류당 32페이지·전체 4096 객체·응답 4 MiB 제한입니다.
+continue를 URL 인코딩하고 순환·페이지간 collection resourceVersion 변경을 거절합니다.
+만료된 continue(HTTP 410)를 포함한 실패는 다음 주기 전체 재조회로 복구합니다.
+부분 상태를 게시하지 않습니다. 종류별 버전은 독립이므로 전역 원자 스냅샷이 아닙니다.
+
+불변 ArcSwap 관찰 상태는 프로세스 내부 revision, 네 collection 버전, inventory,
+프로세스 상대 valid_until_ms를 갖습니다. 삭제·내용·원천 버전 변경은 revision을
+올리고 동일한 관찰은 유지합니다. 수집 전 기존 상태를 비우며 실패 시 available:false를
+출력합니다. 수집 완료 후 신선도는 최대 1초입니다. 진단 출력은 권한 receipt가 아니며
+워크로드 검증·앱 매핑·권한 부여를 포함하지 않습니다. revision은 재시작 시 초기화하며
+영속 인가 floor로 사용할 수 없습니다.
+
+완전 조회 사이에 1초를 기다리는 초기 읽기 전용 폴링입니다. 확장 가능한 watch
+구현은 아직 아닙니다. 모든 운영 복제본에 폴링을 켜 watch/reconcile을 대신하지
+않습니다. bookmark·종류별 resume·원천 게시·복제본 복구·실제 API 서버 검증이
+필요합니다. 현재 운영 정책과 설정은 그대로입니다.
+
+```sh
+python3 tools/kubernetes_source_smoke.py --binary target/debug/pumgye
+```
+
+격리 HTTPS fixture는 페이지/불투명 버전, 동일 상태 revision, 삭제, 버전·범위·
+리다이렉트 오류, HTTP 410 복구, 토큰·CA 교체, 프록시 격리, DB 미생성·비밀 미출력을
+검증합니다. 공식 API 근거는 대응 영문 문서에 링크했습니다.
