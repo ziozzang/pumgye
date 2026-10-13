@@ -1,6 +1,7 @@
 //! Standalone Pumgye control/decision authority.
 mod kubernetes;
 mod kubernetes_api;
+mod kubernetes_mapping;
 mod store;
 mod transport;
 use arc_swap::ArcSwap;
@@ -24,6 +25,7 @@ use std::{
 };
 #[derive(Parser)]
 #[command(name = "pumgye", version)]
+#[command(group(clap::ArgGroup::new("kubernetes_source").args(["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])))]
 struct Args {
     /// Continuously collect read-only Kubernetes RBAC observations over verified HTTPS.
     #[arg(long, requires_all = ["kubernetes_cluster", "kubernetes_api", "kubernetes_ca", "kubernetes_token"], conflicts_with = "inspect_kubernetes_rbac")]
@@ -39,8 +41,11 @@ struct Args {
     /// Inspect a bounded complete RBAC List without opening the database or listeners.
     #[arg(long, requires = "kubernetes_cluster")]
     inspect_kubernetes_rbac: Option<PathBuf>,
-    #[arg(long)]
+    #[arg(long, requires = "kubernetes_source")]
     kubernetes_cluster: Option<String>,
+    /// Explicit bounded administrator-owned application mapping; candidate output only.
+    #[arg(long, requires = "kubernetes_source")]
+    kubernetes_mapping: Option<PathBuf>,
     #[arg(long, default_value = "127.0.0.1:9084")]
     listen: SocketAddr,
     /// Persistent PPG1 decision endpoint (mTLS mandatory outside loopback).
@@ -338,6 +343,16 @@ async fn decide(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    let mapping = if let Some(path) = &args.kubernetes_mapping {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(65537)
+            .read_to_end(&mut bytes)?;
+        Some(kubernetes_mapping::Mapping::parse(&bytes)?)
+    } else {
+        None
+    };
     if let Some(path) = &args.inspect_kubernetes_rbac {
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -345,7 +360,17 @@ async fn main() -> anyhow::Result<()> {
             .take((kubernetes::MAX_BYTES + 1) as u64)
             .read_to_end(&mut bytes)?;
         let inventory = kubernetes::inspect(args.kubernetes_cluster.as_deref().unwrap(), &bytes)?;
-        println!("{}", serde_json::to_string_pretty(&inventory)?);
+        if let Some(mapping) = &mapping {
+            let candidate = mapping.candidate(&inventory)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"inventory":inventory,"candidate":candidate})
+                )?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&inventory)?);
+        }
         return Ok(());
     }
     if args.observe_kubernetes_rbac {
@@ -369,7 +394,31 @@ async fn main() -> anyhow::Result<()> {
             if result.is_ok() {
                 let now = u64::try_from(epoch.elapsed().as_millis())?;
                 if let Some(view) = collector.fresh(now) {
-                    println!("{}", serde_json::to_string(&*view)?);
+                    if let Some(mapping) = &mapping {
+                        match mapping.candidate(&view.inventory) {
+                            Ok(candidate) => {
+                                let encoded = serde_json::to_string(
+                                    &serde_json::json!({"source":&*view,"candidate":candidate}),
+                                )?;
+                                let now = u64::try_from(epoch.elapsed().as_millis())?;
+                                if collector
+                                    .fresh(now)
+                                    .is_some_and(|current| Arc::ptr_eq(&current, &view))
+                                {
+                                    println!("{encoded}");
+                                } else {
+                                    println!(
+                                        r#"{{"version":1,"mode":"observe","available":false}}"#
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                println!(r#"{{"version":1,"mode":"observe","available":false}}"#)
+                            }
+                        }
+                    } else {
+                        println!("{}", serde_json::to_string(&*view)?);
+                    }
                 }
             } else {
                 // Never print upstream bodies, credentials or token-bearing request URLs.

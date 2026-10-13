@@ -71,3 +71,41 @@ python3 tools/kubernetes_source_smoke.py --binary target/debug/pumgye
 격리 HTTPS fixture는 페이지/불투명 버전, 동일 상태 revision, 삭제, 버전·범위·
 리다이렉트 오류, HTTP 410 복구, 토큰·CA 교체, 프록시 격리, DB 미생성·비밀 미출력을
 검증합니다. 공식 API 근거는 대응 영문 문서에 링크했습니다.
+
+## 명시적인 앱 권한 매핑 후보
+
+검사 또는 관찰 명령에 `--kubernetes-mapping`으로 관리자 소유 설정을 제공합니다.
+가상 예제는 다음 명령으로 확인합니다.
+
+```sh
+pumgye --inspect-kubernetes-rbac examples/kubernetes-rbac-list.json \
+  --kubernetes-cluster example-cluster \
+  --kubernetes-mapping examples/kubernetes-mapping.json
+```
+
+기존 사용자 권한 없는 네이티브 정책 템플릿과 명시적인 service/앱 역할/native
+subject 참조, Kubernetes subject, Role/Binding kind·namespace·name·UID를 지정합니다.
+동명 객체가 재생성되면 기존 UID pin으로 활성화하지 않습니다. API group/resource
+(서브리소스 포함)·verb·리소스 namespace·선택적 이름의 모든 조건이 정확히 맞아야
+합니다. RoleBinding으로 cluster/다른 namespace 권한을 얻지 않습니다. 원천 wildcard를
+명시적 규칙에 자동 대응하지 않으며 매핑 조건의 wildcard, bind/escalate/impersonate,
+서비스 계정 토큰 발급 변환은 거절합니다. Group·집계 역할 변환은 검증된 membership/
+reconcile이 필요해 미지원입니다. 리소스 namespace는 관리자 명시 제약이며 실제
+API discovery·네이티브 authorizer 검증으로 리소스 범위를 확인하는 단계가 남았습니다.
+
+클러스터가 정확히 일치해야 합니다. 객체 삭제/재생성·roleRef 변경·subject/규칙 삭제·
+이름 제한 불일치는 비활성 매핑이 되고 후보 사용자 배정을 없앱니다. 매번 빈 사용자
+템플릿부터 다시 계산해 이전 권한을 남기지 않습니다. 후보는 네이티브 코어로 다시
+컴파일하며 IP 권한과 수문장 집행 근거가 필요합니다. 여러 일치는 명시적으로 선택한
+앱 역할만 합칩니다. 설정 최대 64 KiB·256 매핑·매핑당 16 규칙입니다.
+
+출력은 candidate_only, 설정 원문 SHA-256, 후보 정책, 매핑별 active/reason을 포함합니다.
+실시간 출력은 원천을 source에 담고 후보 계산/직렬화 후 신선도를 다시 확인합니다.
+매핑 파일은 시작 시 한번 읽으며 수정 시 새 프로세스·검토된 digest가 필요합니다.
+DB·운영 권한·권위 revision을 바꾸지 않습니다. 영속 원천 게시와 전역 reconcile
+fence가 없으므로 진단 후보를 운영 API에 자동 게시하지 않습니다. native_subject는
+운영자가 제공한 연관 관계이며 인증 증명이 아닙니다. 호패가 실제 요청의 신원과
+클러스터/issuer/audience/바인딩 객체를 검증해야 합니다. 예제 신원·UID는 가상입니다.
+
+격리 HTTPS fixture의 --mapping 옵션은 후보 생성과 원천 삭제 후 배정 제거,
+오류 복구·인증 파일 교체를 같이 검증합니다.

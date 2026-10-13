@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlsplit
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True, type=Path)
+parser.add_argument('--mapping', action='store_true')
 args = parser.parse_args()
 binary = args.binary.resolve()
 
@@ -77,6 +78,9 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
     thread = threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     db = root/'must-not-open.sqlite3'
     command = [str(binary),'--observe-kubernetes-rbac','--kubernetes-cluster','fixture-cluster','--kubernetes-namespace','blue','--kubernetes-api','https://127.0.0.1:'+str(server.server_port),'--kubernetes-ca',str(root/'ca.pem'),'--kubernetes-token',str(token_file),'--database',str(db)]
+    if args.mapping:
+        mapping = {'version':1,'cluster':'fixture-cluster','template':{'version':1,'information_classes':['public'],'services':{'logs':{'permissions':['read'],'roles':{'reader':{'permissions':['read'],'information_classes':['public'],'minimum_aal':0}},'users':{},'networks':[{'cidr':'192.0.2.0/24','roles':['reader']}],'require_guard':True}}},'grants':[{'service':'logs','application_role':'reader','native_subject':'native-verified-worker','source_subject':{'kind':'ServiceAccount','name':'worker','namespace':'blue'},'binding':{'kind':'RoleBinding','namespace':'blue','name':'workers','uid':'b1'},'role':{'kind':'Role','namespace':'blue','name':'reader','uid':'r1'},'required_rules':[{'api_group':'','namespace':'blue','resource':'pods/log','verb':'get'}]}]}
+        mapping_file=root/'mapping.json';mapping_file.write_text(json.dumps(mapping));command.extend(['--kubernetes-mapping',str(mapping_file)])
     env = {k:v for k,v in os.environ.items() if not k.startswith('PUMGYE_')}
     # An inherited hostile proxy must not receive API credentials or block this source.
     env['HTTPS_PROXY']='http://127.0.0.1:1';env['ALL_PROXY']='http://127.0.0.1:1'
@@ -93,15 +97,22 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
                 assert process.poll() is None,'collector exited';continue
             assert credential not in line,'credential exposed'
             value=json.loads(line)
+            if 'candidate' in value:
+                value=dict(value['source'],candidate=value['candidate'])
             if predicate(value):return value
         raise AssertionError('collector observation deadline')
     def unavailable():return observation(lambda v:v.get('available') is False)
     def available():return observation(lambda v:'inventory' in v)
     try:
         first=available();assert len(first['inventory']['objects'])==3 and first['inventory']['cluster']=='fixture-cluster' and first['inventory']['mode']=='observe';assert len(first['collection_versions'])==4;assert state['continuations']>=1
+        if args.mapping:
+            assert first['candidate']['mode']=='candidate_only' and first['candidate']['mappings'][0]['active']
+            assert first['candidate']['policy']['services']['logs']['users']=={'native-verified-worker':['reader']}
         same=available();assert same['revision']==first['revision']
         state.update(mode='deleted',revision=2)
         deleted=observation(lambda v:'inventory' in v and not v['inventory']['objects']);assert deleted['revision']>first['revision']
+        if args.mapping:
+            assert deleted['candidate']['policy']['services']['logs']['users']=={} and not deleted['candidate']['mappings'][0]['active']
         for mode in ['changed-version','wrong-namespace','redirect','expired']:
             state['mode']=mode;unavailable()
         assert state['redirect_hits']==0

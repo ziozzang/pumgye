@@ -90,3 +90,50 @@ It verifies pagination, opaque versions, deterministic observations, deletion,
 version/scope/redirect rejection, recovery after HTTP 410, token/CA file changes,
 proxy isolation and no authority DB or credential output. The source protocol
 follows [Kubernetes API pagination](https://kubernetes.io/docs/reference/using-api/api-concepts/#retrieving-large-results-sets-in-chunks).
+
+## Explicit application mapping candidates
+
+A bounded administrator-owned mapping file can be supplied to either inspection
+or live observation with `--kubernetes-mapping`. Try the fictional examples:
+
+```sh
+pumgye --inspect-kubernetes-rbac examples/kubernetes-rbac-list.json \
+  --kubernetes-cluster example-cluster \
+  --kubernetes-mapping examples/kubernetes-mapping.json
+```
+
+A mapping defines a full native policy template with no independent user grants,
+then explicit grants selecting a service/application role, verified native subject
+reference, exact Kubernetes subject and pinned Role/Binding kind, namespace, name
+and UID. A same-name recreated Role/Binding does not satisfy its old pin. All source
+rule requirements must match literal API group/resource (including subresource),
+verb, resource namespace and optional resource name. RoleBindings cannot satisfy
+cluster-wide or foreign-namespace requirements. Wildcards do not implicitly match
+literal requirements, and requirement wildcards, privileged bind/escalate/impersonate
+or serviceaccount token issuance are refused. Group and aggregated-role translation
+require additional verified membership/reconciliation and remain unsupported.
+The configured resource namespace is an explicit administrator constraint; API
+discovery and native authorizer qualification still have to verify resource scope.
+
+The source cluster must match exactly. Missing/recreated objects, changed roleRef,
+removed subjects/rules and restricted resource-name mismatches produce an inactive
+mapping and remove its candidate user assignment. Every refresh rebuilds from the
+empty-user template; it never retains yesterday's source-derived grants. The native
+candidate is recompiled and still enforces network rights and required Sumunjang
+evidence. Multiple explicit matches union only their declared application roles.
+The complete mapping is at most 64 KiB, 256 grants and 16 required rules per grant.
+
+Output adds `candidate.mode=candidate_only`, the exact mapping-file SHA-256, candidate
+policy and per-mapping active/reason fields. Live output wraps the observation under
+`source`; candidate computation/serialization is followed by a final source freshness
+check. The mapping file is loaded once; changing it requires a new observation
+process and new reviewed mapping digest. No policy DB, API grant or authority
+revision is updated. Do not POST this diagnostic candidate as an automatic production
+grant: it lacks durable source-authority publication and globally reconciled source
+fences. `native_subject` is an operator-provisioned association, not proof that a
+Kubernetes subject authenticated; Hopae still must verify the actual request and
+its cluster/issuer/audience/bound-object identity. These examples contain fictional
+identities and UIDs and must not be used as operational assignments.
+
+The owned HTTPS fixture also supports `--mapping`; it checks mapped candidates and
+withdrawal after source deletion alongside failure recovery and credential rotation.

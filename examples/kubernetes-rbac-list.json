@@ -1,0 +1,54 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "namespace": "example",
+        "name": "reader",
+        "uid": "example-role",
+        "resourceVersion": "opaque:1"
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods/log"
+          ],
+          "verbs": [
+            "get"
+          ],
+          "resourceNames": [
+            "worker"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "namespace": "example",
+        "name": "workers",
+        "uid": "example-binding",
+        "resourceVersion": "opaque:2"
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "reader"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "worker",
+          "namespace": "example"
+        }
+      ]
+    }
+  ]
+}
