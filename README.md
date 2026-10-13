@@ -55,3 +55,5 @@ packages does not establish completion of the full zero-trust stack.
 
 Qualify the earlier owned gateway baseline with
 `python3 tools/hangang_smoke.py --gateway-binary /path/to/hangang`.
+
+[Native transport measurements](docs/PERFORMANCE.md) record three 10-second mTLS trials and their exact scope/limitations.

@@ -1,0 +1,69 @@
+{
+  "source_commit": "25a50474fb1a87d5027c71072bf6929f1f947998",
+  "date": "2026-10-13",
+  "hardware": {
+    "cpu": "AMD Ryzen 7 8745HS",
+    "cores": 8,
+    "logical_cpus": 16
+  },
+  "fixture": {
+    "network": "same-host loopback with remote-capable 0.0.0.0 listeners",
+    "transport": "PPG1/mTLS",
+    "services": 1,
+    "roles": 1,
+    "users": 1,
+    "network_prefixes": 1,
+    "permissions": 1,
+    "classes": 2,
+    "decision": "all enforced-allow synthetic evidence",
+    "batch": 64,
+    "concurrency": 16,
+    "minimum_seconds_per_trial": 10
+  },
+  "binary_sha256": {
+    "server": "519287b26fb5363f35bc1e03be243e28ae8f507e5f7fb415bfde37ce5f8749ac",
+    "client": "cbaf00322685cbec7704911c5ca0df8639cc5e244584298f3f8e67feec1068c9"
+  },
+  "trials": [
+    {
+      "batch": 64,
+      "batch_p50_us": 228,
+      "batch_p99_us": 382,
+      "concurrency": 16,
+      "elapsed_seconds": 10.002522442,
+      "minimum_duration_seconds": 10,
+      "qps": 4330542.845684324,
+      "requests": 43316352,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 1
+    },
+    {
+      "batch": 64,
+      "batch_p50_us": 222,
+      "batch_p99_us": 359,
+      "concurrency": 16,
+      "elapsed_seconds": 10.002172463,
+      "minimum_duration_seconds": 10,
+      "qps": 4491177.908216798,
+      "requests": 44921536,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 2
+    },
+    {
+      "batch": 64,
+      "batch_p50_us": 239,
+      "batch_p99_us": 367,
+      "concurrency": 16,
+      "elapsed_seconds": 10.002557816,
+      "minimum_duration_seconds": 10,
+      "qps": 4187997.5872763307,
+      "requests": 41890688,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 3
+    }
+  ],
+  "scope": "Native Pumgye transport only; not full-stack HTTP, realistic-cardinality fleet, physical network or external authentication throughput."
+}

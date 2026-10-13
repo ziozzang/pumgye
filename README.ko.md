@@ -47,3 +47,5 @@ Hangang/호패/수문장 HTTP 처리량이나 복제본 검증을 의미하지 �
 
 이전 게이트웨이 기준 구현 검증은
 `python3 tools/hangang_smoke.py --gateway-binary /path/to/hangang`으로 수행합니다.
+
+[네이티브 측정](docs/PERFORMANCE.ko.md)에 mTLS 10초 측정 3회의 범위·제약을 기록했습니다.
