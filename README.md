@@ -57,3 +57,5 @@ Qualify the earlier owned gateway baseline with
 `python3 tools/hangang_smoke.py --gateway-binary /path/to/hangang`.
 
 [Native transport measurements](docs/PERFORMANCE.md) record three 10-second mTLS trials and their exact scope/limitations.
+
+[Kubernetes source adapter](docs/KUBERNETES.md): bounded read-only RBAC inspection is implemented; live watch and authoritative publication remain pending.

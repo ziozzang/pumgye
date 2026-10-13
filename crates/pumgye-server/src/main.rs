@@ -1,4 +1,5 @@
 //! Standalone Pumgye control/decision authority.
+mod kubernetes;
 mod store;
 mod transport;
 use arc_swap::ArcSwap;
@@ -23,6 +24,11 @@ use std::{
 #[derive(Parser)]
 #[command(name = "pumgye", version)]
 struct Args {
+    /// Inspect a bounded complete RBAC List without opening the database or listeners.
+    #[arg(long, requires = "kubernetes_cluster")]
+    inspect_kubernetes_rbac: Option<PathBuf>,
+    #[arg(long, requires = "inspect_kubernetes_rbac")]
+    kubernetes_cluster: Option<String>,
     #[arg(long, default_value = "127.0.0.1:9084")]
     listen: SocketAddr,
     /// Persistent PPG1 decision endpoint (mTLS mandatory outside loopback).
@@ -320,6 +326,16 @@ async fn decide(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(path) = &args.inspect_kubernetes_rbac {
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take((kubernetes::MAX_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        let inventory = kubernetes::inspect(args.kubernetes_cluster.as_deref().unwrap(), &bytes)?;
+        println!("{}", serde_json::to_string_pretty(&inventory)?);
+        return Ok(());
+    }
     anyhow::ensure!(
         args.tls_cert.is_some()
             || (args.listen.ip().is_loopback()

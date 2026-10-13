@@ -49,3 +49,5 @@ Hangang/호패/수문장 HTTP 처리량이나 복제본 검증을 의미하지 �
 `python3 tools/hangang_smoke.py --gateway-binary /path/to/hangang`으로 수행합니다.
 
 [네이티브 측정](docs/PERFORMANCE.ko.md)에 mTLS 10초 측정 3회의 범위·제약을 기록했습니다.
+
+[Kubernetes 원천 연결기](docs/KUBERNETES.ko.md): 제한된 읽기 전용 RBAC 검사는 구현했고, 실시간 watch·원천 게시 연계는 구현 예정입니다.
