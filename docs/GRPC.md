@@ -60,6 +60,9 @@ Resource RPC and HTTP use the same native immutable owner evaluation/freshness
 fence. The bounded reply contains correlation, owner revision, Allow/Deny/
 Unavailable, reason and zero TTL. Handler tests cover native classification,
 assurance denial, role/capacity isolation, missing IP and stale/observe refusal.
-Workspace tests (34) and strict Clippy pass. The new resource RPC has not yet
-been qualified over actual mTLS sockets or used by Hangang dispatch/UI; this
-unsigned result is not a signed permit or verified authentication receipt.
+Workspace tests (35) and strict Clippy pass. An owned actual mTLS socket test
+checks Allow, administrator-credential refusal, missing-client-certificate refusal
+and catalog assurance/revision changes on the same channel. Those changes are
+in-memory publications; database durability is covered separately by the HTTP
+catalog smoke test. Hangang dispatch/UI adoption remains open; this unsigned
+result is not a signed permit or verified authentication receipt.

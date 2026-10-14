@@ -200,6 +200,200 @@ pub async fn serve(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn actual_resource_mtls_channel_tracks_catalog_changes_and_refuses_missing_certificate() {
+        use pumgye_grpc::v1::{
+            ResourceDecisionRequest, resource_authorization_client::ResourceAuthorizationClient,
+        };
+        use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
+        let root = tempfile::tempdir().unwrap();
+        let openssl = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("openssl")
+                    .args(args)
+                    .current_dir(root.path())
+                    .output()
+                    .unwrap()
+                    .status
+                    .success()
+            )
+        };
+        openssl(&[
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=owned-ca",
+            "-keyout",
+            "ca.key",
+            "-out",
+            "ca.pem",
+            "-addext",
+            "basicConstraints=critical,CA:TRUE",
+        ]);
+        for (name, usage) in [("server", "serverAuth"), ("client", "clientAuth")] {
+            let key = format!("{name}.key");
+            let csr = format!("{name}.csr");
+            let cert = format!("{name}.pem");
+            let ext = format!("{name}.ext");
+            openssl(&[
+                "req",
+                "-new",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-subj",
+                "/CN=owned",
+                "-keyout",
+                &key,
+                "-out",
+                &csr,
+            ]);
+            std::fs::write(root.path().join(&ext),format!("basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage={usage}\nsubjectAltName=DNS:pumgye.example.test\n")).unwrap();
+            openssl(&[
+                "x509",
+                "-req",
+                "-in",
+                &csr,
+                "-CA",
+                "ca.pem",
+                "-CAkey",
+                "ca.key",
+                "-CAcreateserial",
+                "-days",
+                "1",
+                "-extfile",
+                &ext,
+                "-out",
+                &cert,
+            ]);
+        }
+        let owner = crate::tests::authority(root.path());
+        let document: crate::Document =
+            serde_json::from_str(include_str!("../../../examples/resource-catalog.json")).unwrap();
+        owner.view.store(Arc::new(crate::View {
+            compiled: document.policy.compile().unwrap(),
+            document: crate::Document {
+                revision: 1,
+                ..document
+            },
+            source_expires: None,
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let tls = configuration(
+            &root.path().join("server.pem"),
+            &root.path().join("server.key"),
+            &root.path().join("ca.pem"),
+        )
+        .unwrap();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn(serve(listener, tls, owner.clone(), async {
+            let _ = stopped.await;
+        }));
+        let endpoint = Endpoint::from_shared(format!("https://{address}"))
+            .unwrap()
+            .connect_timeout(std::time::Duration::from_secs(2))
+            .timeout(std::time::Duration::from_secs(2));
+        let ca = Certificate::from_pem(std::fs::read(root.path().join("ca.pem")).unwrap());
+        let tls = ClientTlsConfig::new()
+            .domain_name("pumgye.example.test")
+            .ca_certificate(ca.clone())
+            .identity(Identity::from_pem(
+                std::fs::read(root.path().join("client.pem")).unwrap(),
+                std::fs::read(root.path().join("client.key")).unwrap(),
+            ));
+        let channel = endpoint
+            .clone()
+            .tls_config(tls)
+            .unwrap()
+            .connect()
+            .await
+            .unwrap();
+        let mut client = ResourceAuthorizationClient::new(channel);
+        let request = |token: &str| {
+            let mut request = Request::new(ResourceDecisionRequest {
+                request_id: 42,
+                minimum_revision: 1,
+                ip: vec![192, 0, 2, 9],
+                aal: 2,
+                guard: 1,
+                resource: "db:orders".into(),
+                action: "select".into(),
+                subject: "fixture".into(),
+            });
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            request
+        };
+        assert_eq!(
+            client
+                .decide(request(&owner.admin))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        let reply = client
+            .decide(request(&owner.decision))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(reply.verdict, 1);
+        assert_eq!(reply.request_id, 42);
+        assert_eq!(reply.cache_ttl_ms, 0);
+        let mut document = owner.view.load().document.clone();
+        document.revision = 2;
+        document
+            .policy
+            .resources
+            .get_mut("db:orders")
+            .unwrap()
+            .minimum_aal = 3;
+        owner.view.store(Arc::new(crate::View {
+            compiled: document.policy.compile().unwrap(),
+            document,
+            source_expires: None,
+        }));
+        let reply = client
+            .decide(request(&owner.decision))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(reply.revision, 2);
+        assert_eq!(reply.verdict, 2);
+        assert_eq!(reply.reason, "AssuranceDenied");
+        let mut stronger = request(&owner.decision);
+        stronger.get_mut().aal = 3;
+        assert_eq!(
+            client.decide(stronger).await.unwrap().into_inner().verdict,
+            1
+        );
+        let tls = ClientTlsConfig::new()
+            .domain_name("pumgye.example.test")
+            .ca_certificate(ca);
+        if let Ok(channel) = endpoint.tls_config(tls).unwrap().connect().await {
+            assert!(
+                ResourceAuthorizationClient::new(channel)
+                    .decide(request(&owner.decision))
+                    .await
+                    .is_err()
+            );
+        }
+        stop.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn resource_rpc_owns_class_and_shares_role_capacity_and_revision_fences() {
         use pumgye_grpc::v1::{
             ResourceDecisionRequest, resource_authorization_server::ResourceAuthorization,
