@@ -211,6 +211,13 @@ async fn main() -> Result<()> {
                 observation.valid_for(&checked, now()),
                 "observation expired"
             );
+            let mut policy = serde_json::json!({"version":1,"information_classes":["internal"],"services":{"orders":{"permissions":["read"],"require_guard":false,"roles":{"reader":{"permissions":["read"],"information_classes":["internal"],"minimum_aal":0}},"users":{},"networks":[{"cidr":"203.0.113.0/24","roles":["reader"]}]}},"resources":{"db:orders":{"service":"orders","information_class":"internal","actions":{"select":"read"},"minimum_aal":0}}});
+            policy["services"]["orders"]["users"][checked.subject()] = serde_json::json!(["reader"]);
+            let compiled = std::sync::Arc::new(serde_json::from_value::<pumgye_core::Policy>(policy)?.compile()?);
+            let owner = arc_swap::ArcSwap::from(compiled.clone());
+            let resource_request = pumgye_server::authorization::ResourceRequest { resource: "db:orders", action: "select", ip: "203.0.113.9".parse()?, guard: pumgye_core::GuardEvidence::Unavailable, network_expires_ms: checked.expires_ms() };
+            let native_class = pumgye_server::authorization::authorize_live_resource_then(&compiled, &resource_request, &checked, &observation, now, || std::sync::Arc::ptr_eq(&owner.load_full(), &compiled), |resource| resource.information_class.clone()).map_err(|_| anyhow!("native resource refused"))?;
+            ensure!(native_class == "internal", "owner classification changed");
             let revision = checked.revision();
             prior = Some(reply);
             Ok::<_, anyhow::Error>(revision)

@@ -70,6 +70,41 @@ pub fn authorize_resource_then<T>(
     Ok(output)
 }
 
+/// Require a native Hopae live observation in addition to checked identity.
+/// `current` must still fence policy, key, network, route and projection owners.
+/// The observation is point-in-time; it cannot provide a distributed lease.
+pub fn authorize_live_resource_then<T>(
+    policy: &CompiledPolicy,
+    request: &ResourceRequest<'_>,
+    authentication: &CheckedService<'_>,
+    observation: &crate::authentication_live::Observation,
+    clock: impl Fn() -> u64,
+    current: impl Fn() -> bool,
+    operation: impl FnOnce(&Resource) -> T,
+) -> Result<T, Refused> {
+    let last = std::cell::Cell::new(0);
+    let reversed = std::cell::Cell::new(false);
+    let observed = || {
+        let now = clock();
+        if now < last.get() {
+            reversed.set(true);
+        }
+        last.set(now);
+        now
+    };
+    authorize_resource_then(
+        policy,
+        request,
+        authentication,
+        observed,
+        || {
+            let now = observed();
+            !reversed.get() && observation.valid_for(authentication, now) && current()
+        },
+        operation,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

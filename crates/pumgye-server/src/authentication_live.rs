@@ -259,6 +259,61 @@ mod tests {
         };
         assert!(observation.valid_for(&checked, 1003));
         assert!(!observation.valid_for(&other, 1003));
+        let policy = serde_json::from_value::<pumgye_core::Policy>(
+            serde_json::json!({"version":1,"information_classes":["public"],"services":{}}),
+        )
+        .unwrap()
+        .compile()
+        .unwrap();
+        let request = crate::authorization::ResourceRequest {
+            resource: "absent",
+            action: "read",
+            ip: "192.0.2.1".parse().unwrap(),
+            guard: pumgye_core::GuardEvidence::Unavailable,
+            network_expires_ms: 1800,
+        };
+        assert!(matches!(
+            crate::authorization::authorize_live_resource_then(
+                &policy,
+                &request,
+                &other,
+                &observation,
+                || 1003,
+                || true,
+                |_| panic!("mismatched receipt must never reach operation")
+            ),
+            Err(crate::authorization::Refused::Unavailable)
+        ));
+        assert!(matches!(
+            crate::authorization::authorize_live_resource_then(
+                &policy,
+                &request,
+                &checked,
+                &observation,
+                || 1003,
+                || false,
+                |_| panic!("retired native owners must never reach operation")
+            ),
+            Err(crate::authorization::Refused::Unavailable)
+        ));
+        let reads = std::cell::Cell::new(0);
+        let rollback = || {
+            let read = reads.get();
+            reads.set(read + 1);
+            if read == 0 { 1100 } else { 1099 }
+        };
+        assert!(matches!(
+            crate::authorization::authorize_live_resource_then(
+                &policy,
+                &request,
+                &checked,
+                &observation,
+                rollback,
+                || true,
+                |_| panic!("guard-time rollback must refuse")
+            ),
+            Err(crate::authorization::Refused::Unavailable)
+        ));
         assert!(!observation.valid_for(&checked, 1001));
         assert!(!observation.valid_for(&checked, 1800));
         let delayed = Observation {

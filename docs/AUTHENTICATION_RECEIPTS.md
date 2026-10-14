@@ -203,3 +203,20 @@ This run used current debug executables, ephemeral TLS/signing keys and syntheti
 profiles only. No operating credentials, data or listeners were used. Strict
 workspace/all-target Clippy passed. Static release, actual Pumgye server permit
 endpoint, distributed freshness/restore and Kubernetes live-client gates remain.
+
+## Live observation plus native resource Allow (unreleased)
+
+`authorization::authorize_live_resource_then` requires an opaque native live
+observation bound to the exact checked receipt, in addition to the immutable policy
+and mandatory current-owner fence. Every admission/final boundary checks the
+observation; all internal clock reads share rollback detection. Wrong-receipt
+observations, expired evidence or retired owners never reach the private callback.
+The actual Hopae/Pumgye fixture now evaluates a synthetic native resource catalog
+with the observed identity and returns only the owner-defined class after Allow.
+
+That fixture uses an explicitly guard-optional synthetic policy and one immutable
+local policy owner. It does not qualify Sumunjang evidence or distributed route/
+projection ownership. The Pumgye server currently has no native readers for those
+three revision owners. Permit activation must connect these owners; request-supplied
+revision numbers or an unconditional current callback must not substitute for them.
+No permit endpoint or operating deployment was enabled by this increment.
