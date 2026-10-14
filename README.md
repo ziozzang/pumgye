@@ -99,3 +99,11 @@ Internal adoption passed an isolated policy DB clone, exact durable policy
 preservation, live mTLS management/native refusal, signed binary digest checks
 and a second service restart. Private rollback backups are retained. Kubernetes
 rollout of this version and in-flight gRPC completion remain unqualified.
+
+Subsequent remote Kubernetes qualification of v0.1.1 passed the maintained
+four-component functional fixture and real administrator browser flow, including
+authority Pod replacement, immediate/durable permission and authentication
+revocation, stale administrator CAS refusal, backend non-dispatch on denial,
+and network-authority outage refusal. The exact owned namespace was removed.
+This qualifies the tested gRPC deployment; it does not qualify all Kubernetes
+transports, in-flight gRPC shutdown, authorization webhooks or fleet replication.
