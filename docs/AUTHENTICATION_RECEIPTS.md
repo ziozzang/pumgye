@@ -393,3 +393,19 @@ constructs its reply directly, without intermediate JSON objects or field
 reinterpretation; HTTP serializes the same outcome with unchanged response
 fields. All 64 workspace tests, strict Clippy and the actual three-authority
 HTTP regression passed after this hot-path refinement.
+
+## Actual persistent gRPC three-authority qualification (unreleased)
+
+`tools/authenticated_resource_smoke.py --grpc-decisions --live-validation`
+starts actual Hopae, Sumunjang and Pumgye debug executables. Pumgye management
+and its authenticated decision listener require mTLS; the owned qualification
+client retains one decision channel and uses the canonical typed Hopae context.
+Allow, network block/removal, identity withdrawal/restoration, cached unexpired
+receipt refusal directly at Pumgye, authority outage refusal and seven trust
+refusals passed. HTTP mode passed again with the same example and server.
+Strict all-target Clippy passed. There is no gRPC-to-HTTP acceptance fallback.
+
+This qualifies the real gRPC positive/lifecycle path previously left open. It
+does not qualify static newly released gRPC assets, Kubernetes gRPC admission,
+Hangang client/dispatch or signed permit/projection. Operating releases remain
+unchanged by this source/fixture increment.

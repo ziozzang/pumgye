@@ -2,7 +2,7 @@
 """Owned actual Hopae/Sumunjang/Pumgye authenticated endpoint fixture; no operating data."""
 import argparse, base64, copy, hashlib, hmac, http.client, json, os
 from pathlib import Path
-import secrets, selectors, socket, subprocess, tempfile, time
+import secrets, selectors, socket, ssl, subprocess, tempfile, time
 
 
 def main():
@@ -12,6 +12,7 @@ def main():
     parser.add_argument('--live-validation', action='store_true', help='client supports cached receipt revocation and outage checks')
     parser.add_argument('--pumgye', required=True, type=Path)
     parser.add_argument('--sumunjang', required=True, type=Path)
+    parser.add_argument('--grpc-decisions', action='store_true')
     args = parser.parse_args()
     os.umask(0o077)
     def port():
@@ -24,7 +25,7 @@ def main():
         openssl('req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=owned-ca','-keyout',root/'ca.key','-out',root/'ca.pem','-addext','basicConstraints=critical,CA:TRUE')
         for name, usage in [('server','serverAuth'),('client','clientAuth')]:
             openssl('req','-new','-newkey','rsa:2048','-nodes','-subj','/CN=owned','-keyout',root/(name+'.key'),'-out',root/(name+'.csr'))
-            extension=root/(name+'.ext');extension.write_text('basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage='+usage+'\nsubjectAltName=DNS:hopae.example.test\n')
+            extension=root/(name+'.ext');extension.write_text('basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage='+usage+'\nsubjectAltName=DNS:hopae.example.test,IP:127.0.0.1\n')
             openssl('x509','-req','-in',root/(name+'.csr'),'-CA',root/'ca.pem','-CAkey',root/'ca.key','-CAcreateserial','-days','1','-extfile',extension,'-out',root/(name+'.pem'))
         openssl('genpkey','-algorithm','ED25519','-out',root/'issuer.pem')
         seed=openssl('pkey','-in',root/'issuer.pem','-outform','DER')
@@ -32,7 +33,7 @@ def main():
         assert len(seed)==48 and len(public)==44
         env=dict(os.environ,OWNED_RECEIPT_SEED=base64.b64encode(seed[-32:]).decode(),OWNED_RECEIPT_CALLER=secrets.token_hex(24),OWNED_RECEIPT_CREDENTIAL=secrets.token_hex(24),OWNED_RECEIPT_DELEGATION=secrets.token_hex(24))
         portal,gateway,grpc,admin=[port() for _ in range(4)]
-        guard_http,guard_native,guard_grpc,pum_http=[port() for _ in range(4)]
+        guard_http,guard_native,guard_grpc,pum_http,pum_grpc=[port() for _ in range(5)]
         env.update(HANGANG_GUARD_ADMIN_TOKEN=secrets.token_hex(24),HANGANG_GUARD_COLLECTOR_TOKEN=secrets.token_hex(24),PUMGYE_ADMIN_TOKEN=secrets.token_hex(24),PUMGYE_DECISION_TOKEN=secrets.token_hex(24))
         profile={'authority_id':'owned','profiles':[{'service_id':'orders','host':'orders.example.test','ports':[443],'realm':'owned','api_keys':[{'token_env':'OWNED_RECEIPT_CREDENTIAL','subject':'worker'}],'networks':['203.0.113.0/24']}]}
         pin=base64.b64encode(public[-32:]).decode()
@@ -40,6 +41,7 @@ def main():
         server_config=root/'server.json';server_config.write_text(json.dumps(config))
         client_config={'settings':{'transport':'grpc','address':f'localhost:{grpc}','tls':{'server_name':'hopae.example.test','ca':str(root/'ca.pem'),'certificate':str(root/'client.pem'),'key':str(root/'client.key')}},'issuer_ref':'owned','key_epoch':1,'public_key':pin,'service':'orders','audience':'orders-api','method':'GET','target':'/private','body':'','headers':[['x-hopae-contract','1'],['x-forwarded-host','orders.example.test'],['x-forwarded-proto','https'],['x-forwarded-port','443'],['x-forwarded-for','203.0.113.9'],['x-original-method','GET'],['x-original-url','https://orders.example.test/private']]}
         client_config['pumgye_endpoint']=f'http://127.0.0.1:{pum_http}/v1/resource/authenticated-decision'
+        if args.grpc_decisions:client_config['pumgye_grpc_address']=f'https://localhost:{pum_grpc}'
         client_path=root/'client.json';client_path.write_text(json.dumps(client_config))
         def publish(revision, configuration):
             path='/v1/authentication/profiles/publish';body=json.dumps({'revision':revision,'configuration':configuration},separators=(',',':')).encode()
@@ -92,10 +94,12 @@ def main():
                     raw=field.encode();subject_hash.update(struct.pack('!Q',len(raw)));subject_hash.update(raw)
                 subject='s_'+subject_hash.hexdigest()[:48]
                 policy=write('policy.json',{'revision':1,'policy':{'version':1,'information_classes':['internal'],'services':{'orders':{'permissions':['read'],'require_guard':True,'roles':{'reader':{'permissions':['read'],'information_classes':['internal'],'minimum_aal':0}},'users':{subject:['reader']},'networks':[{'cidr':'203.0.113.0/24','roles':['reader']}]}},'resources':{'db:orders':{'service':'orders','information_class':'internal','actions':{'select':'read'},'minimum_aal':0}}}})
-                pum_process=subprocess.Popen([str(args.pumgye.resolve()),'--listen',f'127.0.0.1:{pum_http}','--database',str(root/'pum.sqlite3'),'--policy',policy,'--authentication-trust',trust,'--authentication-live',auth_live,'--network-live',network_live],env=env,stdout=server_log,stderr=server_log);processes.append(pum_process)
+                grpc_arguments=['--grpc-listen',f'127.0.0.1:{pum_grpc}','--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--client-ca',str(root/'ca.pem')] if args.grpc_decisions else []
+                pum_tls=ssl.create_default_context(cafile=str(root/'ca.pem'));pum_tls.load_cert_chain(str(root/'client.pem'),str(root/'client.key'))
+                pum_process=subprocess.Popen([str(args.pumgye.resolve()),'--listen',f'127.0.0.1:{pum_http}','--database',str(root/'pum.sqlite3'),'--policy',policy,'--authentication-trust',trust,'--authentication-live',auth_live,'--network-live',network_live]+grpc_arguments,env=env,stdout=server_log,stderr=server_log);processes.append(pum_process)
                 for _ in range(100):
                     assert pum_process.poll() is None,'owned Pumgye startup refused'
-                    connection=http.client.HTTPConnection('127.0.0.1',pum_http,timeout=.5)
+                    connection=http.client.HTTPSConnection('127.0.0.1',pum_http,context=pum_tls,timeout=.5) if args.grpc_decisions else http.client.HTTPConnection('127.0.0.1',pum_http,timeout=.5)
                     try:
                         connection.request('GET','/v1/status',headers={'Authorization':'Bearer '+env['PUMGYE_ADMIN_TOKEN']});response=connection.getresponse();response.read()
                         if response.status==200:break

@@ -36,6 +36,7 @@ fn default_ip() -> String {
 #[derive(Deserialize)]
 struct Config {
     pumgye_endpoint: Option<String>,
+    pumgye_grpc_address: Option<String>,
     #[serde(default = "default_epoch")]
     identity_epoch: String,
     #[serde(default = "default_ip")]
@@ -87,7 +88,58 @@ async fn endpoint(
     config: &Config,
     checked: &pumgye_server::authentication::CheckedService<'_>,
     receipt: &[u8],
+    rpc: &mut Option<pumgye_grpc::v1::authenticated_resource_authorization_client::AuthenticatedResourceAuthorizationClient<tonic::transport::Channel>>,
 ) -> Result<bool> {
+    if let Some(client) = rpc {
+        let c = checked.context();
+        let ip: std::net::IpAddr = config.qualification_ip.parse()?;
+        let packed = match ip {
+            std::net::IpAddr::V4(ip) => ip.octets().to_vec(),
+            std::net::IpAddr::V6(ip) => ip.octets().to_vec(),
+        };
+        let mut request = tonic::Request::new(pumgye_grpc::v1::AuthenticatedResourceRequest {
+            request_id: 1,
+            minimum_revision: 1,
+            ip: packed,
+            resource: "db:orders".into(),
+            action: "select".into(),
+            context: Some(v1::AuthenticationReceiptContext {
+                issuer_ref: c.issuer_ref.into(),
+                key_epoch: c.key_epoch,
+                identity_authority_epoch: c.identity_authority_epoch.into(),
+                identity: Some(v1::ReceiptIdentity {
+                    subject_ref: c.identity.subject_ref.into(),
+                    kind: 2,
+                    aal: 0,
+                    revision: c.identity.revision,
+                    credential_generation: c.identity.credential_generation,
+                }),
+                service: c.service.into(),
+                audience: c.audience.into(),
+                request_sha256: c.request_sha256.to_vec(),
+            }),
+            receipt: receipt.to_vec(),
+            request_sha256: c.request_sha256.to_vec(),
+        });
+        request.metadata_mut().insert(
+            "authorization",
+            format!("Bearer {}", std::env::var("PUMGYE_DECISION_TOKEN")?).parse()?,
+        );
+        request.set_timeout(std::time::Duration::from_secs(1));
+        let reply = match client.decide(request).await {
+            Ok(reply) => reply.into_inner(),
+            Err(_) => return Ok(false),
+        };
+        ensure!(
+            reply.request_id == 1
+                && reply.revision >= 1
+                && reply.network_revision >= 1
+                && reply.cache_ttl_ms == 0
+                && matches!(reply.verdict, 1 | 2),
+            "invalid native gRPC reply"
+        );
+        return Ok(reply.verdict == 1);
+    }
     let endpoint = config
         .pumgye_endpoint
         .as_ref()
@@ -181,7 +233,13 @@ async fn main() -> Result<()> {
             body_sha256: &body,
         })
         .map_err(|_| anyhow!("binding refused"))?;
-        Ok::<_, anyhow::Error>((live, issuer, trust, digest, token))
+        let rpc = if let Some(address) = &config.pumgye_grpc_address {
+            ensure!(address.starts_with("https://localhost:") || address.starts_with("https://127.0.0.1:"), "owned gRPC address required");
+            let tls = ClientTlsConfig::new().domain_name(&config.settings.tls.server_name).ca_certificate(Certificate::from_pem(std::fs::read(&config.settings.tls.ca)?)).identity(Identity::from_pem(std::fs::read(&config.settings.tls.certificate)?,std::fs::read(&config.settings.tls.key)?));
+            let channel = Endpoint::from_shared(address.clone())?.timeout(std::time::Duration::from_secs(1)).connect_timeout(std::time::Duration::from_secs(1)).tls_config(tls)?.connect().await?;
+            Some(pumgye_grpc::v1::authenticated_resource_authorization_client::AuthenticatedResourceAuthorizationClient::new(channel).max_encoding_message_size(4096).max_decoding_message_size(128))
+        } else { None };
+        Ok::<_, anyhow::Error>((live, issuer, trust, digest, token, rpc))
     }
     .await;
     let mut setup = setup.ok();
@@ -196,7 +254,7 @@ async fn main() -> Result<()> {
             "unknown command"
         );
         if command == "outage" {
-            let (live, _, trust, digest, _) = setup
+            let (live, _, trust, digest, _, rpc) = setup
                 .as_mut()
                 .ok_or_else(|| anyhow!("outage resources unavailable"))?;
             let old = prior
@@ -210,9 +268,9 @@ async fn main() -> Result<()> {
                 live.validate(&checked, &old.receipt, &now).await.is_err(),
                 "outage validation accepted"
             );
-            if config.pumgye_endpoint.is_some() {
+            if config.pumgye_endpoint.is_some() || config.pumgye_grpc_address.is_some() {
                 ensure!(
-                    !endpoint(&config, &checked, &old.receipt).await?,
+                    !endpoint(&config, &checked, &old.receipt, rpc).await?,
                     "endpoint accepted authority outage"
                 );
             }
@@ -221,7 +279,7 @@ async fn main() -> Result<()> {
             continue;
         }
         let result = async {
-            let (live, issuer, trust, digest, token) =
+            let (live, issuer, trust, digest, token, rpc) =
                 setup.as_mut().ok_or_else(|| anyhow!("resources refused"))?;
             if command == "deny"
                 && let Some(old) = &prior
@@ -234,7 +292,7 @@ async fn main() -> Result<()> {
                     live.validate(&checked, &old.receipt, &now).await.is_err(),
                     "retired proof accepted"
                 );
-                if config.pumgye_endpoint.is_some() { assert!(!endpoint(&config, &checked, &old.receipt).await?, "endpoint accepted retired proof"); }
+                if config.pumgye_endpoint.is_some() || config.pumgye_grpc_address.is_some() { assert!(!endpoint(&config, &checked, &old.receipt, rpc).await?, "endpoint accepted retired proof"); }
             }
             let mut headers: Vec<_> = config
                 .headers
@@ -281,7 +339,7 @@ async fn main() -> Result<()> {
             let resource_request = pumgye_server::authorization::ResourceRequest { resource: "db:orders", action: "select", ip: config.qualification_ip.parse()?, guard: pumgye_core::GuardEvidence::Unavailable, network_expires_ms: checked.expires_ms() };
             let native_class = pumgye_server::authorization::authorize_live_resource_then(&compiled, &resource_request, &checked, &observation, now, || std::sync::Arc::ptr_eq(&owner.load_full(), &compiled), |resource| resource.information_class.clone()).map_err(|_| anyhow!("native resource refused"))?;
             ensure!(native_class == "internal", "owner classification changed");
-            if config.pumgye_endpoint.is_some() { ensure!(endpoint(&config, &checked, &reply.receipt).await?, "native endpoint refused Allow"); }
+            if config.pumgye_endpoint.is_some() || config.pumgye_grpc_address.is_some() { ensure!(endpoint(&config, &checked, &reply.receipt, rpc).await?, "native endpoint refused Allow"); }
             let revision = checked.revision();
             prior = Some(reply);
             Ok::<_, anyhow::Error>(revision)
