@@ -197,7 +197,7 @@ preservation, live management/native mTLS denial and a second durable restart.
 The catalog is available without automatically enabling new gateway resource gates;
 full provider/fleet/projection and automatic-update work remains open.
 
-## v0.1.4 release candidate
+## v0.1.4 publication and internal adoption
 
 This candidate adds server-owned service receipt verification and signed permit
 candidates, reference-only signing/trust configuration, durable key retirement
@@ -205,5 +205,12 @@ and scope revision floors, and explicit owner-lock release after SQLite closes.
 Receipt/permit RPC activation and live distributed owner checks remain open;
 loading these resources alone does not grant access. Existing resource decision
 APIs and independent static server deployment remain supported. See
-[receipt boundaries](docs/AUTHENTICATION_RECEIPTS.md). Candidate qualification,
-signed publication and internal rollout are recorded separately after completion.
+[receipt boundaries](docs/AUTHENTICATION_RECEIPTS.md). [v0.1.4](https://github.com/ziozzang/pumgye/releases/tag/v0.1.4) is published at
+`89e5987cfee934f2fb6b9f007064bc6525999715`. All 55 workspace tests, strict
+all-target Clippy and five release-boundary tests passed. Exact static artifacts
+passed actual HTTP/PPG1/gRPC mTLS, role isolation, revocation/restart and catalog
+CAS qualification. Downloaded assets matched original hashes and pinned Ed25519
+signature. Internal deployment passed private operating-DB clone preflight,
+exact policy preservation and two restarts; the unified console still returns 200.
+Private consistent backup and binary rollback material are retained. This version
+has not yet been qualified in the remote K3s world fixture.
