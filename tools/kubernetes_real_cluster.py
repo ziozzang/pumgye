@@ -3,7 +3,8 @@
 import argparse,base64,json,os,queue,secrets,signal,subprocess,threading,time,socket,ssl,struct,urllib.request,urllib.error
 from pathlib import Path
 import yaml
-p=argparse.ArgumentParser();p.add_argument('--authority',action='store_true');p.add_argument('--hopae-driver',type=Path);p.add_argument('--gateway-binary',type=Path);p.add_argument('--hopae-binary',type=Path);p.add_argument('--sumunjang-binary',type=Path);p.add_argument('--binary',required=True,type=Path);p.add_argument('--state-dir',required=True,type=Path);a=p.parse_args();os.umask(0o077)
+p=argparse.ArgumentParser();p.add_argument('--authority',action='store_true');p.add_argument('--qualify-renewal',action='store_true');p.add_argument('--hopae-driver',type=Path);p.add_argument('--gateway-binary',type=Path);p.add_argument('--hopae-binary',type=Path);p.add_argument('--sumunjang-binary',type=Path);p.add_argument('--binary',required=True,type=Path);p.add_argument('--state-dir',required=True,type=Path);a=p.parse_args();os.umask(0o077)
+if a.qualify_renewal:assert a.gateway_binary,'renewal qualification requires all four native components'
 if a.gateway_binary:
  assert a.authority and a.hopae_driver and a.hopae_binary and a.sumunjang_binary,'all four native components and workload driver are required'
  help_text=subprocess.run([str(a.gateway_binary.resolve()),'--help'],capture_output=True,text=True,check=True).stdout
@@ -11,7 +12,7 @@ if a.gateway_binary:
 state=a.state_dir.resolve();configuration=yaml.safe_load((state/'kubeconfig').read_text());assert configuration['current-context']=='kind-zerotrust-qualification'
 c=configuration['clusters'][0]['cluster'];assert c['server'].startswith('https://127.0.0.1:')
 root=state/('rbac-'+str(int(time.time()))+'-'+secrets.token_hex(3));root.mkdir(mode=0o700);(root/'ca.pem').write_bytes(base64.b64decode(c['certificate-authority-data']))
-container='zerotrust-qualification-control-plane';ns='zt-rbac-'+secrets.token_hex(4);global_role=ns+'-read';process=None;created=False;native=None;gateway_fixture=None
+container='zerotrust-qualification-control-plane';ns='zt-rbac-'+secrets.token_hex(4);global_role=ns+'-read';process=None;created=False;native=None;gateway_fixture=None;renewal_report=None
 
 def ctl(*argv,body=None):
  r=subprocess.run(['docker','exec',*(['-i']if body is not None else []),container,'kubectl','--kubeconfig','/etc/kubernetes/admin.conf',*argv],input=None if body is None else json.dumps(body),text=True,capture_output=True,timeout=30)
@@ -193,12 +194,16 @@ try:
  else:
   assert not db.exists();process.send_signal(signal.SIGINT);assert process.wait(timeout=5)==0
  if a.hopae_driver:
-  ctl('delete','pod','worker','-n',ns,'--force','--grace-period=0','--wait=true')
+  if a.qualify_renewal:
+   from kubernetes_gateway import qualify_real_renewal
+   renewal_report=qualify_real_renewal(a,root,config,first['candidate']['policy'],token,worker_token,subject,lambda:ctl('delete','pod','worker','-n',ns,'--force','--grace-period=0','--wait=true'))
+  else:
+   ctl('delete','pod','worker','-n',ns,'--force','--grace-period=0','--wait=true')
   assert authenticate(worker_token)['status']=='invalid'
   if gateway_fixture:
    hits=len(gateway_fixture.hits);gateway_fixture.expect(worker_token,401);assert len(gateway_fixture.hits)==hits and not gateway_fixture.forbidden_forwarding
  assert token not in process.stderr.read()
- version=json.loads(ctl('version','-o','json'))['serverVersion']['gitVersion'];report={'cluster_version':version,'read_only_namespaced_and_cluster_rbac':True,'literal_mapping_candidate':True,'binding_delete_withdrawal':True,'recreated_binding_uid_refusal':True,'credential_failure_fence_recovery':True,'authority_database_untouched':not a.authority,'authoritative_native_decisions':a.authority,'pooled_mtls_ppg1_parity':a.authority,'writer_exclusion_and_restart_fence':a.authority,'native_subject_is_fixture_reference':not bool(a.hopae_driver),'actual_hopae_workload_mapping_parity':bool(a.hopae_driver),'other_verified_pod_guest':bool(a.hopae_driver),'four_process_gateway_enforcement':bool(a.gateway_binary),'production_changed':False};(root/'report.json').write_text(json.dumps(report,indent=2)+'\n');(state/'rbac-latest.json').write_text(json.dumps({'report':str(root/'report.json')})+'\n')
+ version=json.loads(ctl('version','-o','json'))['serverVersion']['gitVersion'];report={'cluster_version':version,'read_only_namespaced_and_cluster_rbac':True,'literal_mapping_candidate':True,'binding_delete_withdrawal':True,'recreated_binding_uid_refusal':True,'credential_failure_fence_recovery':True,'authority_database_untouched':not a.authority,'authoritative_native_decisions':a.authority,'pooled_mtls_ppg1_parity':a.authority,'writer_exclusion_and_restart_fence':a.authority,'native_subject_is_fixture_reference':not bool(a.hopae_driver),'actual_hopae_workload_mapping_parity':bool(a.hopae_driver),'other_verified_pod_guest':bool(a.hopae_driver),'four_process_gateway_enforcement':bool(a.gateway_binary),'real_native_renewal':renewal_report,'production_changed':False};(root/'report.json').write_text(json.dumps(report,indent=2)+'\n');(state/'rbac-latest.json').write_text(json.dumps({'report':str(root/'report.json')})+'\n')
  success=('PASS: real Kubernetes source-authoritative native decisions, durable deletion, writer exclusion and restart fence; ' if a.authority else 'PASS: real Kubernetes ')+version+' read-only RBAC collection and explicit candidate mapping, Binding deletion/recreation and credential failure recovery; production unchanged'+(' (isolated authority DB)' if a.authority else ' (no authority DB)')
 finally:
  if gateway_fixture is not None:gateway_fixture.close()
@@ -210,4 +215,5 @@ finally:
    try:ctl(*argv)
    except Exception:failed=True
  if failed:raise RuntimeError('owned RBAC fixture cleanup failed')
+if renewal_report:success+=' ; actual native renewed stream survives and retires on real Pod deletion (fixed policy isolation)'
 print(success+(' ; actual Hopae workload association, different verified Pod guest and Pod-token revocation pass' if a.hopae_driver else '')+(' ; actual Hangang/Hopae/Pumgye/Sumunjang gateway enforcement and credential stripping pass' if a.gateway_binary else ''))

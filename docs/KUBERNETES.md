@@ -289,3 +289,27 @@ enforcement; it does not prove streaming credential withdrawal, Kubernetes Pod
 packaging/Ingress ownership, distributed watch/follower availability, CNI-wide
 network protection or full-chain throughput. Conservative source polling still
 has unavailable collection intervals. These remain explicit completion gates.
+
+
+## Actual Hopae workload renewal
+
+Add `--qualify-renewal` to the four-component command. After the normal
+Kubernetes-authoritative Binding/source/restart checks, a separate fixture uses
+an isolated native Pumgye DB bootstrapped from the previously verified candidate.
+This fixed policy deliberately isolates authentication renewal from the polling
+source's unavailable intervals; it is not a fallback or a production source-mode
+change, and does not qualify Kubernetes RBAC watch continuity.
+
+Actual Hopae, Hangang, Sumunjang and the isolated Pumgye process use native mTLS.
+The stream enables `auth.renew_native_evidence`, uses the real Pod-bound signed
+token and remains open with heartbeat bytes for more than 2.2 seconds. Deleting
+the actual Pod then closes that stream within the owned fixture's 1.5-second
+post-delete deadline and makes subsequent authentication return 401. Backend
+identity/AAL/service and credential stripping assertions remain active. Fixture
+DBs/processes/resources are separate and cleaned up; production is unchanged.
+
+The private report names the fixed-policy isolation explicitly and records that
+RBAC watch continuity is not qualified. This advances actual provider renewal
+qualification without treating authentication and authorization source freshness
+as interchangeable. Distributed watches, failure topology and fleet throughput
+remain additional gates.

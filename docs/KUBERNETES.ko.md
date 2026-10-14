@@ -239,3 +239,21 @@ Authorization 토큰은 전달하지 않습니다. 실제 수문장의 observe�
 요청 집행 검증이며 스트림 인증 회수·Kubernetes Pod 패키징/Ingress 소유·분산 watch/
 follower 가용성·CNI 전체 네트워크 보호·전체 성능 완료를 뜻하지 않습니다. 보수적
 polling의 수집 중 사용 불가 구간도 남아 있습니다. 모두 후속 완료 조건입니다.
+
+
+## 실제 호패 워크로드 갱신
+
+네 모듈 명령에 --qualify-renewal을 추가합니다. 일반 Kubernetes 원천 권위의
+Binding/원천/재시작 검사를 마친 뒤 이전 검증 후보로 별도 native 품계 DB를
+초기화합니다. 고정 정책으로 인증 갱신과 polling 중 사용 불가를 의도적으로
+분리하며 fallback·운영 원천 전환이 아니고 RBAC watch 연속성을 검증하지 않습니다.
+
+실제 호패·한강·수문장·별도 품계 프로세스가 native mTLS를 사용합니다. 스트림은
+실제 서명 Pod-bound 토큰과 auth.renew_native_evidence로 heartbeat를 2.2초 넘게
+유지합니다. 실제 Pod 삭제 후 소유 fixture의 삭제 완료 기준 1.5초 안에 닫히고
+후속 인증은 401입니다. 백엔드 신원/AAL/service·인증 토큰 제거 검사도 유지합니다.
+별도 DB/프로세스/자원을 정리하며 운영은 그대로입니다.
+
+비공개 보고서는 고정 정책 분리와 RBAC watch 연속성 미검증을 명시합니다. 인증과
+권한 원천 freshness를 같은 것으로 취급하지 않으면서 실제 프로바이더 갱신 검증을
+진전시킵니다. 분산 watch·장애 토폴로지·대규모 처리량은 추가 완료 조건입니다.
