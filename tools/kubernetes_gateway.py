@@ -6,17 +6,19 @@ def port():
  with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
 
 class GatewayFixture:
- def __init__(self,args,root,connection,pum_http,pum_native,admin,decision,token,subject,renew=False):
-  self.processes=[];self.logs=[];self.origin=None;self.root=root;self.subject=subject
+ def __init__(self,args,root,connection,pum_http,pum_native,admin,decision,token,subject,renew=False,api_key=None):
+  self.processes=[];self.logs=[];self.origin=None;self.root=root;self.subject=subject;self.credential_prefix="k8s:" if api_key is None else ""
   self.public,self.admin=port(),port();hop_portal,hop_http,hop_native,guard_http,guard_native=[port()for _ in range(5)]
   self.hits=[];self.forbidden_forwarding=False
   fixture=self
   class Origin(http.server.BaseHTTPRequestHandler):
    protocol_version='HTTP/1.1'
+   def setup(self):
+    super().setup();self.connection.setsockopt(socket.IPPROTO_TCP,socket.TCP_NODELAY,1)
    def log_message(self,*args):pass
    def do_GET(self):
     fixture.hits.append(self.path)
-    fixture.forbidden_forwarding |= ('authorization' in self.headers or self.headers.get('x-forwarded-user')!=subject or self.headers.get('x-hopae-aal')!='0' or self.headers.get('x-hopae-principal-kind')!='workload' or self.headers.get('x-hopae-service-id')!='logs')
+    fixture.forbidden_forwarding |= ('authorization' in self.headers or self.headers.get('x-forwarded-user')!=subject or self.headers.get('x-hopae-aal')!='0' or self.headers.get('x-hopae-principal-kind')!=('workload' if api_key is None else 'service') or self.headers.get('x-hopae-service-id')!='logs')
     self.send_response(200)
     if self.path=='/secure/stream':
      self.send_header('Transfer-Encoding','chunked');self.end_headers();self.wfile.write(b'5\r\nopen\n\r\n');self.wfile.flush()
@@ -30,14 +32,29 @@ class GatewayFixture:
      except OSError:pass
     else:self.send_header('Content-Length','2');self.end_headers();self.wfile.write(b'ok')
   self.origin=http.server.ThreadingHTTPServer(('127.0.0.1',0),Origin);threading.Thread(target=self.origin.serve_forever,daemon=True).start()
+  origin_port=self.origin.server_port
+  if getattr(args,'origin_binary',None):
+   self.origin.shutdown();self.origin.server_close();self.origin=None;origin_port=port()
+   log=open(root/'fast-origin.log','wb');self.logs.append(log)
+   process=subprocess.Popen([str(args.origin_binary.resolve()),'--serve',f'127.0.0.1:{origin_port}','--subject',subject],stdout=log,stderr=log);self.processes.append(process)
+   deadline=time.monotonic()+5
+   while True:
+    assert process.poll()is None,'owned fast origin exited'
+    try:
+     with socket.create_connection(('127.0.0.1',origin_port),timeout=.2):pass
+     break
+    except OSError:assert time.monotonic()<deadline;time.sleep(.02)
   caller,guard_key,guard_admin,gateway_admin=[secrets.token_hex(24)for _ in range(4)]
   tls={'server_name':'127.0.0.1','ca':str(root/'rpc-ca.pem'),'certificate':str(root/'rpc-client.pem'),'key':str(root/'rpc-client.key')}
   hop_state=root/'hopae-state';hop_state.mkdir(mode=0o700)
   hop={'listen':{'portal':f'127.0.0.1:{hop_portal}','gateway':f'127.0.0.1:{hop_http}','native_gateway':f'127.0.0.1:{hop_native}','native_gateway_tls':{'certificate':str(root/'rpc-server.pem'),'key':str(root/'rpc-server.key'),'client_ca':str(root/'rpc-ca.pem')}},'state_dir':str(hop_state),'portal':{'public_url':'https://auth.example.test'},'gateway':{'kind':'hangang','caller_key_env':'OWNED_HOPAE_KEY','verify_budget_ms':1000},'session':{'idle':'24h','absolute':'30d'},'cookie':{'name':'__Host-hopae','secure':True},'trusted_proxies':['127.0.0.1/32'],'apps':[{'app_id':'logs','hosts':['app.example.test'],'ports':[self.public],'binding':{'ip':'strict','ua':'off'},'verify_cache_seconds':0}],'providers':[],'authentication_gateway':{'authority_id':'owned-kubernetes','profiles':[{'service_id':'logs','host':'app.example.test','ports':[self.public],'realm':connection['cluster_id'],'kubernetes_tokenreview':{'connection':connection,'ca_pem_env':'OWNED_KUBE_CA','reviewer_token_env':'OWNED_KUBE_REVIEWER','token_prefix':'k8s:'},'networks':['127.0.0.1/32']}]}}
+  if api_key is not None:
+   profile=hop['authentication_gateway']['profiles'][0];profile.pop('kubernetes_tokenreview');profile['api_keys']=[{'token_env':'OWNED_CHAIN_KEY','subject':'worker'}]
   (root/'hopae.json').write_text(json.dumps(hop));(root/'guard-policy.json').write_text(json.dumps({'mode':'enforce','auto_block':False}))
-  gateway={'http':[{'id':'logs','host':'app.example.test','path_prefix':'/secure','path_match':'segment_prefix','access_mode':'protected','backends':[f'http://127.0.0.1:{self.origin.server_port}'],'auth':{'renew_native_evidence':renew,'url':f'http://127.0.0.1:{hop_http}/_hopae/verify','native':{'address':f'127.0.0.1:{hop_native}','tls':tls},'request_headers':['authorization'],'response_headers':['x-forwarded-user','x-hopae-aal','x-hopae-principal-kind','x-hopae-service-id'],'static_request_headers':{'x-hopae-gateway-key':{'env':'OWNED_HOPAE_KEY'},'x-hopae-contract':'1'}},'resource_policy':{'resource_id':'logs','principal':{'source':'external','subject_header':'x-forwarded-user'},'allow':[],'pumgye':{'service_id':'logs','information_class':'public','permissions':{'GET':['read']}}}}],'pumgye_authority':{'decision_address':f'127.0.0.1:{pum_native}','management_address':f'127.0.0.1:{pum_http}','decision_token_env':'PUMGYE_DECISION_TOKEN','admin_token_env':'PUMGYE_ADMIN_TOKEN','tls':tls,'timeout_ms':1000}}
+  gateway={'http':[{'id':'logs','host':'app.example.test','path_prefix':'/secure','path_match':'segment_prefix','access_mode':'protected','backends':[f'http://127.0.0.1:{origin_port}'],'auth':{'renew_native_evidence':renew,'url':f'http://127.0.0.1:{hop_http}/_hopae/verify','native':{'address':f'127.0.0.1:{hop_native}','tls':tls},'request_headers':['authorization'],'response_headers':['x-forwarded-user','x-hopae-aal','x-hopae-principal-kind','x-hopae-service-id'],'static_request_headers':{'x-hopae-gateway-key':{'env':'OWNED_HOPAE_KEY'},'x-hopae-contract':'1'}},'resource_policy':{'resource_id':'logs','principal':{'source':'external','subject_header':'x-forwarded-user'},'allow':[],'pumgye':{'service_id':'logs','information_class':'public','permissions':{'GET':['read']}}}}],'pumgye_authority':{'decision_address':f'127.0.0.1:{pum_native}','management_address':f'127.0.0.1:{pum_http}','decision_token_env':'PUMGYE_DECISION_TOKEN','admin_token_env':'PUMGYE_ADMIN_TOKEN','tls':tls,'timeout_ms':1000}}
   (root/'hangang.json').write_text(json.dumps(gateway))
   env={**os.environ,'OWNED_HOPAE_KEY':caller,'OWNED_KUBE_CA':(root/'ca.pem').read_text(),'OWNED_KUBE_REVIEWER':token,'PUMGYE_ADMIN_TOKEN':admin,'PUMGYE_DECISION_TOKEN':decision,'HANGANG_GUARD_COLLECTOR_TOKEN':guard_key,'HANGANG_GUARD_ADMIN_TOKEN':guard_admin,'HANGANG_ADMIN_TOKEN':gateway_admin}
+  if api_key is not None:env['OWNED_CHAIN_KEY']=api_key
   def start(label,command):
    log=open(root/(label+'.log'),'wb');self.logs.append(log);process=subprocess.Popen(command,env=env,stdout=log,stderr=log);self.processes.append(process)
   start('hopae',[str(args.hopae_binary.resolve()),'run','--config',str(root/'hopae.json')])
@@ -92,7 +109,7 @@ class GatewayFixture:
    assert 1<=int(values['x-hopae-evidence-ttl-ms'])<=1000
  def request(self,token=None,path='/secure',stream=False):
   headers={'Host':'app.example.test','x-forwarded-user':self.subject,'x-hopae-principal-kind':'human','x-hopae-aal':'3','x-hopae-service-id':'logs'}
-  if token is not None:headers['Authorization']='Bearer k8s:'+token
+  if token is not None:headers['Authorization']='Bearer '+self.credential_prefix+token
   client=http.client.HTTPSConnection('127.0.0.1',self.public,timeout=3,context=ssl.create_default_context(cafile=str(self.root/'rpc-ca.pem')));client.request('GET',path,headers=headers);response=client.getresponse()
   if stream:return client,response
   response.read();client.close();return response.status

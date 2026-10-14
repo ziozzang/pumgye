@@ -1,0 +1,163 @@
+{
+  "date": "2026-10-14",
+  "binary_sha256": {
+    "gateway": "23adb0efa4a5099ff14e12c45ba582e2c1cd705e67b8d371143c40f4ff973d23",
+    "hopae": "56e108d53f38051ef17f98367397190b941b219d5720e85769ec9280212e7333",
+    "pumgye": "c268598123ade9251638cf7c6dd571c4e09302b45dce0eed02c6ff133fa59c40",
+    "sumunjang": "f7713672f48ba2c2f81bdcbff2588c53c569760a59ce52ce2144d920a9a6cb98",
+    "generator": "d7b2b0557776de983e0d8929c5c8fd4b3258507dd9b8a1a40dee7ba3c2fe8b84"
+  },
+  "cpu": "AMD Ryzen 7 8745HS, 8 cores/16 threads",
+  "scope": "real independent Hangang/Hopae/Pumgye/Sumunjang, native API-key authentication, public HTTPS and internal mTLS, closed-loop loopback, fixed one-service policy, no external provider/Kubernetes source load",
+  "workers16": [
+    {
+      "elapsed_seconds": 10.002032226,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1339,
+      "p99_us": 2041,
+      "statuses": {
+        "200": 116590
+      },
+      "verified_qps": 11656.631109118764,
+      "verified_responses": 116590,
+      "workers": 16,
+      "trial": 1,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    },
+    {
+      "elapsed_seconds": 10.002579631,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1366,
+      "p99_us": 2091,
+      "statuses": {
+        "200": 114777
+      },
+      "verified_qps": 11474.739940513251,
+      "verified_responses": 114777,
+      "workers": 16,
+      "trial": 2,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    },
+    {
+      "elapsed_seconds": 10.002199758,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1422,
+      "p99_us": 2079,
+      "statuses": {
+        "200": 110833
+      },
+      "verified_qps": 11080.862478411622,
+      "verified_responses": 110833,
+      "workers": 16,
+      "trial": 3,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    }
+  ],
+  "workers32": [
+    {
+      "elapsed_seconds": 10.002084693,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 2945,
+      "p99_us": 5642,
+      "statuses": {
+        "200": 103671
+      },
+      "verified_qps": 10364.939228374518,
+      "verified_responses": 103671,
+      "workers": 32,
+      "trial": 1,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    },
+    {
+      "elapsed_seconds": 10.002500444,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 2890,
+      "p99_us": 4238,
+      "statuses": {
+        "200": 109165
+      },
+      "verified_qps": 10913.771072660398,
+      "verified_responses": 109165,
+      "workers": 32,
+      "trial": 2,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    },
+    {
+      "elapsed_seconds": 10.002407524,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 3024,
+      "p99_us": 4300,
+      "statuses": {
+        "200": 104433
+      },
+      "verified_qps": 10440.786355626995,
+      "verified_responses": 104433,
+      "workers": 32,
+      "trial": 3,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    }
+  ],
+  "python_origin_preliminary": [
+    {
+      "elapsed_seconds": 3.001570056,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1789,
+      "p99_us": 4129,
+      "statuses": {
+        "200": 24655
+      },
+      "verified_qps": 8214.03450194867,
+      "verified_responses": 24655,
+      "workers": 16,
+      "trial": 1,
+      "all_components_real": true
+    },
+    {
+      "elapsed_seconds": 3.001326946,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1846,
+      "p99_us": 4164,
+      "statuses": {
+        "200": 24244
+      },
+      "verified_qps": 8077.760416042325,
+      "verified_responses": 24244,
+      "workers": 16,
+      "trial": 2,
+      "all_components_real": true
+    },
+    {
+      "elapsed_seconds": 3.00131891,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1910,
+      "p99_us": 4457,
+      "statuses": {
+        "200": 23383
+      },
+      "verified_qps": 7790.908164437614,
+      "verified_responses": 23383,
+      "workers": 16,
+      "trial": 3,
+      "all_components_real": true
+    }
+  ],
+  "production_affected": false,
+  "100k_full_chain_qualified": false,
+  "python_origin_preliminary_generator_sha256": null,
+  "python_origin_preliminary_provenance": "preliminary before fast-origin mode; hash not captured; main hashes describe workers16/workers32 final trials"
+}

@@ -57,3 +57,39 @@ assurance/Guard evidence. This demonstrates native Pumgye headroom above 100k/s
 under these conditions, not Hangang/Hopae/Sumunjang end-to-end capacity. Closed-loop
 load, loopback, cache warmth and lack of arrival-rate overload injection limit
 interpretation. No operational service is used for this load test.
+
+## Actual four-component HTTPS chain — 2026-10-14
+
+[Raw measurements and hashes](native-chain-performance.json) cover **actual**
+Hangang, Hopae, Pumgye and Sumunjang processes. Hopae uses a native API key;
+Sumunjang is enforce mode; Pumgye requires matching identity/network/permission;
+Hangang accepts HTTPS and uses pooled mTLS HOP1/PPG1/HGD1. An owned Go origin
+verifies canonical service identity/AAL/service and absence of Authorization;
+every successful client response must have status 200 and exact body `ok`.
+
+Three ten-second closed-loop trials on the same Ryzen 7 8745HS yield:
+
+| Workers | Verified responses/s | p50 (µs) | p99 (µs) | Failed replies |
+| --- | --- | --- | --- | --- |
+| 16 | 11,081–11,657 | 1,339–1,422 | 2,041–2,091 | 0 |
+| 32 | 10,365–10,914 | 2,890–3,024 | 4,238–5,642 | 0 |
+
+The Python-origin preliminary three-second fixture measured 7,791–8,214/s;
+changing only the validated origin removes some fixture overhead. More client
+concurrency does not improve this host/workload's result. This establishes the
+lower 10k/s target under these controlled conditions; **100k/s full-chain capacity
+is not achieved**. Component-only Pumgye numbers cannot be substituted for it.
+There is one service/key/role, a warm fixed policy, tiny response, loopback networking
+and no external issuer or TokenReview cost. Open-loop saturation, denied mix,
+long-lived renewal load, large application cardinality and physical/fleet networks
+remain separate work. The test does not touch operational services.
+
+```sh
+go build -o /tmp/owned-https-chain-load tools/https_chain_load.go
+python3 tools/native_chain_benchmark.py --pumgye /path/to/pumgye --gateway /path/to/hangang --hopae /path/to/hopae --sumunjang /path/to/sumunjang --generator /tmp/owned-https-chain-load --fast-origin --seconds 10 --workers 16
+```
+
+The fixture also refuses missing/invalid credentials, observe evidence and explicit
+IP blocking before load. No authentication protocol peer is mocked. Owned state,
+keys and processes are discarded at completion; errors/response statuses remain
+visible rather than counted as throughput success.

@@ -50,3 +50,33 @@ python3 tools/server_smoke.py --binary target/release/pumgye --client target/rel
 품계 10만건/초 이상의 여유를 보인 결과이며 전체 한강/호패/수문장 처리량은 아닙니다.
 closed-loop·loopback·warm 정책과 도착률 overload 미주입의 한계를 명시합니다.
 운영 서비스를 부하 대상으로 쓰지 않습니다.
+
+## 실제 네 모듈 HTTPS 체인 — 2026-10-14
+
+[원시 측정·해시](native-chain-performance.json)는 실제 한강·호패·품계·수문장 프로세스
+결과입니다. 호패 native API key·수문장 enforce·품계 신원/네트워크/권한·한강 HTTPS와
+지속 mTLS HOP1/PPG1/HGD1을 사용합니다. Go origin이 canonical service 신원/AAL/
+service·Authorization 미전달을 검사하고 모든 성공 응답은 200·정확한 ok 본문입니다.
+
+같은 Ryzen 7 8745HS에서 10초씩 3회 closed-loop 결과입니다.
+
+| Workers | 검증 응답/초 | p50 (µs) | p99 (µs) | 실패 |
+| --- | --- | --- | --- | --- |
+| 16 | 11,081~11,657 | 1,339~1,422 | 2,041~2,091 | 0 |
+| 32 | 10,365~10,914 | 2,890~3,024 | 4,238~5,642 | 0 |
+
+Python origin 예비 3초 측정은 7,791~8,214/s이고 같은 검증을 하는 Go origin으로
+fixture 비용 일부를 줄였습니다. 동시성을 늘려도 이 조건의 처리량은 증가하지
+않았습니다. 제어된 조건의 1만/s 하한 검증이며 전체 10만/s는 달성하지 못했습니다.
+품계 단독 결과로 대체하지 않습니다. 서비스/키/역할 하나·warm 고정 정책·작은 응답·
+loopback이며 외부 공급자/TokenReview 비용은 없습니다. open-loop 포화·거절 mix·
+장기 갱신 부하·대형 앱 정책·물리/fleet 네트워크는 별도입니다. 운영 부하는 없습니다.
+
+```sh
+go build -o /tmp/owned-https-chain-load tools/https_chain_load.go
+python3 tools/native_chain_benchmark.py --pumgye /path/to/pumgye --gateway /path/to/hangang --hopae /path/to/hopae --sumunjang /path/to/sumunjang --generator /tmp/owned-https-chain-load --fast-origin --seconds 10 --workers 16
+```
+
+부하 전 미인증/잘못된 자격·observe·IP 차단도 거절합니다. 인증 프로토콜 대역이
+없고 별도 상태/키/프로세스를 정리합니다. 실패/status를 숨기거나 성공 처리량으로
+계산하지 않습니다.
