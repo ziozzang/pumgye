@@ -45,3 +45,25 @@ candidate production, authentication/network expiry and clock rollback after wor
 This public server-library adapter remains unwired to an RPC. The current-owner
 callback must be supplied by real identity/key/network/policy/route/plan owners;
 this helper supplies no remote freshness discovery or signed permit by itself.
+
+## Native permit candidate signer (unreleased)
+
+`permit::Signer` uses a separate Pumgye signing identity and Permit purpose. It runs
+inside checked-authentication resource authorization, then rechecks native owners
+and every sampled clock before returning `SignedPermit`. The candidate binds the
+exact authentication receipt hash, verified identity/service/audience/request,
+decision/resource/action, authority epoch and policy/catalog/network/route/plan
+revisions. Catalog and policy share one atomic document revision. No caller class
+or assurance is accepted. Nonces come from the OS CSPRNG.
+
+Expiry is the earliest authentication, network, policy, route, plan or one-second
+limit. Independent receiver verification qualifies purpose/key separation, exact
+chain/revision binding, expiry and distinct nonces. Denial, initial/final owner
+retirement, invalid revisions, expired plans and clock rollback discard candidates.
+All 44 workspace tests and strict Clippy pass.
+
+The signer is a server-library capability, not a configured permission endpoint.
+Native owner state and the mandatory freshness callback must originate in actual
+owners. Signing key loading/rotation, owner discovery/coherence, RPC wiring,
+receiver replay consumption and credential projection remain required. No operating
+permit issuer is activated by this source change.

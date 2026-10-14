@@ -2,3 +2,4 @@
 //! alone grants no permissions and does not establish live identity freshness.
 pub mod authentication;
 pub mod authorization;
+pub mod permit;
