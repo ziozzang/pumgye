@@ -27,9 +27,19 @@ struct Settings {
     address: String,
     tls: Tls,
 }
+fn default_epoch() -> String {
+    "epoch1".into()
+}
+fn default_ip() -> String {
+    "203.0.113.9".into()
+}
 #[derive(Deserialize)]
 struct Config {
     pumgye_endpoint: Option<String>,
+    #[serde(default = "default_epoch")]
+    identity_epoch: String,
+    #[serde(default = "default_ip")]
+    qualification_ip: String,
     settings: Settings,
     issuer_ref: String,
     key_epoch: u64,
@@ -83,13 +93,22 @@ async fn endpoint(
         .as_ref()
         .ok_or_else(|| anyhow!("endpoint absent"))?;
     ensure!(
-        endpoint.starts_with("http://127.0.0.1:"),
+        (endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("https://127.0.0.1:")),
         "owned endpoint required"
     );
     let c = checked.context();
-    let body = serde_json::json!({"request_id":1,"minimum_revision":1,"resource":"db:orders","action":"select","ip":"203.0.113.9","context":{"issuer_ref":c.issuer_ref,"key_epoch":c.key_epoch,"identity_authority_epoch":c.identity_authority_epoch,"identity":{"subject_ref":c.identity.subject_ref,"kind":2,"aal":0,"revision":c.identity.revision,"credential_generation":c.identity.credential_generation},"service":c.service,"audience":c.audience,"request_sha256":c.request_sha256},"receipt":receipt,"request_sha256":c.request_sha256});
-    let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
+    let body = serde_json::json!({"request_id":1,"minimum_revision":1,"resource":"db:orders","action":"select","ip":config.qualification_ip,"context":{"issuer_ref":c.issuer_ref,"key_epoch":c.key_epoch,"identity_authority_epoch":c.identity_authority_epoch,"identity":{"subject_ref":c.identity.subject_ref,"kind":2,"aal":0,"revision":c.identity.revision,"credential_generation":c.identity.credential_generation},"service":c.service,"audience":c.audience,"request_sha256":c.request_sha256},"receipt":receipt,"request_sha256":c.request_sha256});
+    let mut http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(2));
+    if endpoint.starts_with("https://") {
+        let ca = std::fs::read(&config.settings.tls.ca)?;
+        let mut identity = std::fs::read(&config.settings.tls.certificate)?;
+        identity.extend(std::fs::read(&config.settings.tls.key)?);
+        http = http
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(reqwest::Certificate::from_pem(&ca)?)
+            .identity(reqwest::Identity::from_pem(&identity)?);
+    }
+    let response = http
         .build()?
         .post(endpoint)
         .bearer_auth(std::env::var("PUMGYE_DECISION_TOKEN")?)
@@ -146,7 +165,7 @@ async fn main() -> Result<()> {
         let trust = ServiceTrust::new(TrustConfiguration {
             issuer: config.issuer_ref.clone(),
             key_epoch: config.key_epoch,
-            identity_epoch: "epoch1".into(),
+            identity_epoch: config.identity_epoch.clone(),
             service: config.service.clone(),
             audience: config.audience.clone(),
             minimum_revision: 1,
@@ -255,11 +274,11 @@ async fn main() -> Result<()> {
                 observation.valid_for(&checked, now()),
                 "observation expired"
             );
-            let mut policy = serde_json::json!({"version":1,"information_classes":["internal"],"services":{"orders":{"permissions":["read"],"require_guard":false,"roles":{"reader":{"permissions":["read"],"information_classes":["internal"],"minimum_aal":0}},"users":{},"networks":[{"cidr":"203.0.113.0/24","roles":["reader"]}]}},"resources":{"db:orders":{"service":"orders","information_class":"internal","actions":{"select":"read"},"minimum_aal":0}}});
+            let mut policy = serde_json::json!({"version":1,"information_classes":["internal"],"services":{"orders":{"permissions":["read"],"require_guard":false,"roles":{"reader":{"permissions":["read"],"information_classes":["internal"],"minimum_aal":0}},"users":{},"networks":[{"cidr":format!("{}/{}",config.qualification_ip,if config.qualification_ip.contains(':') {128} else {32}),"roles":["reader"]}]}},"resources":{"db:orders":{"service":"orders","information_class":"internal","actions":{"select":"read"},"minimum_aal":0}}});
             policy["services"]["orders"]["users"][checked.subject()] = serde_json::json!(["reader"]);
             let compiled = std::sync::Arc::new(serde_json::from_value::<pumgye_core::Policy>(policy)?.compile()?);
             let owner = arc_swap::ArcSwap::from(compiled.clone());
-            let resource_request = pumgye_server::authorization::ResourceRequest { resource: "db:orders", action: "select", ip: "203.0.113.9".parse()?, guard: pumgye_core::GuardEvidence::Unavailable, network_expires_ms: checked.expires_ms() };
+            let resource_request = pumgye_server::authorization::ResourceRequest { resource: "db:orders", action: "select", ip: config.qualification_ip.parse()?, guard: pumgye_core::GuardEvidence::Unavailable, network_expires_ms: checked.expires_ms() };
             let native_class = pumgye_server::authorization::authorize_live_resource_then(&compiled, &resource_request, &checked, &observation, now, || std::sync::Arc::ptr_eq(&owner.load_full(), &compiled), |resource| resource.information_class.clone()).map_err(|_| anyhow!("native resource refused"))?;
             ensure!(native_class == "internal", "owner classification changed");
             if config.pumgye_endpoint.is_some() { ensure!(endpoint(&config, &checked, &reply.receipt).await?, "native endpoint refused Allow"); }

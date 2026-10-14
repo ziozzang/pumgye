@@ -354,3 +354,18 @@ These are unreleased source candidates retaining the preceding version strings;
 existing signed tags/assets are unchanged. New versioning, signing/publication,
 Kubernetes combined-endpoint qualification and operating rollout are subsequent
 gates. No operational data/configuration changed during these owned tests.
+
+## Kubernetes qualification client support — 2026-10-15
+
+The owned example accepts an explicit identity epoch/IP and mTLS HTTPS Pumgye
+endpoint, while retaining the isolated local fixture defaults. The static client
+passed against the actual signed Pumgye 0.1.5/Hopae 0.0.7/Sumunjang 0.3.5
+K3s Pods: public trust/resources were injected into the Pumgye Pod and the
+authenticated endpoint returned native Allow after inter-authority mTLS Service
+DNS queries. Actual browser/module and ordinary revocation/restart/outage world
+gates also passed. Strict all-target Clippy passed for the example changes.
+
+This Kubernetes endpoint step proves positive admission only; receipt-specific
+withdrawal/outage was qualified in the local static three-authority fixture.
+Signed permits, production Hangang dispatch and distributed restore/fleet
+fences remain open. Server release assets are unchanged by this example update.
