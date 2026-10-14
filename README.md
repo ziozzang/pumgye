@@ -179,7 +179,7 @@ do not implicitly use resource classification. Resource query RPC, administrator
 UI, catalog-aware permit signing, DBMS adapters and operational qualification
 remain unfinished. No direct PostgreSQL access hook is enabled by this example.
 
-## v0.1.3 preparation
+## v0.1.3 publication and internal adoption
 
 The native owner resource catalog defines service membership, information class,
 action-to-permission mapping and minimum authentication assurance. New authenticated
@@ -189,5 +189,10 @@ cache TTL. Existing service decision protocols remain supported. Policy JSON
 persists the catalog atomically without a separate database schema migration.
 Hangang resource dispatch and the integrated catalog view passed actual local
 four-server and remote Kubernetes/browser candidate qualification, including owner
-changes, deletion, revocation and Pod replacement. Signed release publication and
-operating adoption of this version remain pending.
+changes, deletion, revocation and Pod replacement. [v0.1.3](https://github.com/ziozzang/pumgye/releases/tag/v0.1.3) is published at
+b8e972b with five independently verified static signed assets. All downloaded
+assets match the originals. Internal adoption passed isolated real-DB-clone
+preflight, private binary/database/configuration rollback backups, exact policy
+preservation, live management/native mTLS denial and a second durable restart.
+The catalog is available without automatically enabling new gateway resource gates;
+full provider/fleet/projection and automatic-update work remains open.
