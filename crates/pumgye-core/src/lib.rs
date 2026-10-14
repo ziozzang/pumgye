@@ -14,6 +14,8 @@ pub struct Policy {
     pub version: u32,
     pub information_classes: Vec<String>,
     pub services: BTreeMap<String, Service>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resources: BTreeMap<String, Resource>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +26,27 @@ pub struct Service {
     pub networks: Vec<Network>,
     #[serde(default = "yes")]
     pub require_guard: bool,
+}
+/// Native resource metadata: request callers select an action, never its class.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Resource {
+    pub service: String,
+    pub information_class: String,
+    pub actions: BTreeMap<String, String>,
+    #[serde(default)]
+    pub minimum_aal: u8,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResourceDecision {
+    UnknownResource,
+    UnknownAction,
+    Decided(Decision),
+}
+struct CompiledResource {
+    metadata: Resource,
+    actions: HashMap<String, u64>,
+    class: u64,
 }
 fn yes() -> bool {
     true
@@ -82,6 +105,7 @@ impl Rights {
 pub struct CompiledPolicy {
     services: HashMap<String, CompiledService>,
     classes: HashMap<String, u64>,
+    resources: HashMap<String, CompiledResource>,
 }
 struct CompiledService {
     permissions: HashMap<String, u64>,
@@ -253,10 +277,128 @@ impl Policy {
                 },
             );
         }
-        Ok(CompiledPolicy { services, classes })
+        ensure!(self.resources.len() <= 65536, "resource catalog capacity");
+        let mut resources = HashMap::new();
+        let mut total_actions = 0usize;
+        for (id, resource) in &self.resources {
+            ensure!(
+                name(id)
+                    && resource.minimum_aal <= 3
+                    && !resource.actions.is_empty()
+                    && resource.actions.len() <= 64,
+                "invalid resource metadata"
+            );
+            total_actions += resource.actions.len();
+            ensure!(total_actions <= 65536, "resource action capacity");
+            let service = services
+                .get(&resource.service)
+                .ok_or_else(|| anyhow::anyhow!("unknown resource service"))?;
+            let class = *classes
+                .get(&resource.information_class)
+                .ok_or_else(|| anyhow::anyhow!("unknown resource class"))?;
+            let mut actions = HashMap::new();
+            for (action, permission) in &resource.actions {
+                ensure!(name(action), "invalid resource action");
+                actions.insert(
+                    action.clone(),
+                    *service
+                        .permissions
+                        .get(permission)
+                        .ok_or_else(|| anyhow::anyhow!("unknown resource permission"))?,
+                );
+            }
+            resources.insert(
+                id.clone(),
+                CompiledResource {
+                    metadata: resource.clone(),
+                    actions,
+                    class,
+                },
+            );
+        }
+        Ok(CompiledPolicy {
+            services,
+            classes,
+            resources,
+        })
     }
 }
+fn evaluate_rights(
+    service: &CompiledService,
+    subject: &str,
+    ip: IpAddr,
+    permission: impl FnOnce() -> Option<u64>,
+    class: impl FnOnce() -> Option<u64>,
+    assurance: (u8, u8),
+    guard: GuardEvidence,
+) -> Decision {
+    if guard == GuardEvidence::Deny {
+        return Decision::GuardDenied;
+    }
+    if service.require_guard && guard != GuardEvidence::EnforcedAllow {
+        return Decision::GuardUnavailable;
+    }
+    let Some(user) = service.users.get(subject) else {
+        return Decision::Guest;
+    };
+    if user.permissions == 0 {
+        return Decision::Guest;
+    }
+    let Some(network) = service
+        .hosts
+        .get(&ip.to_canonical())
+        .or_else(|| service.networks.longest(ip))
+    else {
+        return Decision::NetworkGuest;
+    };
+    let Some(permission) = permission() else {
+        return Decision::PermissionDenied;
+    };
+    if user.permissions & network.permissions & permission == 0 {
+        return Decision::PermissionDenied;
+    }
+    let Some(class) = class() else {
+        return Decision::ClassDenied;
+    };
+    if user.classes & network.classes & class == 0 {
+        return Decision::ClassDenied;
+    }
+    if assurance.0 > 3 || assurance.0 < user.aal.max(network.aal).max(assurance.1) {
+        return Decision::AssuranceDenied;
+    }
+    Decision::Allow
+}
 impl CompiledPolicy {
+    pub fn resource_metadata(&self, resource: &str) -> Option<&Resource> {
+        self.resources.get(resource).map(|r| &r.metadata)
+    }
+    /// Resource class and minimum assurance are owned by the compiled catalog.
+    pub fn evaluate_resource(
+        &self,
+        resource: &str,
+        action: &str,
+        subject: &str,
+        ip: IpAddr,
+        aal: u8,
+        guard: GuardEvidence,
+    ) -> ResourceDecision {
+        let Some(resource) = self.resources.get(resource) else {
+            return ResourceDecision::UnknownResource;
+        };
+        let Some(permission) = resource.actions.get(action) else {
+            return ResourceDecision::UnknownAction;
+        };
+        let service = &self.services[&resource.metadata.service];
+        ResourceDecision::Decided(evaluate_rights(
+            service,
+            subject,
+            ip,
+            || Some(*permission),
+            || Some(resource.class),
+            (aal, resource.metadata.minimum_aal),
+            guard,
+        ))
+    }
     /// Allocation-free evaluation over immutable policy. Never accept client claims as evidence.
     // Explicit trusted evidence and route scope remain separate at the enforcement boundary.
     #[allow(clippy::too_many_arguments)]
@@ -273,40 +415,14 @@ impl CompiledPolicy {
         let Some(service) = self.services.get(service_id) else {
             return Decision::UnknownService;
         };
-        if guard == GuardEvidence::Deny {
-            return Decision::GuardDenied;
-        }
-        if service.require_guard && guard != GuardEvidence::EnforcedAllow {
-            return Decision::GuardUnavailable;
-        }
-        let Some(user) = service.users.get(subject) else {
-            return Decision::Guest;
-        };
-        if user.permissions == 0 {
-            return Decision::Guest;
-        }
-        let Some(network) = service
-            .hosts
-            .get(&ip.to_canonical())
-            .or_else(|| service.networks.longest(ip))
-        else {
-            return Decision::NetworkGuest;
-        };
-        let Some(permission) = service.permissions.get(permission) else {
-            return Decision::PermissionDenied;
-        };
-        if user.permissions & network.permissions & permission == 0 {
-            return Decision::PermissionDenied;
-        }
-        let Some(class) = self.classes.get(information_class) else {
-            return Decision::ClassDenied;
-        };
-        if user.classes & network.classes & class == 0 {
-            return Decision::ClassDenied;
-        }
-        if aal > 3 || aal < user.aal.max(network.aal) {
-            return Decision::AssuranceDenied;
-        }
-        Decision::Allow
+        evaluate_rights(
+            service,
+            subject,
+            ip,
+            || service.permissions.get(permission).copied(),
+            || self.classes.get(information_class).copied(),
+            (aal, 0),
+            guard,
+        )
     }
 }

@@ -65,6 +65,7 @@ fn main() -> anyhow::Result<()> {
     };
     let compiled = Policy {
         version: 1,
+        resources: BTreeMap::new(),
         information_classes: vec!["public".into()],
         services: BTreeMap::from([("orders".into(), service)]),
     }

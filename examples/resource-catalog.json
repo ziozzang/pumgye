@@ -1,0 +1,52 @@
+{
+  "revision": 0,
+  "policy": {
+    "version": 1,
+    "information_classes": [
+      "public",
+      "internal"
+    ],
+    "services": {
+      "orders": {
+        "permissions": [
+          "read"
+        ],
+        "require_guard": true,
+        "roles": {
+          "reader": {
+            "permissions": [
+              "read"
+            ],
+            "information_classes": [
+              "internal"
+            ],
+            "minimum_aal": 1
+          }
+        },
+        "users": {
+          "fixture": [
+            "reader"
+          ]
+        },
+        "networks": [
+          {
+            "cidr": "192.0.2.0/24",
+            "roles": [
+              "reader"
+            ]
+          }
+        ]
+      }
+    },
+    "resources": {
+      "db:orders": {
+        "service": "orders",
+        "information_class": "internal",
+        "actions": {
+          "select": "read"
+        },
+        "minimum_aal": 2
+      }
+    }
+  }
+}

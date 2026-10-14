@@ -456,3 +456,104 @@ fn mixed_host_and_cidr_indexes_match_independent_longest_prefix_reference() {
         }
     }
 }
+
+#[test]
+fn native_catalog_owns_class_action_mapping_and_resource_assurance() {
+    use pumgye_core::{Resource, ResourceDecision as R};
+    let mut policy = policy();
+    policy.resources.insert(
+        "db:orders".into(),
+        Resource {
+            service: "orders".into(),
+            information_class: "internal".into(),
+            actions: [
+                ("select".into(), "read".into()),
+                ("update".into(), "write".into()),
+            ]
+            .into(),
+            minimum_aal: 3,
+        },
+    );
+    let compiled = policy.compile().unwrap();
+    let ip = "192.0.2.1".parse().unwrap();
+    assert_eq!(
+        compiled.evaluate_resource("db:orders", "select", "u_writer", ip, 3, G::EnforcedAllow),
+        R::Decided(D::Allow)
+    );
+    assert_eq!(
+        compiled.evaluate_resource("db:orders", "select", "u_writer", ip, 2, G::EnforcedAllow),
+        R::Decided(D::AssuranceDenied)
+    );
+    assert_eq!(
+        compiled.evaluate_resource("db:orders", "select", "u_reader", ip, 3, G::EnforcedAllow),
+        R::Decided(D::ClassDenied)
+    );
+    assert_eq!(
+        compiled.evaluate_resource("db:orders", "select", "unassigned", ip, 3, G::EnforcedAllow),
+        R::Decided(D::Guest)
+    );
+    assert_eq!(
+        compiled.evaluate_resource(
+            "db:orders",
+            "select",
+            "u_writer",
+            "192.0.2.7".parse().unwrap(),
+            3,
+            G::EnforcedAllow
+        ),
+        R::Decided(D::PermissionDenied)
+    );
+    assert_eq!(
+        compiled.evaluate_resource("db:orders", "drop", "u_writer", ip, 3, G::EnforcedAllow),
+        R::UnknownAction
+    );
+    assert_eq!(
+        compiled.evaluate_resource("db:unknown", "select", "u_writer", ip, 3, G::EnforcedAllow),
+        R::UnknownResource
+    );
+    assert_eq!(
+        compiled.evaluate_resource("db:orders", "select", "u_writer", ip, 3, G::Observe),
+        R::Decided(D::GuardUnavailable)
+    );
+    assert_eq!(
+        compiled
+            .resource_metadata("db:orders")
+            .unwrap()
+            .information_class,
+        "internal"
+    );
+    assert!(
+        serde_json::to_value(self::policy())
+            .unwrap()
+            .get("resources")
+            .is_none(),
+        "empty catalog must preserve legacy wire shape"
+    );
+}
+
+#[test]
+fn invalid_catalog_relations_never_compile() {
+    let mut policy = policy();
+    policy.resources.insert(
+        "db:orders".into(),
+        pumgye_core::Resource {
+            service: "orders".into(),
+            information_class: "internal".into(),
+            actions: [("select".into(), "read".into())].into(),
+            minimum_aal: 0,
+        },
+    );
+    for mutate in [
+        |r: &mut pumgye_core::Resource| r.service = "undeclared".into(),
+        |r: &mut pumgye_core::Resource| r.information_class = "undeclared".into(),
+        |r: &mut pumgye_core::Resource| {
+            r.actions.insert("select".into(), "undeclared".into());
+        },
+        |r: &mut pumgye_core::Resource| r.actions.clear(),
+        |r: &mut pumgye_core::Resource| r.minimum_aal = 4,
+    ] {
+        let mut invalid = policy.clone();
+        mutate(invalid.resources.get_mut("db:orders").unwrap());
+        assert!(invalid.compile().is_err());
+    }
+}

@@ -159,3 +159,22 @@ of its durable policy passed preflight; live mTLS management/native refusal,
 unchanged durable policy and a second restart passed. Private binary/DB/config
 rollback backups remain available. Kubernetes qualification of v0.1.2, mixed-policy
 memory/CIDR costs, full-chain 100k QPS and fleet replication remain open.
+
+## Native resource catalog (unreleased)
+
+Policy `resources` owns resource ID → service, information class, action/permission
+mapping and minimum AAL. [Example](examples/resource-catalog.json). The pure core
+`evaluate_resource` accepts resource/action and verified identity/network evidence;
+its caller cannot select a lower information class. User/network role intersection,
+guard requirements and the maximum of role/resource assurance still apply.
+Unknown resources/actions refuse; unknown service/class/permission relations or
+invalid assurance reject compilation before publication. Limits: 65,536 resources,
+64 actions per resource and 65,536 total actions. Decisions query immutable memory
+without SQL or request allocations.
+
+An empty catalog is omitted from serialization, preserving legacy policy shape.
+Nonempty catalogs require upgraded typed consumers; old strict consumers reject
+unknown fields. Existing service-level decision APIs retain their semantics and
+do not implicitly use resource classification. Resource query RPC, administrator
+UI, catalog-aware permit signing, DBMS adapters and operational qualification
+remain unfinished. No direct PostgreSQL access hook is enabled by this example.
