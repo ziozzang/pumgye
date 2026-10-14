@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "pumgye-client"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1124,7 +1124,7 @@ dependencies = [
 
 [[package]]
 name = "pumgye-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "guard-core",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "pumgye-grpc"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "prost",
  "tonic",
@@ -1145,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "pumgye-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "pumgye-core",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "pumgye-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "arc-swap",
