@@ -631,28 +631,95 @@ async fn main() -> anyhow::Result<()> {
         None
     };
     let readiness_router = readiness_router(authority.clone());
-    tokio::try_join!(
-        transport::http(listener, http_tls, router),
-        async move {
-            match grpc_listener {
-                Some(listener) => grpc::serve(listener, grpc_tls.unwrap(), grpc_authority).await,
-                None => std::future::pending::<anyhow::Result<()>>().await,
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let http_stop = stopped.clone();
+    let grpc_stop = stopped.clone();
+    let native_stop = stopped.clone();
+    let readiness_stop = stopped;
+    let draining = authority.clone();
+    let servers = async {
+        tokio::try_join!(
+            transport::http(listener, http_tls, router, shutdown_requested(http_stop)),
+            async move {
+                match grpc_listener {
+                    Some(listener) => {
+                        grpc::serve(
+                            listener,
+                            grpc_tls.unwrap(),
+                            grpc_authority,
+                            shutdown_requested(grpc_stop),
+                        )
+                        .await
+                    }
+                    None => Ok(()),
+                }
+            },
+            async move {
+                match native {
+                    Some(listener) => {
+                        transport::native(
+                            listener,
+                            native_tls,
+                            authority,
+                            shutdown_requested(native_stop),
+                        )
+                        .await
+                    }
+                    None => Ok(()),
+                }
+            },
+            async move {
+                match readiness_listener {
+                    Some(listener) => {
+                        transport::http(
+                            listener,
+                            None,
+                            readiness_router,
+                            shutdown_requested(readiness_stop),
+                        )
+                        .await
+                    }
+                    None => Ok(()),
+                }
             }
-        },
-        async move {
-            match native {
-                Some(listener) => transport::native(listener, native_tls, authority).await,
-                None => std::future::pending::<anyhow::Result<()>>().await,
-            }
-        },
-        async move {
-            match readiness_listener {
-                Some(listener) => transport::http(listener, None, readiness_router).await,
-                None => std::future::pending::<anyhow::Result<()>>().await,
+        )
+        .map(|_| ())
+    };
+    tokio::pin!(servers);
+    tokio::select! {
+        result = &mut servers => result?,
+        result = termination_signal() => {
+            result?;
+            draining.healthy.store(false, Ordering::Release);
+            let _ = stop.send(true);
+            // Bound gRPC graceful shutdown as well as the native/HTTP task drains.
+            if let Ok(result) = tokio::time::timeout(std::time::Duration::from_secs(6), &mut servers).await {
+                result?;
             }
         }
-    )?;
+    }
+
     Ok(())
+}
+
+async fn shutdown_requested(mut stopped: tokio::sync::watch::Receiver<bool>) {
+    while !*stopped.borrow_and_update() {
+        if stopped.changed().await.is_err() {
+            break;
+        }
+    }
+}
+async fn termination_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! { result = tokio::signal::ctrl_c() => result, _ = terminate.recv() => Ok(()) }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
 
 #[cfg(test)]

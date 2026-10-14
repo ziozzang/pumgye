@@ -23,11 +23,12 @@ pub async fn http(
     listener: TcpListener,
     config: Option<Arc<ServerConfig>>,
     router: Router,
+    shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
     hangang_runtime::serve_connections(
         listener,
         std::num::NonZeroUsize::new(2048).unwrap(),
-        Duration::ZERO,
+        Duration::from_secs(5),
         move |stream, _peer| {
             let config = config.clone();
             let router = router.clone();
@@ -58,7 +59,7 @@ pub async fn http(
                 }
             }
         },
-        std::future::pending(),
+        shutdown,
     )
     .await?;
     Ok(())
@@ -89,11 +90,12 @@ pub async fn native(
     listener: TcpListener,
     config: Option<Arc<ServerConfig>>,
     authority: Arc<Authority>,
+    shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
     hangang_runtime::serve_connections(
         listener,
         std::num::NonZeroUsize::new(4096).unwrap(),
-        Duration::ZERO,
+        Duration::from_secs(5),
         move |stream, _peer| {
             let config = config.clone();
             let authority = authority.clone();
@@ -115,7 +117,7 @@ pub async fn native(
                 }
             }
         },
-        std::future::pending(),
+        shutdown,
     )
     .await?;
     Ok(())
@@ -181,7 +183,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let credential = authority.decision.clone();
-        let running = tokio::spawn(native(listener, None, authority));
+        let running = tokio::spawn(native(listener, None, authority, std::future::pending()));
         let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
         socket.write_all(pumgye_protocol::HELLO).await.unwrap();
         socket.write_u16(credential.len() as u16).await.unwrap();

@@ -101,6 +101,7 @@ pub async fn serve(
     listener: TcpListener,
     tls: ServerTlsConfig,
     authority: Arc<Authority>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let incoming = hangang_runtime::incoming(listener);
     hangang_runtime::server(tls)?
@@ -109,7 +110,7 @@ pub async fn serve(
                 .max_decoding_message_size(2048)
                 .max_encoding_message_size(1024),
         )
-        .serve_with_incoming(incoming)
+        .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
     Ok(())
 }

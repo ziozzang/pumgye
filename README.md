@@ -77,3 +77,13 @@ repository. Preparation checks ELF/version/signing identity, verifies the actual
 Ed25519 signature with OpenSSL and binds the payload to the exact artifact.
 The release key is independent of other Hangang World authorities. This supplies
 verified installation assets; it does not implement automatic runtime updates.
+
+## Graceful termination (unreleased)
+
+The server handles SIGTERM and SIGINT, stops accepting new connections, and
+drains native/HTTP connection tasks for up to five seconds. gRPC receives graceful
+shutdown, with a six-second overall shutdown bound. Independent readers can keep
+using the durable policy on the next start. Validate an isolated process with
+`cargo build -p pumgye-server` and `python3 tools/shutdown_smoke.py`. The smoke
+checks actual SIGTERM, clean exit and idle native socket closure; it does not
+qualify in-flight gRPC stream completion or production/Kubernetes rollout.
