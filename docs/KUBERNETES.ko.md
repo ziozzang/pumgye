@@ -206,3 +206,36 @@ TokenReview·현재 객체 검증으로 인증합니다. 품계가 계산한 신
 실제 검증된 Pod는 guest이며 첫 Pod 삭제는 토큰을 거절합니다. Binding 삭제/재생성·
 원천 실패·작성자 배제·재시작 fence도 계속 검사합니다. 두 네이티브 모듈 연관
 검증이며 한강 전체 요청/스트림 연결 검증을 완료한 것은 아닙니다.
+
+
+## 네 네이티브 모듈 요청 검증
+
+소유 워크로드 검증에 실제 실행 파일 세 개를 추가합니다.
+
+```sh
+python3 tools/kubernetes_real_cluster.py --binary /path/to/pumgye \
+  --state-dir /private/owned-kind-qualification --authority \
+  --hopae-driver /path/to/qualify_kubernetes_tokenreview \
+  --gateway-binary /path/to/hangang --hopae-binary /path/to/hopae \
+  --sumunjang-binary /path/to/sumunjang
+```
+
+kubernetes_gateway.py는 품계 원천 권위 옆에 실제 한강·호패·수문장 프로세스를
+새 DB·설정·인증키로 시작합니다. 공개 요청은 HTTPS이고 앱 허용 포트는 실제
+fixture TLS 포트와 일치합니다. HOP1·PPG1·HGD1은 고정 mTLS·분리된 앱 인증을
+사용하고 호패는 실제 Pod-bound Kubernetes 토큰을 검증합니다. 네이티브 TLS
+옵션이 없는 오래된 한강 바이너리는 거절하며 미인증 프로토콜 peer로 대체하지 않습니다.
+
+매핑된 Pod만 백엔드에 도달합니다. 다른 실제 인증된 Pod·미인증 신원 헤더 위조는
+실패합니다. 백엔드 신원은 canonical Workload·AAL 0·일치하는 service이며 원래
+Authorization 토큰은 전달하지 않습니다. 실제 수문장의 observe는 필수 Guard
+조건을 만족하지 않고 명시적 IP 차단은 거절하며 제거 후 회복합니다. Binding 삭제는
+후속 요청을 막고 원천 자격 실패는 사용 불가, Pod 삭제는 인증 거절입니다. 거절된
+경우 백엔드 요청이 없음을 확인합니다. 한강 위임 정책/상태 API도 Kubernetes
+소유 표시를 전달하고 올바른 관리자·두 revision 조건으로도 원천 정책 덮어쓰기를
+거절합니다.
+
+프로세스·고유 Kubernetes 자원을 정리하고 운영 설정/이미지는 보존합니다. 실제
+요청 집행 검증이며 스트림 인증 회수·Kubernetes Pod 패키징/Ingress 소유·분산 watch/
+follower 가용성·CNI 전체 네트워크 보호·전체 성능 완료를 뜻하지 않습니다. 보수적
+polling의 수집 중 사용 불가 구간도 남아 있습니다. 모두 후속 완료 조건입니다.

@@ -250,3 +250,42 @@ verified Pod of the same ServiceAccount remains guest; deleting the first Pod
 invalidates its credential. Existing Binding deletion/recreation, source failure,
 writer exclusion and restart fences remain checked. This qualifies the two native
 components' association, not the complete Hangang request/stream pipeline.
+
+
+## Four native component request qualification
+
+Supply three additional executable paths to the owned workload qualification:
+
+```sh
+python3 tools/kubernetes_real_cluster.py --binary /path/to/pumgye \
+  --state-dir /private/owned-kind-qualification --authority \
+  --hopae-driver /path/to/qualify_kubernetes_tokenreview \
+  --gateway-binary /path/to/hangang --hopae-binary /path/to/hopae \
+  --sumunjang-binary /path/to/sumunjang
+```
+
+`kubernetes_gateway.py` starts actual Hangang, Hopae and Sumunjang processes beside
+the existing Pumgye source authority, using only fresh fixture state and keys.
+The public request uses HTTPS; the application's configured port matches the
+owned listener's actual TLS port. HOP1, PPG1 and HGD1 use pinned mTLS with separate
+application credentials. Native Hopae verifies actual Kubernetes Pod-bound tokens.
+This fixture refuses a gateway binary lacking the required native TLS flags rather
+than downgrading to an unauthenticated protocol peer.
+
+Only the mapped Pod reaches the backend. Another valid Pod and spoofed unauthenticated
+identity headers do not. The backend receives the canonical Workload subject,
+AAL zero and the matching service, and never the incoming Authorization credential.
+Actual Sumunjang observe evidence fails the required Guard gate; an explicit IP
+block denies access and removal recovers it. Binding deletion prevents subsequent
+upstream requests, a source credential failure returns unavailable, and Pod deletion
+returns authentication denial. All rejected cases check that no backend request
+was issued. The delegated Hangang policy/status API exposes Kubernetes ownership
+and rejects a source-policy overwrite even with the correct native administrator
+and both revision fences.
+
+The fixture closes its processes, removes its unique Kubernetes resources and
+leaves production configuration/images unchanged. This qualifies actual request
+enforcement; it does not prove streaming credential withdrawal, Kubernetes Pod
+packaging/Ingress ownership, distributed watch/follower availability, CNI-wide
+network protection or full-chain throughput. Conservative source polling still
+has unavailable collection intervals. These remain explicit completion gates.
