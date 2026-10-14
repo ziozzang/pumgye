@@ -8,9 +8,9 @@ use hyper_util::{
     server::conn::auto::Builder,
     service::TowerToHyperService,
 };
-use rustls::{RootCertStore, ServerConfig, server::WebPkiClientVerifier};
+use rustls::ServerConfig;
 use sha2::{Digest, Sha256};
-use std::{io::Read, path::Path, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpListener,
@@ -19,38 +19,7 @@ use tokio::{
 };
 use tokio_rustls::TlsAcceptor;
 
-pub fn tls_config(cert: &Path, key: &Path, ca: &Path, alpn: &[&[u8]]) -> Result<Arc<ServerConfig>> {
-    fn bytes(path: &Path) -> Result<Vec<u8>> {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(bytes.len() <= 1024 * 1024, "TLS material exceeds bound");
-        Ok(bytes)
-    }
-    let cert_bytes = bytes(cert)?;
-    let key_bytes = bytes(key)?;
-    let ca_bytes = bytes(ca)?;
-    let certs =
-        rustls_pemfile::certs(&mut cert_bytes.as_slice()).collect::<std::io::Result<Vec<_>>>()?;
-    let key = rustls_pemfile::private_key(&mut key_bytes.as_slice())?
-        .ok_or_else(|| anyhow::anyhow!("missing TLS private key"))?;
-    let mut roots = RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut ca_bytes.as_slice()) {
-        roots.add(cert?)?;
-    }
-    ensure!(!roots.is_empty(), "client CA must not be empty");
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let verifier =
-        WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider.clone()).build()?;
-    let mut config = ServerConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)?;
-    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
-    config.max_early_data_size = 0;
-    Ok(Arc::new(config))
-}
+pub use hangang_runtime::tls_config;
 pub async fn http(
     listener: TcpListener,
     config: Option<Arc<ServerConfig>>,
