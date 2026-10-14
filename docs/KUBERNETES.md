@@ -395,3 +395,24 @@ kubectl kustomize deploy/kubernetes
 
 Use the configured cluster wrapper for validation and deployment. This packaging
 recipe does not publish a release or authorize overwriting an existing installation.
+
+### Actual Pod qualification
+
+`tools/kubernetes_pod_smoke.py` qualifies this building block on an explicitly
+selected real cluster wrapper with a preloaded image:
+
+```sh
+python3 tools/kubernetes_pod_smoke.py --kubectl /path/to/cluster-kubectl \
+  --image pumgye:QUALIFIED_VERSION
+```
+
+The owned namespace contains only generated one-day TLS identities, synthetic
+credentials and policy. The nonroot Pod uses the maintained manifests and checks
+valid mTLS HTTP/PPG1, missing client certificate refusal, role-separated credentials,
+readiness API isolation, a genuine policy deny after revocation, and the same deny
+after Pod UID replacement with PVC-backed policy/revision preservation. Unavailable
+responses cannot satisfy the policy-deny assertion. Namespace/credentials are removed
+in `finally`; Retain-policy PVs and backing data remain under the cluster's existing
+retention policy and are reported separately. This fixture does not delete retained
+storage. Kubernetes-source freshness and the full four-component package are separate
+gates; this test uses native policy authority and synthetic trusted caller evidence.

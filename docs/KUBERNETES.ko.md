@@ -332,3 +332,22 @@ kubectl kustomize deploy/kubernetes
 
 설정된 클러스터 wrapper로 검증·배포합니다. 이 절차 자체는 릴리즈 게시나
 기존 설치 덮어쓰기를 의미하지 않습니다.
+
+### 실제 Pod 검증
+
+명시한 실제 클러스터 wrapper와 미리 적재한 이미지로 배포 구성요소를 검증합니다.
+
+```sh
+python3 tools/kubernetes_pod_smoke.py --kubectl /path/to/cluster-kubectl \
+  --image pumgye:QUALIFIED_VERSION
+```
+
+전용 Namespace에 하루짜리 TLS 신원과 합성 자격·정책만 생성합니다. 관리하는
+manifest로 nonroot Pod를 실행하여 mTLS HTTP/PPG1, 클라이언트 인증서 없는
+호출의 거부, 역할별 자격, readiness의 관리 API 비노출, 회수 후 실제 정책 거부,
+Pod UID 교체 후 PVC의 정책·리비전 보존 및 같은 거부를 검사합니다. 사용 불가
+응답으로 정책 거부 검사를 대신 통과하지 못합니다. finally에서 Namespace와
+자격을 정리하지만 Retain PV·데이터는 기존 보존 정책에 따라 남고 별도로
+보고합니다. 이 fixture는 보존된 저장소를 삭제하지 않습니다. 자체 정책 원천과
+합성된 신뢰 호출자 근거를 사용하는 검사이며 Kubernetes 원천 신선도와 네 모듈
+전체 통합 패키지는 별도 검증 대상입니다.
