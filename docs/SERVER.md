@@ -99,3 +99,24 @@ Clippy and actual four-process native/gRPC durable request chains passed. This
 is the owner boundary for future signing, not a permission-receipt API: native
 resource/catalog mapping, authentication/network receipt verification, signer
 key lifecycle and downstream projection replay admission remain unfinished.
+
+## Resource decision HTTP API (unreleased)
+
+`POST /v1/resource/decision` requires the decision credential (administrator
+credentials do not authorize it) and the existing authenticated listener policy.
+Its bounded 2 KiB JSON contains `resource`, `action`, `subject`, `ip`, `aal`,
+`guard` and optional `minimum_revision`. There is no caller-selected service,
+permission or information class; unknown fields are refused. Only a trusted
+enforcement adapter may supply identity/assurance/network evidence here.
+
+The response contains version/revision/allow/reason and zero TTL. Missing/stale
+authority or required guard evidence returns 503. Resource/action absence and
+insufficient rights/assurance return a denied decision. Active owner snapshot and
+source lease are fenced around evaluation, and no SQL runs per decision.
+
+`cargo build -p pumgye-server && python3 tools/resource_catalog_smoke.py`
+qualifies the actual isolated process, role isolation, class injection refusal,
+resource assurance, CAS catalog revocation, restart without bootstrap resurrection
+and restoration. Router/workspace tests (33) and strict Clippy pass. This is an
+unsigned decision API, not authentication-receipt verification or permission
+issuance; resource gRPC, Hangang UI/dispatch and signed projection remain open.

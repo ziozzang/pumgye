@@ -89,3 +89,21 @@ snapshot 교체/거부 시 발행 미호출 회귀 검사·workspace 30개 테�
 Clippy·실제 네 서버 native/gRPC 영속 요청 체인이 통과했습니다. 후속 서명의
 소유자 경계이며 권한 receipt API가 아닙니다. 네이티브 자원/catalog 매핑·
 인증/네트워크 receipt 검증·서명 키 수명주기·변환 단계 재사용 방지는 아직 남아 있습니다.
+
+## 자원 판정 HTTP API (미릴리스)
+
+`POST /v1/resource/decision`은 decision 자격과 기존 인증 리스너 경계를
+사용합니다(관리자 자격으로 질의하지 못합니다). 최대 2 KiB JSON에는 `resource`·
+`action`·`subject`·`ip`·`aal`·`guard`와 선택 `minimum_revision`만 넣습니다.
+서비스·권한·정보등급은 호출자가 지정하지 않으며 모르는 필드는 거부합니다.
+신원/인증 수준/네트워크 근거는 신뢰한 집행 어댑터만 전달해야 합니다.
+
+응답은 version/revision/allow/reason과 TTL 0입니다. 원천·리비전·필수 수문장
+근거를 사용할 수 없으면 503, 자원/행위 부재·권한/인증 수준 부족은 거부 판정입니다.
+평가 전후 활성 소유자 snapshot·원천 lease를 검사하고 판정 중 SQL을 호출하지 않습니다.
+
+`cargo build -p pumgye-server && python3 tools/resource_catalog_smoke.py`로
+실제 격리 프로세스·자격 역할 분리·정보등급 주입 거부·자원 인증 수준·CAS 회수·
+재시작 후 bootstrap 미복구·정책 복구를 확인했습니다. 라우터/workspace 33개
+검사와 엄격한 Clippy가 통과했습니다. 서명 없는 판정 API이며 인증 receipt 검증·
+권한 발행은 아닙니다. 자원 gRPC·한강 UI/집행·서명 기반 자격 전달은 남아 있습니다.

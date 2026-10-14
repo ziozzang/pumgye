@@ -107,6 +107,18 @@ struct Authority {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ResourceQuery {
+    resource: String,
+    action: String,
+    subject: String,
+    ip: IpAddr,
+    aal: u8,
+    guard: String,
+    #[serde(default)]
+    minimum_revision: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Query {
     service_id: String,
     subject: String,
@@ -215,7 +227,7 @@ async fn request_gate(
 ) -> axum::response::Response {
     let expected = match request.uri().path() {
         "/v1/policy" | "/v1/status" | "/v1/audit" => Some(&a.admin),
-        "/v1/decision" => Some(&a.decision),
+        "/v1/decision" | "/v1/resource/decision" => Some(&a.decision),
         _ => None,
     };
     if expected.is_some_and(|token| !authorized(request.headers(), token)) {
@@ -449,6 +461,69 @@ async fn decide(
         serde_json::json!({"version":1,"revision":result.revision,"allow":decision==pumgye_core::Decision::Allow,"reason":format!("{decision:?}"),"ttl_ms":0}),
     ))
 }
+async fn decide_resource(
+    State(a): State<Arc<Authority>>,
+    headers: HeaderMap,
+    Json(q): Json<ResourceQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !authorized(&headers, &a.decision) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if q.aal > 3
+        || [&q.resource, &q.action, &q.subject].iter().any(|v| {
+            v.is_empty()
+                || v.len() > 128
+                || !v
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+        })
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let guard = match q.guard.as_str() {
+        "enforced_allow" => GuardEvidence::EnforcedAllow,
+        "deny" => GuardEvidence::Deny,
+        "observe" => GuardEvidence::Observe,
+        "unavailable" => GuardEvidence::Unavailable,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    let view = a.view.load();
+    let active = || {
+        a.healthy.load(Ordering::Acquire)
+            && (!a.kubernetes_owned
+                || (a.source_ready.load(Ordering::Acquire)
+                    && view
+                        .source_expires
+                        .is_some_and(|deadline| std::time::Instant::now() < deadline)))
+    };
+    if !active() || view.document.revision < q.minimum_revision {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let decision =
+        view.compiled
+            .evaluate_resource(&q.resource, &q.action, &q.subject, q.ip, q.aal, guard);
+    a.queries.fetch_add(1, Ordering::Relaxed);
+    if !active() || !Arc::ptr_eq(&view, &a.view.load()) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let (allow, reason) = match decision {
+        pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::GuardUnavailable) => {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        pumgye_core::ResourceDecision::Decided(decision) => (
+            decision == pumgye_core::Decision::Allow,
+            format!("{decision:?}"),
+        ),
+        other => (false, format!("{other:?}")),
+    };
+    Ok(Json(
+        serde_json::json!({"version":1,"revision":view.document.revision,"allow":allow,"reason":reason,"ttl_ms":0}),
+    ))
+}
+fn resource_route() -> axum::routing::MethodRouter<Arc<Authority>> {
+    post(decide_resource).layer(axum::extract::DefaultBodyLimit::max(2048))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -623,6 +698,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/policy", get(read).put(publish))
         .route("/v1/status", get(status))
         .route("/v1/audit", get(audit_records))
+        .route("/v1/resource/decision", resource_route())
         .route(
             "/v1/decision",
             post(decide).layer(axum::extract::DefaultBodyLimit::max(2048)),
@@ -751,6 +827,111 @@ async fn termination_signal() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn resource_route_uses_owner_class_and_isolates_decision_credentials() {
+        use tower::ServiceExt;
+        let root = tempfile::tempdir().unwrap();
+        let owner = authority(root.path());
+        let document: Document =
+            serde_json::from_str(include_str!("../../../examples/resource-catalog.json")).unwrap();
+        owner.view.store(Arc::new(View {
+            compiled: document.policy.compile().unwrap(),
+            document: Document {
+                revision: 1,
+                ..document
+            },
+            source_expires: None,
+        }));
+        let router = Router::new()
+            .route("/v1/resource/decision", resource_route())
+            .layer(axum::middleware::from_fn_with_state(
+                owner.clone(),
+                request_gate,
+            ))
+            .with_state(owner.clone());
+        let query = serde_json::json!({"resource":"db:orders","action":"select","subject":"fixture","ip":"192.0.2.9","aal":2,"guard":"enforced_allow"});
+        let call = |body: serde_json::Value, token: &str| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/v1/resource/decision")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(body.to_string()))
+                .unwrap()
+        };
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(call(query.clone(), &owner.admin))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let response = router
+            .clone()
+            .oneshot(call(query.clone(), &owner.decision))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 2048)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["allow"], true);
+        assert_eq!(body["revision"], 1);
+        assert_eq!(body["ttl_ms"], 0);
+        let mut downgraded = query.clone();
+        downgraded["information_class"] = serde_json::json!("public");
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(call(downgraded, &owner.decision))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let mut weak = query.clone();
+        weak["aal"] = serde_json::json!(1);
+        let response = router
+            .clone()
+            .oneshot(call(weak, &owner.decision))
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 2048)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["allow"], false);
+        assert_eq!(body["reason"], "AssuranceDenied");
+        let mut stale = query.clone();
+        stale["minimum_revision"] = serde_json::json!(2);
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(call(stale, &owner.decision))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let mut observe = query;
+        observe["guard"] = serde_json::json!("observe");
+        assert_eq!(
+            router
+                .oneshot(call(observe, &owner.decision))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
     #[test]
     fn owner_allow_callback_cannot_emit_after_snapshot_retirement() {
         let root = tempfile::tempdir().unwrap();
