@@ -237,3 +237,26 @@ opaque observation carries IP/revision/expiry; it is not a signed network receip
 or a distributed lease. Startup/configuration, actual Sumunjang/Pumgye wire
 qualification, durable floor/backbone replication and permit integration remain
 open. Neither endpoint nor deployment is activated by this library increment.
+
+## Actual Sumunjang/Pumgye client qualification (unreleased)
+
+The owned `examples/sumunjang_live_qualification.rs` entrypoint passed against
+an actual Sumunjang debug executable through its existing portable gRPC fixture.
+Persistent mTLS exercised Enforce Allow, IP binding, block removal/new revision,
+reblocking/new refusal retiring the previous observation, observe rejection,
+collector/admin separation, TLS server-name rejection and revision-floor refusal.
+The parent fixture also checks malformed/oversized input, client-certificate
+refusal, native parity and supervised listener handover. Strict all-target Clippy
+passed. The example uses only the fixture’s loopback plaintext management adapter
+for owned policy mutations; native decisions use mTLS. No operating data is used.
+
+```sh
+cargo build -p pumgye-server --example sumunjang_live_qualification
+# Run in the Sumunjang repository with grpcio/grpcio-tools installed:
+python tools/grpc_smoke.py --binary target/debug/sumunjang \
+  --hangang-client /qualified/pumgye/examples/sumunjang_live_qualification
+```
+
+The fixture’s legacy `--hangang-client` option accepts this compatible native
+qualification executable. These are debug process tests, not static-release,
+startup-resource, distributed floor/restore or permit endpoint qualification.

@@ -205,3 +205,18 @@ TLS 연결 생성은 호패 실시간 클라이언트와 정적으로 공유합�
 IP/리비전/만료를 보관하며 서명 네트워크 receipt나 분산 lease가 아닙니다. 서버 시작
 설정·실제 수문장/품계 전송 검증·영속 하한/백본 복제·permit 연결은 남아 있습니다.
 이 라이브러리 변경으로 endpoint나 운영 배포를 활성화하지 않았습니다.
+
+## 실제 수문장/품계 클라이언트 검증 (미릴리스)
+
+examples/sumunjang_live_qualification.rs를 기존 수문장 portable gRPC 검사에
+연결해 실제 debug 실행 파일로 검증했습니다. 지속 mTLS에서 Enforce Allow·IP 결합·
+차단 해제/새 리비전·재차단/새 거부에 따른 과거 관측 무효화·observe 거부·
+collector/admin 분리·TLS 서버 이름·리비전 하한 거부가 통과했습니다. 부모 검사는
+잘못된/과도한 입력·클라이언트 인증서 거부·네이티브 일치·감독 리스너 인계를
+검사합니다. 엄격한 all-target Clippy도 통과했습니다. 예제의 정책 변경은 오직
+검사 소유 loopback HTTP 관리 어댑터에서 수행하며 판정은 mTLS입니다. 운영 데이터는
+사용하지 않습니다.
+
+수문장 도구의 기존 --hangang-client 옵션에 호환되는 이 품계 실행 파일을
+전달합니다. debug 프로세스 검사이며 정적 릴리스·시작 자원·분산 하한/복구·
+permit endpoint 검증은 아닙니다.
