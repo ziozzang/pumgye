@@ -1,86 +1,18 @@
 //! Additional decision transport; all policy evaluation stays in Authority.
 use crate::Authority;
-use anyhow::{Result, ensure};
+use anyhow::Result;
+pub use hangang_runtime::configuration;
 use pumgye_grpc::v1::{
     DecisionReply, DecisionRequest,
     authorization_server::{Authorization, AuthorizationServer},
 };
 use std::{
-    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    path::Path,
-    pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
-    time::Duration,
 };
-use tokio::{
-    io::{AsyncRead, AsyncWrite, ReadBuf},
-    net::{TcpListener, TcpStream},
-    sync::{OwnedSemaphorePermit, Semaphore},
-};
-use tokio_stream::{StreamExt, wrappers::TcpListenerStream};
-use tonic::{
-    Request, Response, Status,
-    transport::{
-        Certificate, Identity, Server, ServerTlsConfig,
-        server::{Connected, TcpConnectInfo},
-    },
-};
+use tokio::net::TcpListener;
+use tonic::{Request, Response, Status, transport::ServerTlsConfig};
 
-pub fn configuration(cert: &Path, key: &Path, ca: &Path) -> Result<ServerTlsConfig> {
-    fn bounded(path: &Path) -> Result<Vec<u8>> {
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        ensure!(
-            bytes.len() <= 1024 * 1024,
-            "gRPC TLS material exceeds bound"
-        );
-        Ok(bytes)
-    }
-    Ok(ServerTlsConfig::new()
-        .identity(Identity::from_pem(bounded(cert)?, bounded(key)?))
-        .client_ca_root(Certificate::from_pem(bounded(ca)?))
-        .client_auth_optional(false)
-        .timeout(Duration::from_secs(3)))
-}
-struct Connection {
-    socket: TcpStream,
-    _permit: OwnedSemaphorePermit,
-}
-impl Connected for Connection {
-    type ConnectInfo = TcpConnectInfo;
-    fn connect_info(&self) -> Self::ConnectInfo {
-        self.socket.connect_info()
-    }
-}
-impl AsyncRead for Connection {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().socket).poll_read(cx, buffer)
-    }
-}
-impl AsyncWrite for Connection {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        bytes: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().socket).poll_write(cx, bytes)
-    }
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().socket).poll_flush(cx)
-    }
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().socket).poll_shutdown(cx)
-    }
-}
 struct Service(Arc<Authority>);
 #[tonic::async_trait]
 impl Authorization for Service {
@@ -170,26 +102,8 @@ pub async fn serve(
     tls: ServerTlsConfig,
     authority: Arc<Authority>,
 ) -> Result<()> {
-    let connections = Arc::new(Semaphore::new(2048));
-    let incoming = TcpListenerStream::new(listener).filter_map(move |entry| match entry {
-        Ok(socket) => {
-            let permit = connections.clone().try_acquire_owned().ok()?;
-            if let Err(error) = socket.set_nodelay(true) {
-                return Some(Err(error));
-            }
-            Some(Ok(Connection {
-                socket,
-                _permit: permit,
-            }))
-        }
-        Err(error) => Some(Err(error)),
-    });
-    Server::builder()
-        .tls_config(tls)?
-        .concurrency_limit_per_connection(64)
-        .max_concurrent_streams(Some(64))
-        .http2_max_header_list_size(Some(8192))
-        .timeout(Duration::from_millis(1000))
+    let incoming = hangang_runtime::incoming(listener);
+    hangang_runtime::server(tls)?
         .add_service(
             AuthorizationServer::new(Service(authority))
                 .max_decoding_message_size(2048)

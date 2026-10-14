@@ -507,6 +507,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hangang-runtime"
+version = "0.1.0"
+source = "git+https://github.com/ziozzang/hangang-runtime?rev=81352ef35a2a0c522e02b2f14ac4770b59a17d40#81352ef35a2a0c522e02b2f14ac4770b59a17d40"
+dependencies = [
+ "anyhow",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1143,6 +1154,7 @@ dependencies = [
  "axum",
  "clap",
  "fs2",
+ "hangang-runtime",
  "hyper-util",
  "libc",
  "pumgye-core",
