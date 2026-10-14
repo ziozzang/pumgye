@@ -214,3 +214,12 @@ signature. Internal deployment passed private operating-DB clone preflight,
 exact policy preservation and two restarts; the unified console still returns 200.
 Private consistent backup and binary rollback material are retained. This version
 has not yet been qualified in the remote K3s world fixture.
+
+## v0.1.5 release preparation
+
+This increment adds native authenticated resource decisions backed by Hopae live
+receipt validation and Sumunjang Enforce observations, pinned mTLS startup
+resources and bounded persistent clients. Candidate static three-authority tests
+passed; exact newly versioned artifacts must pass before signed publication.
+Signed permit, route/projection ownership, Hangang dispatch and distributed
+restore/fleet qualification remain open. GitHub Actions remains disabled.
