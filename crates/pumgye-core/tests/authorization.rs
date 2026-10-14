@@ -244,3 +244,76 @@ fn explicit_optional_network_gate_still_obeys_deny() {
         D::GuardDenied
     );
 }
+
+#[test]
+fn highest_right_bit_and_ipv6_specific_guest_override_survive_compilation() {
+    let mut policy = policy();
+    policy.information_classes = (0..64).map(|i| format!("class{i}")).collect();
+    let service = policy.services.get_mut("orders").unwrap();
+    service.permissions = (0..64).map(|i| format!("action{i}")).collect();
+    service.roles.clear();
+    service.roles.insert(
+        "top".into(),
+        pumgye_core::Role {
+            permissions: vec!["action63".into()],
+            information_classes: vec!["class63".into()],
+            inherits: vec![],
+            minimum_aal: 3,
+        },
+    );
+    service.users = [("u_writer".into(), vec!["top".into()])].into();
+    service.networks = vec![
+        pumgye_core::Network {
+            cidr: "2001:db8::/32".parse().unwrap(),
+            roles: vec!["top".into()],
+        },
+        pumgye_core::Network {
+            cidr: "2001:db8:1::/48".parse().unwrap(),
+            roles: vec!["guest".into()],
+        },
+    ];
+    let compiled = policy.compile().unwrap();
+    let evaluate = |ip: &str, action, class, aal, evidence| {
+        compiled.evaluate(
+            "orders",
+            "u_writer",
+            ip.parse().unwrap(),
+            action,
+            class,
+            aal,
+            evidence,
+        )
+    };
+    assert_eq!(
+        evaluate("2001:db8:2::1", "action63", "class63", 3, G::EnforcedAllow),
+        D::Allow
+    );
+    assert_eq!(
+        evaluate("2001:db8:1::1", "action63", "class63", 3, G::EnforcedAllow),
+        D::PermissionDenied
+    );
+    assert_eq!(
+        evaluate("2001:db8:2::1", "action0", "class63", 3, G::EnforcedAllow),
+        D::PermissionDenied
+    );
+    assert_eq!(
+        evaluate("2001:db8:2::1", "action63", "class0", 3, G::EnforcedAllow),
+        D::ClassDenied
+    );
+    assert_eq!(
+        evaluate("2001:db8:2::1", "action63", "class63", 2, G::EnforcedAllow),
+        D::AssuranceDenied
+    );
+    assert_eq!(
+        evaluate("2001:db8:2::1", "action63", "class63", 4, G::EnforcedAllow),
+        D::AssuranceDenied
+    );
+    for evidence in [G::Observe, G::Unavailable] {
+        assert_eq!(
+            evaluate("2001:db8:2::1", "action63", "class63", 3, evidence),
+            D::GuardUnavailable
+        );
+    }
+    policy.information_classes.push("overflow".into());
+    assert!(policy.compile().is_err());
+}
