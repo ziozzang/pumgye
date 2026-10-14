@@ -34,3 +34,8 @@ enum Verdict {
   VERDICT_DENY = 2;
   VERDICT_UNAVAILABLE = 3;
 }
+
+service ResourceAuthorization { rpc Decide(ResourceDecisionRequest) returns (ResourceDecisionReply); }
+// Classification and action mapping come from the authoritative resource catalog.
+message ResourceDecisionRequest { uint64 request_id = 1; uint64 minimum_revision = 2; bytes ip = 3; uint32 aal = 4; GuardEvidence guard = 5; string resource = 6; string action = 7; string subject = 8; }
+message ResourceDecisionReply { uint64 request_id = 1; uint64 revision = 2; Verdict verdict = 3; string reason = 4; uint32 cache_ttl_ms = 5; }

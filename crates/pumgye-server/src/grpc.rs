@@ -14,30 +14,104 @@ use tokio::net::TcpListener;
 use tonic::{Request, Response, Status, transport::ServerTlsConfig};
 
 struct Service(Arc<Authority>);
+impl Service {
+    fn admission(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, Status> {
+        let mut values = metadata.get_all("authorization").iter();
+        let value = values
+            .next()
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "));
+        if values.next().is_some()
+            || !value.is_some_and(|v| {
+                crate::credential_matches(v.as_bytes(), self.0.decision.as_bytes())
+            })
+        {
+            return Err(Status::unauthenticated("decision credential required"));
+        }
+        self.0
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("decision capacity"))
+    }
+}
+#[tonic::async_trait]
+impl pumgye_grpc::v1::resource_authorization_server::ResourceAuthorization for Service {
+    async fn decide(
+        &self,
+        request: Request<pumgye_grpc::v1::ResourceDecisionRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ResourceDecisionReply>, Status> {
+        let _permit = self.admission(request.metadata())?;
+        let input = request.into_inner();
+        let ip = match input.ip.as_slice() {
+            bytes if bytes.len() == 4 => {
+                IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(bytes).unwrap()))
+            }
+            bytes if bytes.len() == 16 => {
+                IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).unwrap()))
+            }
+            _ => return Err(Status::invalid_argument("verified address required")),
+        };
+        let guard = match input.guard {
+            1 => pumgye_core::GuardEvidence::EnforcedAllow,
+            2 => pumgye_core::GuardEvidence::Deny,
+            3 => pumgye_core::GuardEvidence::Observe,
+            4 => pumgye_core::GuardEvidence::Unavailable,
+            _ => return Err(Status::invalid_argument("guard evidence required")),
+        };
+        let aal =
+            u8::try_from(input.aal).map_err(|_| Status::invalid_argument("invalid assurance"))?;
+        let query = crate::ResourceEvaluation {
+            resource: &input.resource,
+            action: &input.action,
+            subject: &input.subject,
+            ip,
+            aal,
+            guard,
+            minimum_revision: input.minimum_revision,
+        };
+        if !query.valid() {
+            return Err(Status::invalid_argument("invalid resource scope"));
+        }
+        let result = self.0.resource_decision(&query);
+        let (revision, verdict, reason) = match result {
+            Some((
+                revision,
+                pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::Allow),
+            )) => (revision, 1, "Allow".into()),
+            Some((
+                revision,
+                pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::GuardUnavailable),
+            )) => (revision, 3, "GuardUnavailable".into()),
+            Some((revision, pumgye_core::ResourceDecision::Decided(decision))) => {
+                (revision, 2, format!("{decision:?}"))
+            }
+            Some((revision, other)) => (revision, 2, format!("{other:?}")),
+            None => (
+                self.0.view.load().document.revision,
+                3,
+                "Unavailable".into(),
+            ),
+        };
+        Ok(Response::new(pumgye_grpc::v1::ResourceDecisionReply {
+            request_id: input.request_id,
+            revision,
+            verdict,
+            reason,
+            cache_ttl_ms: 0,
+        }))
+    }
+}
 #[tonic::async_trait]
 impl Authorization for Service {
     async fn decide(
         &self,
         request: Request<DecisionRequest>,
     ) -> Result<Response<DecisionReply>, Status> {
-        let mut values = request.metadata().get_all("authorization").iter();
-        let value = values
-            .next()
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.strip_prefix("Bearer "));
-        if values.next().is_some()
-            || !value.is_some_and(|value| {
-                crate::credential_matches(value.as_bytes(), self.0.decision.as_bytes())
-            })
-        {
-            return Err(Status::unauthenticated("decision credential required"));
-        }
-        let _permit = self
-            .0
-            .requests
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Status::resource_exhausted("decision capacity"))?;
+        let _permit = self.admission(request.metadata())?;
         let input = request.into_inner();
         let ip = match input.ip.as_slice() {
             bytes if bytes.len() == 4 => {
@@ -106,9 +180,16 @@ pub async fn serve(
     let incoming = hangang_runtime::incoming(listener);
     hangang_runtime::server(tls)?
         .add_service(
-            AuthorizationServer::new(Service(authority))
+            AuthorizationServer::new(Service(authority.clone()))
                 .max_decoding_message_size(2048)
                 .max_encoding_message_size(1024),
+        )
+        .add_service(
+            pumgye_grpc::v1::resource_authorization_server::ResourceAuthorizationServer::new(
+                Service(authority),
+            )
+            .max_decoding_message_size(2048)
+            .max_encoding_message_size(1024),
         )
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
@@ -118,6 +199,110 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn resource_rpc_owns_class_and_shares_role_capacity_and_revision_fences() {
+        use pumgye_grpc::v1::{
+            ResourceDecisionRequest, resource_authorization_server::ResourceAuthorization,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let owner = crate::tests::authority(root.path());
+        let document: crate::Document =
+            serde_json::from_str(include_str!("../../../examples/resource-catalog.json")).unwrap();
+        owner.view.store(Arc::new(crate::View {
+            compiled: document.policy.compile().unwrap(),
+            document: crate::Document {
+                revision: 1,
+                ..document
+            },
+            source_expires: None,
+        }));
+        let service = Service(owner.clone());
+        let request = |token: &str| {
+            let mut r = Request::new(ResourceDecisionRequest {
+                request_id: 42,
+                minimum_revision: 1,
+                ip: vec![192, 0, 2, 9],
+                aal: 2,
+                guard: 1,
+                resource: "db:orders".into(),
+                action: "select".into(),
+                subject: "fixture".into(),
+            });
+            r.metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            r
+        };
+        assert_eq!(
+            ResourceAuthorization::decide(&service, request(&owner.admin))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        let reply = ResourceAuthorization::decide(&service, request(&owner.decision))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(reply.request_id, 42);
+        assert_eq!(reply.verdict, 1);
+        assert_eq!(reply.revision, 1);
+        assert_eq!(reply.cache_ttl_ms, 0);
+        let mut weak = request(&owner.decision);
+        weak.get_mut().aal = 1;
+        let reply = ResourceAuthorization::decide(&service, weak)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(reply.verdict, 2);
+        assert_eq!(reply.reason, "AssuranceDenied");
+        let mut missing = request(&owner.decision);
+        missing.get_mut().ip.clear();
+        assert_eq!(
+            ResourceAuthorization::decide(&service, missing)
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut stale = request(&owner.decision);
+        stale.get_mut().minimum_revision = 2;
+        assert_eq!(
+            ResourceAuthorization::decide(&service, stale)
+                .await
+                .unwrap()
+                .into_inner()
+                .verdict,
+            3
+        );
+        let mut observe = request(&owner.decision);
+        observe.get_mut().guard = 3;
+        assert_eq!(
+            ResourceAuthorization::decide(&service, observe)
+                .await
+                .unwrap()
+                .into_inner()
+                .verdict,
+            3
+        );
+        let held = owner
+            .requests
+            .clone()
+            .acquire_many_owned(4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            ResourceAuthorization::decide(&service, request(&owner.decision))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::ResourceExhausted
+        );
+        drop(held);
+    }
+
     fn request(token: &str) -> Request<DecisionRequest> {
         let mut request = Request::new(DecisionRequest {
             request_id: 7,

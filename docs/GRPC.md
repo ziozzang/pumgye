@@ -46,3 +46,20 @@ missing client certificate, invalid/oversized input and unavailable revision flo
 Unit tests additionally check duplicate metadata, capacity and expired source fences.
 No load result, inbound Kubernetes webhook or PostgreSQL adapter is established by
 these checks. Existing native transport remains available without enabling gRPC.
+
+## ResourceAuthorization service (unreleased)
+
+The same mandatory-mTLS listener registers `ResourceAuthorization/Decide`
+separately from legacy `Authorization/Decide`. Input contains correlation,
+minimum owner revision, verified IP/AAL/guard evidence, resource/action and
+subject; there is no service/permission/class override. IP must contain exactly
+4 or 16 bytes, assurance 0..3 and scope identifiers are bounded. Only the
+authenticated decision role may call either service; both share global admission.
+
+Resource RPC and HTTP use the same native immutable owner evaluation/freshness
+fence. The bounded reply contains correlation, owner revision, Allow/Deny/
+Unavailable, reason and zero TTL. Handler tests cover native classification,
+assurance denial, role/capacity isolation, missing IP and stale/observe refusal.
+Workspace tests (34) and strict Clippy pass. The new resource RPC has not yet
+been qualified over actual mTLS sockets or used by Hangang dispatch/UI; this
+unsigned result is not a signed permit or verified authentication receipt.

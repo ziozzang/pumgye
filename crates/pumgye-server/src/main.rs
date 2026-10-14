@@ -152,7 +152,52 @@ fn credential_matches(value: &[u8], expected: &[u8]) -> bool {
             .fold(0u8, |acc, (a, b)| acc | (a ^ b))
             == 0
 }
+struct ResourceEvaluation<'a> {
+    resource: &'a str,
+    action: &'a str,
+    subject: &'a str,
+    ip: IpAddr,
+    aal: u8,
+    guard: GuardEvidence,
+    minimum_revision: u64,
+}
+impl ResourceEvaluation<'_> {
+    fn valid(&self) -> bool {
+        self.aal <= 3
+            && [self.resource, self.action, self.subject].iter().all(|v| {
+                !v.is_empty()
+                    && v.len() <= 128
+                    && v.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+            })
+    }
+}
 impl Authority {
+    fn resource_decision(
+        &self,
+        q: &ResourceEvaluation<'_>,
+    ) -> Option<(u64, pumgye_core::ResourceDecision)> {
+        let view = self.view.load();
+        let active = || {
+            self.healthy.load(Ordering::Acquire)
+                && (!self.kubernetes_owned
+                    || (self.source_ready.load(Ordering::Acquire)
+                        && view
+                            .source_expires
+                            .is_some_and(|deadline| std::time::Instant::now() < deadline)))
+        };
+        if !active() || view.document.revision < q.minimum_revision {
+            return None;
+        }
+        let decision = view
+            .compiled
+            .evaluate_resource(q.resource, q.action, q.subject, q.ip, q.aal, q.guard);
+        self.queries.fetch_add(1, Ordering::Relaxed);
+        if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
+            return None;
+        }
+        Some((view.document.revision, decision))
+    }
     fn available(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
             && (!self.kubernetes_owned
@@ -487,25 +532,18 @@ async fn decide_resource(
         "unavailable" => GuardEvidence::Unavailable,
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-    let view = a.view.load();
-    let active = || {
-        a.healthy.load(Ordering::Acquire)
-            && (!a.kubernetes_owned
-                || (a.source_ready.load(Ordering::Acquire)
-                    && view
-                        .source_expires
-                        .is_some_and(|deadline| std::time::Instant::now() < deadline)))
+    let query = ResourceEvaluation {
+        resource: &q.resource,
+        action: &q.action,
+        subject: &q.subject,
+        ip: q.ip,
+        aal: q.aal,
+        guard,
+        minimum_revision: q.minimum_revision,
     };
-    if !active() || view.document.revision < q.minimum_revision {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
-    let decision =
-        view.compiled
-            .evaluate_resource(&q.resource, &q.action, &q.subject, q.ip, q.aal, guard);
-    a.queries.fetch_add(1, Ordering::Relaxed);
-    if !active() || !Arc::ptr_eq(&view, &a.view.load()) {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
-    }
+    let (revision, decision) = a
+        .resource_decision(&query)
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let (allow, reason) = match decision {
         pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::GuardUnavailable) => {
             return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -517,7 +555,7 @@ async fn decide_resource(
         other => (false, format!("{other:?}")),
     };
     Ok(Json(
-        serde_json::json!({"version":1,"revision":view.document.revision,"allow":allow,"reason":reason,"ttl_ms":0}),
+        serde_json::json!({"version":1,"revision":revision,"allow":allow,"reason":reason,"ttl_ms":0}),
     ))
 }
 fn resource_route() -> axum::routing::MethodRouter<Arc<Authority>> {

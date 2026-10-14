@@ -42,3 +42,18 @@ cargo build --locked --release -p pumgye-client --example qualify
 사용 불가를 검증합니다. unit 검사에는 중복 metadata·용량·원천 만료가 포함됩니다.
 부하 수치·Kubernetes 역방향 webhook·PostgreSQL 어댑터를 입증하는 검사는 아닙니다.
 gRPC를 활성화하지 않아도 기존 네이티브 전송을 사용할 수 있습니다.
+
+## ResourceAuthorization 서비스 (미릴리스)
+
+같은 필수 mTLS 리스너에 기존 `Authorization/Decide`와 별도로
+`ResourceAuthorization/Decide`를 등록합니다. 입력은 요청 ID·최소 소유자
+리비전·검증된 IP/AAL/수문장 근거·자원/행위·신원이며 서비스/권한/등급을
+덮어쓰는 필드는 없습니다. IP는 정확히 4/16 bytes·인증 수준은 0..3·범위
+식별자는 제한되며 양 서비스는 decision 역할 인증·전체 처리 용량을 공유합니다.
+
+자원 RPC·HTTP는 동일한 네이티브 불변 소유자 판정/신선도 경계를 사용합니다.
+제한된 응답은 요청 ID·소유자 리비전·Allow/Deny/Unavailable·사유·TTL 0을
+포함합니다. 핸들러에서 등급·인증 수준·역할/용량 분리·IP 누락·오래된 리비전/
+observe 거부를 확인하고 workspace 34개 검사·엄격한 Clippy가 통과했습니다.
+새 자원 RPC의 실제 mTLS 소켓·한강 집행/UI 연결은 아직 검증하지 않았으며
+서명 permit 또는 검증된 인증 receipt가 되는 것은 아닙니다.
