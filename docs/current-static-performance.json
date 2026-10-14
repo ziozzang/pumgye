@@ -1,0 +1,95 @@
+{
+  "date": "2026-10-14",
+  "components": {
+    "hangang": "v0.3.3/519a1e5",
+    "hopae": "v0.0.5/8ce0b8a",
+    "sumunjang": "v0.3.4/352e707",
+    "pumgye": "v0.1.1/da45832"
+  },
+  "scope": "Owned loopback functional fixtures, single-service static API key, warm persistent native mTLS peers, closed-loop HTTPS and Go origin; no external-provider or fleet load. Core benchmark uses 65536 users and 65536 IPv4 /32 assignments and excludes compilation/SQL/transport.",
+  "full_chain_workers16": [
+    {
+      "elapsed_seconds": 10.001905024,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1320,
+      "p99_us": 1900,
+      "statuses": {
+        "200": 119068
+      },
+      "verified_qps": 11904.532158053014,
+      "verified_responses": 119068,
+      "workers": 16,
+      "trial": 1,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    },
+    {
+      "elapsed_seconds": 10.002854075,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1365,
+      "p99_us": 2058,
+      "statuses": {
+        "200": 115042
+      },
+      "verified_qps": 11500.917551873814,
+      "verified_responses": 115042,
+      "workers": 16,
+      "trial": 2,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    },
+    {
+      "elapsed_seconds": 10.002741756,
+      "failures": 0,
+      "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+      "p50_us": 1380,
+      "p99_us": 2009,
+      "statuses": {
+        "200": 114274
+      },
+      "verified_qps": 11424.26774453658,
+      "verified_responses": 114274,
+      "workers": 16,
+      "trial": 3,
+      "all_components_real": true,
+      "origin": "Go validated origin"
+    }
+  ],
+  "compiled_core_single_thread": [
+    {
+      "decisions_per_second": 3385828.9636445465,
+      "elapsed_seconds": 0.295348646,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 295.348646,
+      "scope": "single-thread compiled core; warmed sequential maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000
+    },
+    {
+      "decisions_per_second": 3276808.914765747,
+      "elapsed_seconds": 0.305174951,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 305.174951,
+      "scope": "single-thread compiled core; warmed sequential maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000
+    },
+    {
+      "decisions_per_second": 3134977.00553931,
+      "elapsed_seconds": 0.318981606,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 318.981606,
+      "scope": "single-thread compiled core; warmed sequential maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000
+    }
+  ],
+  "limitations": [
+    "No independent native-only or gRPC server saturation measurement",
+    "No WAN or multi-node performance qualification",
+    "No full-chain 100000 QPS qualification",
+    "Host load and sequential locality affect these samples"
+  ]
+}

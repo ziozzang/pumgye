@@ -107,3 +107,18 @@ revocation, stale administrator CAS refusal, backend non-dispatch on denial,
 and network-authority outage refusal. The exact owned namespace was removed.
 This qualifies the tested gRPC deployment; it does not qualify all Kubernetes
 transports, in-flight gRPC shutdown, authorization webhooks or fleet replication.
+
+## Current local performance evidence
+
+[Raw measurements](docs/current-static-performance.json) separate complete request
+chains from pure-core evaluation. With the current signed static releases, three
+10-second closed-loop runs at 16 concurrent workers verified 11.4k–11.9k HTTPS
+requests/second, zero failures and p99 1.90–2.06 ms. These runs include actual
+Hangang/Hopae/Sumunjang/Pumgye native mTLS calls and a validated Go origin.
+
+`cargo run --release -p pumgye-core --example decision_benchmark -- 1000000`
+measures a warmed compiled policy with 65,536 users and 65,536 IPv4 /32 entries.
+Three single-thread samples took 295–319 ns/decision. This synthetic sequential
+workload excludes compilation, SQL and transport; it does not establish server
+throughput, random-key latency or full-chain 100k QPS capacity. Host contention
+and loopback locality limit extrapolation. No Kubernetes load test was run.

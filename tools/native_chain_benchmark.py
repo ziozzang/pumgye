@@ -40,5 +40,5 @@ with tempfile.TemporaryDirectory(prefix='owned-native-chain-')as folder:
   print('PASS: real four-component native API-key/mTLS chain, every HTTPS response verified; guest/invalid identity/observe/IP block denied; credentials absent upstream; production untouched')
  finally:
   if fixture is not None:fixture.close()
-  if owner is not None and owner.poll()is None:owner.terminate();owner.wait(timeout=5)
+  if owner is not None and owner.poll()is None:owner.terminate();assert owner.wait(timeout=8)==0
   if log:log.close()
