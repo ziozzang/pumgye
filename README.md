@@ -87,3 +87,8 @@ using the durable policy on the next start. Validate an isolated process with
 `cargo build -p pumgye-server` and `python3 tools/shutdown_smoke.py`. The smoke
 checks actual SIGTERM, clean exit and idle native socket closure; it does not
 qualify in-flight gRPC stream completion or production/Kubernetes rollout.
+
+The v0.1.1 candidate passed the complete workspace tests and strict Clippy,
+static ELF and actual SIGTERM checks, and actual four-process native/gRPC
+request chains with durable restart. The published v0.1.0 remains the operating
+release until candidate signing, publication and rollout are completed.

@@ -75,3 +75,7 @@ manifest·체크섬을 준비합니다. 비공개 seed는 저장소 밖에 보�
 `cargo build -p pumgye-server` 후 `python3 tools/shutdown_smoke.py`로 실행합니다.
 이 검사는 실제 SIGTERM·정상 종료·유휴 네이티브 소켓 닫힘을 확인하며 진행 중인
 gRPC 스트림 완료나 운영·K8s 반영까지 검증하지는 않습니다.
+
+v0.1.1 후보는 workspace 테스트·엄격한 Clippy·정적 ELF·실제 SIGTERM 및
+영속 재시작을 포함한 실제 네 프로세스 native/gRPC 요청 체인을 통과했습니다.
+후보 서명·공개·운영 반영을 마치기 전까지 공개 v0.1.0이 운영 릴리즈입니다.
