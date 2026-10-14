@@ -62,22 +62,31 @@ pub async fn run(
     loop {
         // Withdraw before collection; errors never retain a prior permissive view.
         a.source_ready.store(false, Ordering::Release);
+        a.source_phase.store(1, Ordering::Release);
         let now = u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
-        if collector.refresh(&ca, &token, now).await.is_ok() {
+        let phase = if collector.refresh(&ca, &token, now).await.is_err() {
+            // Do not expose transport errors, URLs, credential paths or provider bodies.
+            3
+        } else {
             let now = u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
-            if let Some(observation) = collector.fresh(now)
-                && let Ok(candidate) = mapping.candidate(&observation.inventory)
-                && let Some(expires) =
-                    epoch.checked_add(Duration::from_millis(observation.valid_until_ms))
-            {
+            let candidate = collector.fresh(now).and_then(|observation| {
+                let policy = mapping.candidate(&observation.inventory).ok()?.policy;
+                let expires =
+                    epoch.checked_add(Duration::from_millis(observation.valid_until_ms))?;
+                Some((policy, expires))
+            });
+            if let Some((policy, expires)) = candidate {
                 let active = a.clone();
                 // Durable writes and compilation stay off the decision executor.
-                let _ = tokio::task::spawn_blocking(move || {
-                    install(&active, candidate.policy, expires)
-                })
-                .await;
+                match tokio::task::spawn_blocking(move || install(&active, policy, expires)).await {
+                    Ok(Ok(())) => 2,
+                    _ => 4,
+                }
+            } else {
+                4
             }
-        }
+        };
+        a.source_phase.store(phase, Ordering::Release);
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
@@ -86,6 +95,48 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::tests::{authority, headers};
+    #[tokio::test]
+    async fn management_distinguishes_source_failure_and_expired_grants() {
+        let root = tempfile::tempdir().unwrap();
+        let mut a = authority(root.path());
+        Arc::get_mut(&mut a).unwrap().kubernetes_owned = true;
+        let current = crate::status(crate::State(a.clone())).await.0;
+        assert_eq!(current["source_state"], "starting");
+        assert_eq!(current["healthy"], false);
+        for (phase, name) in [
+            (1, "collecting"),
+            (3, "collection_failed"),
+            (4, "candidate_rejected"),
+        ] {
+            a.source_phase.store(phase, Ordering::Release);
+            let current = crate::status(crate::State(a.clone())).await.0;
+            assert_eq!(current["source_state"], name);
+            assert_eq!(current["healthy"], false);
+            assert_eq!(current["source_writable"], false);
+        }
+        let policy = a.view.load().document.policy.clone();
+        install(&a, policy, Instant::now() + Duration::from_secs(1)).unwrap();
+        a.source_phase.store(2, Ordering::Release);
+        let current = crate::status(crate::State(a.clone())).await.0;
+        assert_eq!(current["source_state"], "fresh");
+        assert_eq!(current["healthy"], true);
+        assert!(current["source_lease_remaining_ms"].as_u64().unwrap() <= 1000);
+        let document = a.view.load().document.clone();
+        a.view.store(Arc::new(View {
+            compiled: document.policy.compile().unwrap(),
+            document,
+            source_expires: Some(Instant::now()),
+        }));
+        let current = crate::status(crate::State(a.clone())).await.0;
+        assert_eq!(current["source_state"], "expired");
+        assert_eq!(current["healthy"], false);
+        assert_eq!(current["source_lease_remaining_ms"], 0);
+        a.healthy.store(false, Ordering::Release);
+        assert_eq!(
+            crate::status(crate::State(a)).await.0["source_state"],
+            "persistence_failed"
+        );
+    }
     #[tokio::test]
     async fn source_lease_writer_exclusion_persistence_and_restart() {
         let root = tempfile::tempdir().unwrap();

@@ -281,3 +281,17 @@ Binding/원천/재시작 검사를 마친 뒤 이전 검증 후보로 별도 nat
 오류/복구·redirect·HTTP 410·느린 수집·삭제 검사와 실제 Kubernetes/네 프로세스·격리
 갱신도 통과합니다. 반복 handshake 비용을 줄이며 전체 처리량·확장 watch 완료를
 의미하지 않습니다.
+
+## 통합 관리 상태
+
+인증된 `/v1/status` 응답은 `source_state`로 `native`, `starting`, `collecting`,
+`fresh`, `expired`, `collection_failed`, `candidate_rejected`,
+`persistence_failed`를 구별합니다. `source_lease_remaining_ms`는 응답 시점의
+프로세스 내부 유효기간이며 재사용 가능한 권한 영수증이 아닙니다.
+`source_writable`은 자체 정책 게시 API가 쓰기를 받는 원천 모드인지를 표시하며
+저장소 정상이나 Kubernetes 수정 권한을 보장하지 않습니다.
+`policy_revision`은 마지막 적용 로컬 리비전입니다. 원천 장애 중에도 저장된
+정책을 조회할 수 있지만 유효한 권한으로 취급하지 않습니다. 오류는 제한된
+분류로만 반환하며 프로바이더 응답·주소·자격 경로는 노출하지 않습니다.
+한강은 이 상태를 표시하고 외부 원천 정책의 자체 편집을 비활성화합니다.
+Kubernetes 원천 수정이나 전체 패키지 배포 구현 완료를 의미하지 않습니다.

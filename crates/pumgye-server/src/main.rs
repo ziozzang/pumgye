@@ -21,7 +21,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
 #[derive(Parser)]
@@ -93,6 +93,7 @@ struct Authority {
     healthy: AtomicBool,
     kubernetes_owned: bool,
     source_ready: AtomicBool,
+    source_phase: AtomicU8,
     publications: Arc<tokio::sync::Semaphore>,
     requests: Arc<tokio::sync::Semaphore>,
     management: Arc<tokio::sync::Semaphore>,
@@ -315,9 +316,43 @@ async fn audit_records(
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
 }
 async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
-    Json(
-        serde_json::json!({"version":1,"policy_revision":a.view.load().document.revision,"healthy":a.available(),"policy_source":if a.kubernetes_owned {"kubernetes"} else {"native"},"decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0}),
-    )
+    let view = a.view.load();
+    let remaining = view.source_expires.map(|deadline| {
+        u64::try_from(
+            deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis(),
+        )
+        .unwrap_or(u64::MAX)
+    });
+    let source_state = if !a.kubernetes_owned {
+        "native"
+    } else if !a.healthy.load(Ordering::Acquire) {
+        "persistence_failed"
+    } else {
+        match a.source_phase.load(Ordering::Acquire) {
+            1 => "collecting",
+            2 if a.source_ready.load(Ordering::Acquire)
+                && view
+                    .source_expires
+                    .is_some_and(|deadline| std::time::Instant::now() < deadline) =>
+            {
+                "fresh"
+            }
+            2 => "expired",
+            3 => "collection_failed",
+            4 => "candidate_rejected",
+            _ => "starting",
+        }
+    };
+    Json(serde_json::json!({
+        "version":1,"policy_revision":view.document.revision,"healthy":a.available(),
+        "policy_source":if a.kubernetes_owned {"kubernetes"} else {"native"},
+        "source_state":source_state,
+        "source_lease_remaining_ms":if a.kubernetes_owned {remaining} else {None},
+        "source_writable":!a.kubernetes_owned,
+        "decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0
+    }))
 }
 
 async fn decide(
@@ -502,6 +537,7 @@ async fn main() -> anyhow::Result<()> {
         healthy: AtomicBool::new(true),
         kubernetes_owned: args.authorize_kubernetes_rbac,
         source_ready: AtomicBool::new(false),
+        source_phase: AtomicU8::new(0),
         publications: Arc::new(tokio::sync::Semaphore::new(4)),
         requests: Arc::new(tokio::sync::Semaphore::new(4096)),
         management: Arc::new(tokio::sync::Semaphore::new(4)),
@@ -584,6 +620,7 @@ mod tests {
             healthy: AtomicBool::new(true),
             kubernetes_owned: false,
             source_ready: AtomicBool::new(false),
+            source_phase: AtomicU8::new(0),
             publications: Arc::new(tokio::sync::Semaphore::new(4)),
             requests: Arc::new(tokio::sync::Semaphore::new(4096)),
             management: Arc::new(tokio::sync::Semaphore::new(4)),

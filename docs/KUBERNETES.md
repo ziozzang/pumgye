@@ -342,3 +342,17 @@ open replacement connections. Existing CA failure/recovery, redirect, HTTP 410,
 slow collection and deletion checks remain. The actual Kubernetes/four-process
 and isolated renewal fixture also passes. This reduces repeated handshake work;
 full-chain throughput and scalable watch reconciliation remain unqualified.
+
+## Integrated administration status
+
+The authenticated `/v1/status` response reports `source_state`: `native`,
+`starting`, `collecting`, `fresh`, `expired`, `collection_failed`,
+`candidate_rejected`, or `persistence_failed`. `source_lease_remaining_ms` is
+process-local time remaining at response generation, not a reusable permission
+receipt. `source_writable` describes whether the native policy publication API
+accepts writes; it does not promise healthy storage or Kubernetes edit privileges.
+`policy_revision` is the last applied local revision; persisted policy remains
+inspectable during a source outage and must not be mistaken for a live grant.
+Errors are bounded categories; provider bodies, URLs and credential paths are not
+returned. Hangang displays these facts with source-managed editing disabled.
+This does not implement Kubernetes source editing or full package deployment.
