@@ -21,7 +21,15 @@ pub struct AuditRecord {
 }
 pub struct Store {
     connection: Connection,
-    _ownership: File,
+    _ownership: Ownership,
+}
+/// Explicitly release flock before closing: a concurrently forked child may
+/// briefly retain the same open-file description until exec despite CLOEXEC.
+struct Ownership(File);
+impl Drop for Ownership {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
 }
 impl Store {
     pub fn open(path: &Path, bootstrap: Option<&Path>) -> Result<(Self, Document)> {
@@ -35,6 +43,7 @@ impl Store {
         ownership
             .try_lock_exclusive()
             .context("Pumgye database already has a runtime owner")?;
+        let ownership = Ownership(ownership);
         // Hold ownership before opening SQLite. WAL is private to this authority.
         let _ = private_file(path)?;
         let mut connection = Connection::open(path)?;
@@ -351,6 +360,56 @@ mod tests {
         store
             .reconcile_receipt_keys(&[], &[floor("owned1", 8)])
             .unwrap();
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn child_inherited_descriptor_does_not_extend_released_owner_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("policy.sqlite3");
+        let initial = root.path().join("initial.json");
+        std::fs::write(&initial, r#"{"revision":1,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#).unwrap();
+        let (store, _) = Store::open(&path, Some(&initial)).unwrap();
+        let mut pipe = [0; 2];
+        // The child uses only async-signal-safe syscalls, no Rust allocations,
+        // destructors, SQLite or inherited locks. It waits while retaining FDs.
+        assert_eq!(
+            unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) },
+            0
+        );
+        use std::os::fd::AsRawFd;
+        let mut retained = [pipe[0] as u32, store._ownership.0.as_raw_fd() as u32];
+        retained.sort_unstable();
+        let child = unsafe { libc::fork() };
+        assert!(child >= 0);
+        if child == 0 {
+            unsafe {
+                // Preserve only the synchronization pipe and inherited owner.
+                // Other parallel tests may own listeners; never prolong them.
+                libc::syscall(libc::SYS_close_range, 0u32, retained[0] - 1, 0u32);
+                libc::syscall(
+                    libc::SYS_close_range,
+                    retained[0] + 1,
+                    retained[1] - 1,
+                    0u32,
+                );
+                libc::syscall(libc::SYS_close_range, retained[1] + 1, u32::MAX, 0u32);
+                let mut byte = 0u8;
+                libc::read(pipe[0], (&mut byte as *mut u8).cast(), 1);
+                libc::_exit(0);
+            }
+        }
+        unsafe {
+            libc::close(pipe[0]);
+        }
+        assert!(Store::open(&path, None).is_err());
+        drop(store);
+        let reopened = Store::open(&path, None);
+        unsafe {
+            libc::write(pipe[1], (&1u8 as *const u8).cast(), 1);
+            libc::close(pipe[1]);
+            libc::waitpid(child, std::ptr::null_mut(), 0);
+        }
+        assert!(reopened.is_ok(), "child must not retain released ownership");
     }
     #[test]
     fn single_owner_transaction_cas_and_restart() {

@@ -136,5 +136,10 @@ floors, not the latest observed provider revision or live revocation state.
 
 Validation: 54 workspace tests passed with `--test-threads=1`, and strict all-target
 Clippy passed. The preceding parallel run had a transient owner-lock reacquisition
-failure in the existing restart test; parallel lock/process interaction remains
-to be investigated. The new scope-floor test passed in both runs.
+failure in the existing restart test; the owner now explicitly unlocks after SQLite closes to prevent fork-inherited
+file descriptions from extending the lock. A deterministic child-inheritance
+regression covers this case. The new scope-floor test passed in both runs.
+
+After the ownership fix, all 55 workspace tests passed in normal parallel execution
+and strict all-target Clippy passed. The child regression closes unrelated inherited
+descriptors so it cannot prolong concurrent tests’ listeners.
