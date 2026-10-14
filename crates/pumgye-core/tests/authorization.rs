@@ -359,3 +359,100 @@ fn canonical_host_index_preserves_guest_override_and_rejects_mapped_duplicates()
         "mapped duplicate must not replace guest with reader"
     );
 }
+
+#[test]
+fn mixed_host_and_cidr_indexes_match_independent_longest_prefix_reference() {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let mut policy = policy();
+    let networks = &mut policy.services.get_mut("orders").unwrap().networks;
+    networks.clear();
+    for (cidr, role) in [("192.0.2.0/24", "writer"), ("2001:db8::/120", "writer")] {
+        networks.push(pumgye_core::Network {
+            cidr: cidr.parse().unwrap(),
+            roles: vec![role.into()],
+        });
+    }
+    for base in (0..256u32).step_by(16) {
+        let role = if base % 32 == 0 { "guest" } else { "writer" };
+        for cidr in [
+            format!("192.0.2.{base}/28"),
+            format!("2001:db8::{base:x}/124"),
+        ] {
+            networks.push(pumgye_core::Network {
+                cidr: cidr.parse().unwrap(),
+                roles: vec![role.into()],
+            });
+        }
+        let inner = base + 4;
+        for cidr in [
+            format!("192.0.2.{inner}/30"),
+            format!("2001:db8::{inner:x}/126"),
+        ] {
+            networks.push(pumgye_core::Network {
+                cidr: cidr.parse().unwrap(),
+                roles: vec!["writer".into()],
+            });
+        }
+    }
+    for host in (0..256u32).step_by(7) {
+        let role = if host % 2 == 0 { "guest" } else { "writer" };
+        for cidr in [
+            format!("192.0.2.{host}/32"),
+            format!("2001:db8::{host:x}/128"),
+        ] {
+            networks.push(pumgye_core::Network {
+                cidr: cidr.parse().unwrap(),
+                roles: vec![role.into()],
+            });
+        }
+    }
+    // Reference scans the source policy; it uses neither compiled index nor trie code.
+    for reverse in [false, true] {
+        if reverse {
+            policy
+                .services
+                .get_mut("orders")
+                .unwrap()
+                .networks
+                .reverse();
+        }
+        let compiled = policy.compile().unwrap();
+        for host in 0..256u32 {
+            let v4 = Ipv4Addr::new(192, 0, 2, host as u8);
+            let v6 = Ipv6Addr::from(
+                u128::from("2001:db8::".parse::<Ipv6Addr>().unwrap()) + u128::from(host),
+            );
+            for ip in [
+                IpAddr::V4(v4),
+                IpAddr::V6(v4.to_ipv6_mapped()),
+                IpAddr::V6(v6),
+            ] {
+                let canonical = ip.to_canonical();
+                let selected = policy.services["orders"]
+                    .networks
+                    .iter()
+                    .filter(|network| network.cidr.contains(&canonical))
+                    .max_by_key(|network| network.cidr.prefix_len())
+                    .unwrap();
+                let expected = if selected.roles == ["guest"] {
+                    D::PermissionDenied
+                } else {
+                    D::Allow
+                };
+                assert_eq!(
+                    compiled.evaluate(
+                        "orders",
+                        "u_writer",
+                        ip,
+                        "read",
+                        "public",
+                        3,
+                        G::EnforcedAllow
+                    ),
+                    expected,
+                    "address {ip}, reverse {reverse}"
+                );
+            }
+        }
+    }
+}
