@@ -177,6 +177,60 @@ async fn native_session<S: AsyncRead + AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     #[tokio::test]
+    async fn shutdown_finishes_an_inflight_http_response_before_returning() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let released = Arc::new(tokio::sync::Notify::new());
+        let started = entered.clone();
+        let release = released.clone();
+        let router = Router::new().route(
+            "/owned",
+            axum::routing::get(move || {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    "completed-owned-response"
+                }
+            }),
+        );
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn(http(listener, None, router, async {
+            let _ = stopped.await;
+        }));
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket
+            .write_all(
+                b"GET /owned HTTP/1.1\r\nHost: owned.example.test\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(2), entered.notified())
+            .await
+            .unwrap();
+        stop.send(()).unwrap();
+        // The response cannot complete until the already-entered handler is released.
+        tokio::task::yield_now().await;
+        assert!(!running.is_finished());
+        released.notify_one();
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(2), socket.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 200"));
+        assert!(response.ends_with(b"completed-owned-response"));
+        timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    }
+
+    #[tokio::test]
     async fn cancelling_native_owner_closes_authenticated_connection() {
         let root = tempfile::tempdir().unwrap();
         let authority = crate::tests::authority(root.path());
