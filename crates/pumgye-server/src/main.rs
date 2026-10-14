@@ -759,7 +759,12 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("native receipt key configuration refused"))?;
     let (mut store, document) = store::Store::open(&args.database, args.policy.as_deref())?;
     store.claim_source(args.authorize_kubernetes_rbac)?;
-    store.reconcile_receipt_keys(&receipt_keys)?;
+    store.reconcile_receipt_keys(
+        &receipt_keys,
+        authentication_trust
+            .as_ref()
+            .map_or(&[], |trust| trust.revision_floors()),
+    )?;
     let compiled = document.policy.compile()?;
     let authority = Arc::new(Authority {
         permit_signer,

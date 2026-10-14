@@ -27,7 +27,15 @@ struct Issuer {
     public: [u8; 32],
     scopes: HashMap<String, HashMap<String, ServiceTrust>>,
 }
+pub struct RevisionFloor {
+    pub issuer: String,
+    pub service: String,
+    pub audience: String,
+    pub identity_epoch: String,
+    pub minimum_revision: u64,
+}
 pub struct Trust {
+    floors: Vec<RevisionFloor>,
     issuers: HashMap<String, Issuer>,
     entries: usize,
 }
@@ -37,9 +45,17 @@ impl Trust {
             return Err(Refused);
         }
         let count = document.entries.len();
+        let mut floors = Vec::with_capacity(count);
         let mut issuers = HashMap::<String, Issuer>::new();
         let mut material_owners = HashMap::<[u8; 32], String>::new();
         for entry in document.entries {
+            floors.push(RevisionFloor {
+                issuer: entry.issuer_ref.clone(),
+                service: entry.service.clone(),
+                audience: entry.audience.clone(),
+                identity_epoch: entry.identity_epoch.clone(),
+                minimum_revision: entry.minimum_revision,
+            });
             if entry.public_key.len() != 44 {
                 return Err(Refused);
             }
@@ -90,6 +106,7 @@ impl Trust {
             }
         }
         Ok(Self {
+            floors,
             issuers,
             entries: count,
         })
@@ -105,6 +122,9 @@ impl Trust {
                 public_key: value.public,
             })
             .collect()
+    }
+    pub fn revision_floors(&self) -> &[RevisionFloor] {
+        &self.floors
     }
     pub fn entries(&self) -> usize {
         self.entries

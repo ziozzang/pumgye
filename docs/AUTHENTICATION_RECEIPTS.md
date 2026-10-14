@@ -121,6 +121,20 @@ or authentication/permit purposes. Failed transitions leave snapshot and audit
 unchanged and refuse startup. Tests exercise actual process startup, SQLite restart,
 retirement, fresh replacement and write failure.
 
-This history does not persist service profile minimum revisions or identity epochs,
-prove live provider/app freshness, fence rollback of the whole DB backup, or activate
-permit RPC. Distributed floors and restore protection remain required.
+This history does not prove live provider/app freshness, fence rollback of the
+whole DB backup, or activate permit RPC. Distributed floors and restore protection remain required.
+
+### Durable scope revision floors (unreleased)
+
+The same startup transaction retains `(issuer, service, audience)` identity epochs
+and minimum profile revisions, including removed scopes. A lower minimum revision
+or a different identity epoch refuses startup and rolls back key history and audit
+together. Identity-epoch migration is currently refused; an explicit validated
+migration protocol remains to be implemented. History is bounded to 4,096 scopes.
+Compiled request-time verification still uses only memory. This persists declared
+floors, not the latest observed provider revision or live revocation state.
+
+Validation: 54 workspace tests passed with `--test-threads=1`, and strict all-target
+Clippy passed. The preceding parallel run had a transient owner-lock reacquisition
+failure in the existing restart test; parallel lock/process interaction remains
+to be investigated. The new scope-floor test passed in both runs.

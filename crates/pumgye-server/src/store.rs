@@ -114,7 +114,11 @@ impl Store {
     }
     /// Startup-only public key publication. Queries never read this table.
     /// Empty configuration retires all active keys while preserving history.
-    pub fn reconcile_receipt_keys(&mut self, keys: &[hopae_grpc::receipt_keys::Key]) -> Result<()> {
+    pub fn reconcile_receipt_keys(
+        &mut self,
+        keys: &[hopae_grpc::receipt_keys::Key],
+        floors: &[pumgye_server::authentication_config::RevisionFloor],
+    ) -> Result<()> {
         use hopae_grpc::receipt_keys::Registry;
         let transaction = self.connection.transaction()?;
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS receipt_keys (id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL);
@@ -148,6 +152,26 @@ impl Store {
                 format!("{:x}", Sha256::digest(bytes.as_bytes()))
             ],
         )?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS authentication_floors (issuer TEXT NOT NULL, service TEXT NOT NULL, audience TEXT NOT NULL, identity_epoch TEXT NOT NULL, minimum_revision INTEGER NOT NULL, PRIMARY KEY(issuer,service,audience))")?;
+        for floor in floors {
+            ensure!(
+                (1..=9_007_199_254_740_991).contains(&floor.minimum_revision),
+                "invalid authentication revision floor"
+            );
+            let prior: Option<(String, i64)> = transaction.query_row("SELECT identity_epoch,minimum_revision FROM authentication_floors WHERE issuer=?1 AND service=?2 AND audience=?3", params![floor.issuer, floor.service, floor.audience], |row| Ok((row.get(0)?, row.get(1)?))).optional()?;
+            ensure!(
+                prior.is_none_or(|(epoch, revision)| epoch == floor.identity_epoch
+                    && revision > 0
+                    && floor.minimum_revision >= revision as u64),
+                "authentication epoch or revision rollback refused"
+            );
+            transaction.execute("INSERT INTO authentication_floors VALUES(?1,?2,?3,?4,?5) ON CONFLICT(issuer,service,audience) DO UPDATE SET minimum_revision=excluded.minimum_revision", params![floor.issuer, floor.service, floor.audience, floor.identity_epoch, floor.minimum_revision as i64])?;
+        }
+        let count: i64 =
+            transaction.query_row("SELECT count(*) FROM authentication_floors", [], |row| {
+                row.get(0)
+            })?;
+        ensure!(count <= 4096, "authentication floor history exhausted");
         transaction.commit()?;
         Ok(())
     }
@@ -257,9 +281,9 @@ mod tests {
                 .to_bytes(),
         };
         let (mut store, _) = Store::open(&path, Some(&initial)).unwrap();
-        store.reconcile_receipt_keys(&[key(1, 7)]).unwrap();
-        store.reconcile_receipt_keys(&[key(1, 7)]).unwrap();
-        store.reconcile_receipt_keys(&[]).unwrap();
+        store.reconcile_receipt_keys(&[key(1, 7)], &[]).unwrap();
+        store.reconcile_receipt_keys(&[key(1, 7)], &[]).unwrap();
+        store.reconcile_receipt_keys(&[], &[]).unwrap();
         drop(store);
         let (mut store, _) = Store::open(&path, None).unwrap();
         let snapshot = || {
@@ -271,8 +295,8 @@ mod tests {
                 .unwrap()
         };
         let before = snapshot();
-        assert!(store.reconcile_receipt_keys(&[key(1, 7)]).is_err());
-        assert!(store.reconcile_receipt_keys(&[key(2, 7)]).is_err());
+        assert!(store.reconcile_receipt_keys(&[key(1, 7)], &[]).is_err());
+        assert!(store.reconcile_receipt_keys(&[key(2, 7)], &[]).is_err());
         assert_eq!(
             before,
             store
@@ -281,13 +305,52 @@ mod tests {
                     .get::<_, String>(0))
                 .unwrap()
         );
-        store.reconcile_receipt_keys(&[key(2, 8)]).unwrap();
+        store.reconcile_receipt_keys(&[key(2, 8)], &[]).unwrap();
         store.reject_writes();
-        assert!(store.reconcile_receipt_keys(&[]).is_err());
+        assert!(store.reconcile_receipt_keys(&[], &[]).is_err());
         drop(store);
         let (mut store, _) = Store::open(&path, None).unwrap();
-        store.reconcile_receipt_keys(&[key(2, 8)]).unwrap();
-        assert!(store.reconcile_receipt_keys(&[key(3, 7)]).is_err());
+        store.reconcile_receipt_keys(&[key(2, 8)], &[]).unwrap();
+        assert!(store.reconcile_receipt_keys(&[key(3, 7)], &[]).is_err());
+    }
+    #[test]
+    fn identity_floor_survives_removal_restart_and_rejects_epoch_reset_atomically() {
+        use pumgye_server::authentication_config::RevisionFloor;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("policy.sqlite3");
+        let initial = root.path().join("initial.json");
+        std::fs::write(&initial, r#"{"revision":1,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#).unwrap();
+        let floor = |epoch: &str, revision| RevisionFloor {
+            issuer: "hopae".into(),
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            identity_epoch: epoch.into(),
+            minimum_revision: revision,
+        };
+        let (mut store, _) = Store::open(&path, Some(&initial)).unwrap();
+        store
+            .reconcile_receipt_keys(&[], &[floor("owned1", 7)])
+            .unwrap();
+        store.reconcile_receipt_keys(&[], &[]).unwrap();
+        drop(store);
+        let (mut store, _) = Store::open(&path, None).unwrap();
+        for (epoch, revision) in [("owned1", 6), ("owned2", 8)] {
+            assert!(
+                store
+                    .reconcile_receipt_keys(&[], &[floor(epoch, revision)])
+                    .is_err()
+            );
+        }
+        let audit_count: i64 = store
+            .connection
+            .query_row("SELECT count(*) FROM receipt_key_audit", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(audit_count, 2);
+        store
+            .reconcile_receipt_keys(&[], &[floor("owned1", 8)])
+            .unwrap();
     }
     #[test]
     fn single_owner_transaction_cas_and_restart() {
