@@ -153,3 +153,20 @@ the authenticated application generation for subsequent native owner validation.
 The actual Hopae captured-proof issuer adopts the same contract. Generation
 parsing is not a live freshness check; owner revalidation remains required before
 permit dispatch, and operating releases are unchanged by this source increment.
+
+## Native live-validation client (unreleased)
+
+`authentication_live::Client` establishes a persistent HTTPS gRPC channel with
+explicit CA, server name and client identity. It accepts only an already verified
+CheckedService plus its exact receipt bytes, checks the receipt SHA-256, and
+queries Hopae ValidateService with the native request digest. Admission is bounded
+to 128 simultaneous requests, encoded messages to 2 KiB and replies to 64 bytes.
+RPC timeout is capped by the original receipt deadline and one second. Refusal,
+outage, mismatched correlation/expiry, clock rollback or elapsed-time expiry
+returns no observation; no fallback or acceptance cache is provided.
+
+The opaque observation binds the exact receipt hash and original expiry and uses
+monotonic elapsed time on subsequent checks. It is not a permission or durable
+owner lease. Server startup configuration, real cross-process client qualification,
+permit dispatch and final remote owner fences remain to be connected. This library
+increment does not change operating listeners or deployments.

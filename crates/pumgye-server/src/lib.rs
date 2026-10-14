@@ -5,3 +5,5 @@ pub mod authentication_config;
 pub mod authorization;
 pub mod permit;
 pub mod permit_config;
+
+pub mod authentication_live;
