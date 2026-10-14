@@ -423,3 +423,7 @@ fixture after bounded geometric buffer growth; a nonparticipating client is
 explicitly refused rather than counted as fragmented qualification. Pumgye's
 existing nonempty single-entity mode remains compatible. Fragmentation is test
 client input, not a change to receipt wire format or operating dispatch.
+
+Version 0.1.6 is prepared for the typed authenticated gRPC authority increment.
+Workspace, strict Clippy and release-boundary gates pass. Static candidate,
+signed publication and operating adoption must be qualified separately.
