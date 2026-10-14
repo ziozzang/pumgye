@@ -24,6 +24,15 @@ pub struct Observation {
     begun: Instant,
 }
 impl Observation {
+    #[cfg(test)]
+    pub(crate) fn fixture(checked: &CheckedService<'_>, now: u64) -> Self {
+        Self {
+            receipt_sha256: checked.receipt_sha256(),
+            expires_ms: checked.expires_ms(),
+            observed_ms: now,
+            begun: Instant::now(),
+        }
+    }
     pub fn valid_for(&self, checked: &CheckedService<'_>, now_ms: u64) -> bool {
         self.receipt_sha256 == checked.receipt_sha256()
             && now_ms >= self.observed_ms

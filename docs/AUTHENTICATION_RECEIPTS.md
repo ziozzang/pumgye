@@ -275,3 +275,21 @@ binary on an occupied listener, proving refusal before DB creation or binding.
 This loads the client, not a permit endpoint. Network revision floors remain
 process-local; durable restore/fleet epochs and combined final owner checks remain
 open. Existing operating deployments are unchanged.
+
+## Combined native identity/network gate (unreleased)
+
+`authorize_combined_resource_then` requires checked identity plus opaque Hopae
+and Sumunjang live observations. Its `NativeResourceRequest` contains only
+resource/action/IP: caller-supplied assurance, subject, service, class, Guard
+verdict and network expiry are absent. The native gate derives EnforcedAllow
+and deadline from the accepted Sumunjang observation, checks exact IP and both
+observations before/after private work, and retains rollback detection and the
+mandatory additional-owner fence. Tests qualify a guard-required catalog Allow,
+wrong-IP refusal before work and candidate discard after a network revision
+advance during work. The synthetic authentication observation constructor is
+compiled only under Rust `cfg(test)` and is absent from ordinary/release builds.
+
+All 62 workspace tests and strict all-target Clippy passed. This is a server
+library boundary; the request endpoint, real three-authority combined process
+qualification, route/projection owners, distributed freshness and signed permit
+activation still need integration. Production remains unchanged.

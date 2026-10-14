@@ -105,6 +105,57 @@ pub fn authorize_live_resource_then<T>(
     )
 }
 
+/// Native target selection only: no identity, class, Guard verdict or deadline.
+pub struct NativeResourceRequest<'a> {
+    pub resource: &'a str,
+    pub action: &'a str,
+    pub ip: IpAddr,
+}
+pub struct LiveEvidence<'a> {
+    pub authentication: &'a crate::authentication_live::Observation,
+    pub network: &'a crate::network_live::Observation<'a>,
+}
+/// Both live observations are mandatory; other owners still need native fencing.
+pub fn authorize_combined_resource_then<T>(
+    policy: &CompiledPolicy,
+    target: &NativeResourceRequest<'_>,
+    authentication: &CheckedService<'_>,
+    evidence: &LiveEvidence<'_>,
+    clock: impl Fn() -> u64,
+    current: impl Fn() -> bool,
+    operation: impl FnOnce(&Resource) -> T,
+) -> Result<T, Refused> {
+    let request = ResourceRequest {
+        resource: target.resource,
+        action: target.action,
+        ip: target.ip,
+        guard: GuardEvidence::EnforcedAllow,
+        network_expires_ms: evidence.network.expires_ms(),
+    };
+    let last = std::cell::Cell::new(0);
+    let reversed = std::cell::Cell::new(false);
+    let observed = || {
+        let now = clock();
+        if now < last.get() {
+            reversed.set(true);
+        }
+        last.set(now);
+        now
+    };
+    authorize_live_resource_then(
+        policy,
+        &request,
+        authentication,
+        evidence.authentication,
+        observed,
+        || {
+            let now = observed();
+            !reversed.get() && evidence.network.valid_at(target.ip, now) && current()
+        },
+        operation,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

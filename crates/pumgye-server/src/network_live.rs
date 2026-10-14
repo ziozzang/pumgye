@@ -252,3 +252,123 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod combined_tests {
+    use super::*;
+    use crate::{
+        authentication::{Configuration, ServiceTrust},
+        authorization::{self, LiveEvidence, NativeResourceRequest},
+    };
+    use hopae_grpc::{PrincipalKind, receipt, receipt_binding};
+    #[test]
+    fn combined_native_allow_requires_both_observations_and_rechecks_network_after_work() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let subject = "s_0123456789abcdef0123456789abcdef0123456789abcdef";
+        let context = receipt_binding::Context {
+            issuer_ref: "hopae",
+            key_epoch: 1,
+            identity_authority_epoch: "owned:service:3:app:1",
+            identity: receipt_binding::Identity {
+                subject_ref: subject,
+                kind: PrincipalKind::Service,
+                aal: 0,
+                revision: 3,
+                credential_generation: 3,
+            },
+            service: "orders",
+            audience: "orders-api",
+            request_sha256: [3; 32],
+        };
+        let bytes = receipt::sign(
+            &key,
+            &receipt::Claims {
+                purpose: receipt::Purpose::Authentication,
+                issued_ms: 1000,
+                expires_ms: 1800,
+                binding: receipt_binding::digest(&context, None).unwrap(),
+                nonce: [7; 32],
+            },
+        )
+        .unwrap();
+        let trust = ServiceTrust::new(Configuration {
+            issuer: "hopae".into(),
+            key_epoch: 1,
+            identity_epoch: "owned".into(),
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            minimum_revision: 3,
+            public_key: key.verifying_key().to_bytes(),
+        })
+        .unwrap();
+        let checked = trust.verify(&context, &bytes, &[3; 32], 1001).unwrap();
+        let auth = crate::authentication_live::Observation::fixture(&checked, 1001);
+        let floor = AtomicU64::new(3);
+        let ip = "192.0.2.1".parse().unwrap();
+        let network = Observation {
+            floor: &floor,
+            ip,
+            revision: 3,
+            expires_ms: 1800,
+            before_ms: 1001,
+            begun: Instant::now(),
+        };
+        let evidence = LiveEvidence {
+            authentication: &auth,
+            network: &network,
+        };
+        let mut document = serde_json::json!({"version":1,"information_classes":["internal"],"services":{"orders":{"permissions":["read"],"require_guard":true,"roles":{"reader":{"permissions":["read"],"information_classes":["internal"],"minimum_aal":0}},"users":{},"networks":[{"cidr":"192.0.2.0/24","roles":["reader"]}]}},"resources":{"db:orders":{"service":"orders","information_class":"internal","actions":{"select":"read"},"minimum_aal":0}}});
+        document["services"]["orders"]["users"][subject] = serde_json::json!(["reader"]);
+        let policy = serde_json::from_value::<pumgye_core::Policy>(document)
+            .unwrap()
+            .compile()
+            .unwrap();
+        let mut target = NativeResourceRequest {
+            resource: "db:orders",
+            action: "select",
+            ip,
+        };
+        assert_eq!(
+            authorization::authorize_combined_resource_then(
+                &policy,
+                &target,
+                &checked,
+                &evidence,
+                || 1002,
+                || true,
+                |resource| resource.information_class.clone()
+            )
+            .unwrap(),
+            "internal"
+        );
+        target.ip = "192.0.2.2".parse().unwrap();
+        assert!(
+            authorization::authorize_combined_resource_then(
+                &policy,
+                &target,
+                &checked,
+                &evidence,
+                || 1002,
+                || true,
+                |_| panic!("wrong IP must never operate")
+            )
+            .is_err()
+        );
+        target.ip = ip;
+        assert!(
+            authorization::authorize_combined_resource_then(
+                &policy,
+                &target,
+                &checked,
+                &evidence,
+                || 1002,
+                || true,
+                |_| {
+                    floor.store(4, Ordering::Release);
+                    "private candidate"
+                }
+            )
+            .is_err()
+        );
+    }
+}
