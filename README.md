@@ -223,3 +223,10 @@ resources and bounded persistent clients. Candidate static three-authority tests
 passed; exact newly versioned artifacts must pass before signed publication.
 Signed permit, route/projection ownership, Hangang dispatch and distributed
 restore/fleet qualification remain open. GitHub Actions remains disabled.
+
+[v0.1.5](https://github.com/ziozzang/pumgye/releases/tag/v0.1.5) is now
+published at `c490bc5f4389051161bfcd872d5c3a1f716713a3`. Exact newly versioned static three-authority endpoint
+qualification, source regression/Clippy and release boundary checks passed.
+All downloaded assets matched originals; pinned signatures, version/target/URL
+bindings and static ELF were independently verified. Internal adoption and
+Kubernetes combined-endpoint qualification remain subsequent gates.
