@@ -1,0 +1,36 @@
+syntax = "proto3";
+package hangang.pumgye.v1;
+service Authorization { rpc Decide(DecisionRequest) returns (DecisionReply); }
+// The authenticated enforcement caller owns identity and network evidence.
+// Raw application claims must never be copied here without verification.
+message DecisionRequest {
+  uint64 request_id = 1;
+  uint64 minimum_revision = 2;
+  bytes ip = 3; // Exactly 4 or 16 network-order bytes.
+  uint32 aal = 4;
+  GuardEvidence guard = 5;
+  string service_id = 6;
+  string subject = 7;
+  string permission = 8;
+  string information_class = 9;
+}
+enum GuardEvidence {
+  GUARD_UNSPECIFIED = 0;
+  GUARD_ENFORCED_ALLOW = 1;
+  GUARD_DENY = 2;
+  GUARD_OBSERVE = 3;
+  GUARD_UNAVAILABLE = 4;
+}
+message DecisionReply {
+  uint64 request_id = 1;
+  uint64 revision = 2;
+  Verdict verdict = 3;
+  uint32 native_reason = 4;
+  uint32 cache_ttl_ms = 5; // Zero: do not cache the decision.
+}
+enum Verdict {
+  VERDICT_UNSPECIFIED = 0; // Must never grant permission.
+  VERDICT_ALLOW = 1;
+  VERDICT_DENY = 2;
+  VERDICT_UNAVAILABLE = 3;
+}

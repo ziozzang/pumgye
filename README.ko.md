@@ -51,3 +51,5 @@ Hangang/호패/수문장 HTTP 처리량이나 복제본 검증을 의미하지 �
 [네이티브 측정](docs/PERFORMANCE.ko.md)에 mTLS 10초 측정 3회의 범위·제약을 기록했습니다.
 
 [Kubernetes 원천 연결기](docs/KUBERNETES.ko.md): 제한된 검사·HTTPS polling·명시적 매핑·단일 작성자 원천 권위 판단을 구현하고 소유 실제 API에서 검증했습니다. 확장형 watch와 검증된 신원 자동 연관은 후속 단계입니다.
+
+[추가 gRPC 판정](docs/GRPC.ko.md)은 같은 코어·스냅샷을 사용합니다. 선택적 mTLS 리스너를 로컬 검증했으며 운영/Kubernetes 및 모듈 간 통합은 남았습니다. workspace 빌드에 `protoc`가 필요합니다.

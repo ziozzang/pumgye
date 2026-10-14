@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Owned mTLS server fixtures: no operational credentials or external targets."""
+import sys
 import argparse, concurrent.futures, copy, http.client, json, os, secrets, socket, sqlite3, ssl, struct, subprocess, tempfile, time
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--client',type=Path);p.add_argument('--benchmark',type=int,default=0);p.add_argument('--benchmark-cardinality',type=int,default=0);p.add_argument('--benchmark-batch',type=int,default=64);p.add_argument('--benchmark-concurrency',type=int,default=16);p.add_argument('--benchmark-seconds',type=int,default=10);args=p.parse_args();binary=args.binary.resolve()
+p=argparse.ArgumentParser();p.add_argument('--grpc',action='store_true');p.add_argument('--binary',required=True,type=Path);p.add_argument('--client',type=Path);p.add_argument('--benchmark',type=int,default=0);p.add_argument('--benchmark-cardinality',type=int,default=0);p.add_argument('--benchmark-batch',type=int,default=64);p.add_argument('--benchmark-concurrency',type=int,default=16);p.add_argument('--benchmark-seconds',type=int,default=10);args=p.parse_args();binary=args.binary.resolve()
 def run(*argv):return subprocess.run(argv,check=True,capture_output=True)
 def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
@@ -33,8 +34,9 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
     for i in range(args.benchmark_cardinality):
         policy['services']['orders']['users']['fixture-'+str(i)]=['reader']
         policy['services']['orders']['networks'].append({'cidr':f'198.18.{i//256}.{i%256}/32','roles':['reader']})
-    initial=root/'initial.json';initial.write_text(json.dumps({'revision':500,'policy':policy}));database=root/'pumgye.sqlite3';http_port,native_port,readiness_port=port(),port(),port()
+    initial=root/'initial.json';initial.write_text(json.dumps({'revision':500,'policy':policy}));database=root/'pumgye.sqlite3';http_port,native_port,readiness_port,grpc_port=port(),port(),port(),port()
     argv=[str(binary),'--listen',f'0.0.0.0:{http_port}','--decision-listen',f'0.0.0.0:{native_port}','--readiness-listen',f'0.0.0.0:{readiness_port}','--database',str(database),'--policy',str(initial),'--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--client-ca',str(root/'ca.pem')]
+    if args.grpc:argv += ['--grpc-listen',f'0.0.0.0:{grpc_port}']
     rejected=subprocess.run([str(binary),'--listen','0.0.0.0:0','--database',str(root/'rejected.db'),'--policy',str(initial)],env=env,capture_output=True);assert rejected.returncode!=0 and not (root/'rejected.db').exists()
     class LocalHTTPS(http.client.HTTPSConnection):
         def connect(self):self.sock=self._context.wrap_socket(socket.create_connection(('127.0.0.1',http_port),timeout=3),server_hostname='pumgye.example.test')
@@ -68,6 +70,46 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
         finally:c.close()
     process=start()
     try:
+        grpc_stub = None
+        if args.grpc:
+            import grpc
+            proto=Path(__file__).resolve().parents[1]/'crates/pumgye-grpc/proto/decision.proto'
+            run(sys.executable,'-m','grpc_tools.protoc','-I'+str(proto.parent),'--python_out='+str(root),'--grpc_python_out='+str(root),str(proto))
+            sys.path.insert(0,str(root))
+            import decision_pb2 as pb
+            import decision_pb2_grpc as rpc
+            ca=(root/'ca.pem').read_bytes();key=(root/'client.key').read_bytes();cert=(root/'client.pem').read_bytes()
+            channel=grpc.secure_channel(f'localhost:{grpc_port}',grpc.ssl_channel_credentials(ca,key,cert),options=[('grpc.ssl_target_name_override','pumgye.example.test')])
+            grpc.channel_ready_future(channel).result(timeout=5)
+            grpc_stub=rpc.AuthorizationStub(channel)
+            def grpc_query(**changes):
+                query=pb.DecisionRequest(request_id=7,ip=socket.inet_aton('192.0.2.8'),aal=1,guard=1,service_id='orders',subject='fixture',permission='read',information_class='public')
+                for name,value in changes.items():setattr(query,name,value)
+                return query
+            def grpc_call(query=None,token=decision):
+                return grpc_stub.Decide(query or grpc_query(),metadata=[('authorization','Bearer '+token)],timeout=1)
+            result=grpc_call();assert result.verdict==pb.VERDICT_ALLOW and result.native_reason==0 and result.cache_ttl_ms==0
+            for query,token,code in [(grpc_query(),admin,grpc.StatusCode.UNAUTHENTICATED),(grpc_query(guard=0),decision,grpc.StatusCode.INVALID_ARGUMENT),(grpc_query(ip=b'x'),decision,grpc.StatusCode.INVALID_ARGUMENT),(grpc_query(subject='x'*4096),decision,grpc.StatusCode.RESOURCE_EXHAUSTED)]:
+                try:grpc_call(query,token);raise AssertionError('invalid gRPC request admitted')
+                except grpc.RpcError as error:
+                    expected={code}
+                    if code==grpc.StatusCode.RESOURCE_EXHAUSTED:expected.add(grpc.StatusCode.OUT_OF_RANGE)
+                    assert error.code()in expected
+            result=grpc_call(grpc_query(subject='unassigned'));assert result.verdict==pb.VERDICT_DENY and result.native_reason==2
+            result=grpc_call(grpc_query(minimum_revision=999));assert result.verdict==pb.VERDICT_UNAVAILABLE and result.native_reason==255
+            anonymous=grpc.secure_channel(f'localhost:{grpc_port}',grpc.ssl_channel_credentials(ca),options=[('grpc.ssl_target_name_override','pumgye.example.test')])
+            try:
+                rpc.AuthorizationStub(anonymous).Decide(grpc_query(),metadata=[('authorization','Bearer '+decision)],timeout=.7)
+                raise AssertionError('missing gRPC client certificate admitted')
+            except grpc.RpcError as error:assert error.code()in {grpc.StatusCode.UNAVAILABLE,grpc.StatusCode.DEADLINE_EXCEEDED}
+            finally:anonymous.close()
+            for roots,name in [((root/'other-ca.pem').read_bytes(),'pumgye.example.test'),(ca,'wrong.example.test')]:
+                untrusted=grpc.secure_channel(f'localhost:{grpc_port}',grpc.ssl_channel_credentials(roots,key,cert),options=[('grpc.ssl_target_name_override',name)])
+                try:
+                    rpc.AuthorizationStub(untrusted).Decide(grpc_query(),metadata=[('authorization','Bearer '+decision)],timeout=.7)
+                    raise AssertionError('invalid gRPC server identity admitted')
+                except grpc.RpcError as error:assert error.code()in {grpc.StatusCode.UNAVAILABLE,grpc.StatusCode.DEADLINE_EXCEEDED}
+                finally:untrusted.close()
         assert readiness_get('/-/ready')==(200,'no-store',b'')
         for forbidden in ['/v1/policy','/v1/status','/v1/decision','/v1/audit','/healthz']:
             assert readiness_get(forbidden)[0]==404
@@ -112,6 +154,8 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
             status,new=api('PUT','/v1/policy',changed,admin,1);assert status==200 and new['revision']==2
             assert api('PUT','/v1/policy',doc,admin,1)[0]==409
             s.sendall(frame(103));assert reply(s,103)==(2,2)
+            if grpc_stub:
+                result=grpc_call();assert result.verdict==pb.VERDICT_DENY and result.native_reason==2 and result.revision==2
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
                 statuses=list(pool.map(lambda _:api('PUT','/v1/policy',new,admin,2)[0],range(8)))
             assert statuses.count(200)==1 and sum(s in (409,503) for s in statuses)==7,statuses
@@ -125,6 +169,9 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
         assert database.stat().st_mode&0o077==0
         status,records=api('GET','/v1/audit?after_revision=1',token=admin);assert status==200 and [r['revision'] for r in records]==[2,3] and all(r['actor'].startswith('mtls:') and len(r['sha256'])==64 for r in records)
         status,result=api('GET','/v1/status',token=admin);assert status==200 and result['healthy'] and result['policy_revision']==3
+        if grpc_stub:
+            channel.close()
+            print('PASS: real gRPC mTLS client, role isolation, bounded decode, native parity, source revision floor and immediate revocation')
         print('PASS: independent remote mTLS HTTP/PPG1, trust/token isolation, bounded pipelining, revision floor, CAS races, immediate policy revocation, exclusive DB ownership, audit, restart recovery and isolated no-store readiness.')
     finally:
         process.terminate()

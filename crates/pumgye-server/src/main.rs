@@ -1,4 +1,5 @@
 //! Standalone Pumgye control/decision authority.
+mod grpc;
 mod kubernetes;
 mod kubernetes_api;
 mod kubernetes_authority;
@@ -58,6 +59,9 @@ struct Args {
     /// Optional plaintext kubelet readiness listener; exposes only /-/ready, no policy API.
     #[arg(long)]
     readiness_listen: Option<SocketAddr>,
+    /// Additional gRPC decision listener; mTLS is mandatory even on loopback.
+    #[arg(long, requires_all = ["tls_cert", "tls_key", "client_ca"])]
+    grpc_listen: Option<SocketAddr>,
     #[arg(long, requires_all = ["tls_key", "client_ca"])]
     tls_cert: Option<PathBuf>,
     #[arg(long, requires_all = ["tls_cert", "client_ca"])]
@@ -612,9 +616,29 @@ async fn main() -> anyhow::Result<()> {
         Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
         None => None,
     };
+    let grpc_listener = match args.grpc_listen {
+        Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
+        None => None,
+    };
+    let grpc_authority = authority.clone();
+    let grpc_tls = if grpc_listener.is_some() {
+        Some(grpc::configuration(
+            args.tls_cert.as_ref().unwrap(),
+            args.tls_key.as_ref().unwrap(),
+            args.client_ca.as_ref().unwrap(),
+        )?)
+    } else {
+        None
+    };
     let readiness_router = readiness_router(authority.clone());
     tokio::try_join!(
         transport::http(listener, http_tls, router),
+        async move {
+            match grpc_listener {
+                Some(listener) => grpc::serve(listener, grpc_tls.unwrap(), grpc_authority).await,
+                None => std::future::pending::<anyhow::Result<()>>().await,
+            }
+        },
         async move {
             match native {
                 Some(listener) => transport::native(listener, native_tls, authority).await,

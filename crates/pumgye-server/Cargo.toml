@@ -10,6 +10,9 @@ name = "pumgye"
 path = "src/main.rs"
 
 [dependencies]
+pumgye-grpc = { path = "../pumgye-grpc" }
+tonic = { version = "0.14.6", features = ["tls-ring"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 pumgye-core = { path = "../pumgye-core" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
