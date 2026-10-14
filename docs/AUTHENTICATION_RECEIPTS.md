@@ -339,3 +339,18 @@ Only owned loopback management/decision adapters use HTTP; the inter-authority
 queries use mTLS. No operating data or credentials are used. Static releases,
 Kubernetes combined endpoint, Hangang request dispatch, gRPC equivalent and
 signed permit/route/projection ownership remain separate gates.
+
+## Static three-authority candidates — 2026-10-15
+
+The same actual endpoint fixture passed with all three server executables and
+the qualification client compiled for `x86_64-unknown-linux-musl`. Each ELF was
+independently checked for absence of INTERP. Network/identity withdrawal and
+restoration, cached proof refusal, authority-outage endpoint refusal and seven
+trust refusals passed. Sumunjang static mTLS and Pumgye static resource-catalog
+regressions also passed. Exact source revisions and artifact SHA-256 are in
+[the public candidate report](qualification/three-authority-static.json).
+
+These are unreleased source candidates retaining the preceding version strings;
+existing signed tags/assets are unchanged. New versioning, signing/publication,
+Kubernetes combined-endpoint qualification and operating rollout are subsequent
+gates. No operational data/configuration changed during these owned tests.

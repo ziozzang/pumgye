@@ -1,0 +1,51 @@
+{
+  "status": "qualified-unreleased-candidates",
+  "date": "2026-10-15",
+  "artifacts": [
+    {
+      "component": "hopae",
+      "source_revision": "10c12130b26a3a75ec6b9e486c4d108a9e3cbf04",
+      "sha256": "638b04ced3fafd8d7175c5cce34e2f936c207a003f1a74f9e9edac6ba6afcf36",
+      "target": "x86_64-unknown-linux-musl",
+      "dynamic_loader": false
+    },
+    {
+      "component": "sumunjang",
+      "source_revision": "1f70428e9481654845a696cf30cdb917a6aef009",
+      "sha256": "ca5d6f70cff2d0bbd17cadb9166c1ea518860f1e89b1aff467fde40426a38a99",
+      "target": "x86_64-unknown-linux-musl",
+      "dynamic_loader": false
+    },
+    {
+      "component": "pumgye",
+      "source_revision": "dad0d0aa31f99256ac5e00d64b839afe28897a7a",
+      "sha256": "22ba9f9c0d41f2d236c2c495a3bfe1a9a9d4ec1fcea30c8a94e04f97a39924bc",
+      "target": "x86_64-unknown-linux-musl",
+      "dynamic_loader": false
+    },
+    {
+      "component": "qualification-client",
+      "source_revision": "dad0d0aa31f99256ac5e00d64b839afe28897a7a",
+      "sha256": "6cb51c7a24cf9df3a81ce55cbcb5750b2e77a524386d746a2adc692df6163e09",
+      "target": "x86_64-unknown-linux-musl",
+      "dynamic_loader": false
+    }
+  ],
+  "checks": [
+    "actual three-authority authenticated endpoint Allow",
+    "network block/removal",
+    "cached unexpired identity receipt withdrawal/refusal",
+    "identity restoration",
+    "authority outage endpoint refusal",
+    "seven trust refusals",
+    "Sumunjang mTLS management/native/gRPC regression",
+    "Pumgye resource catalog CAS/restart"
+  ],
+  "not_proven": [
+    "new signed release publication",
+    "Kubernetes combined endpoint",
+    "Hangang dispatch integration",
+    "signed permit and route/projection owners",
+    "distributed epoch/restore floors"
+  ]
+}
