@@ -158,3 +158,34 @@ fn missing_live_validation_credential_refuses_before_database_or_binding() {
     );
     assert!(!database.exists());
 }
+
+#[test]
+fn missing_network_credential_refuses_before_database_or_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let database = root.path().join("authority.sqlite3");
+    let config = root.path().join("network.json");
+    std::fs::write(&config, serde_json::json!({"address":"https://127.0.0.1:1","server_name":"sumunjang.example.test","ca":"absent-ca","certificate":"absent-certificate","key":"absent-key","token_env":"OWNED_NETWORK_CALLER"}).to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pumgye"))
+        .args([
+            "--listen",
+            &listener.local_addr().unwrap().to_string(),
+            "--database",
+            database.to_str().unwrap(),
+            "--network-live",
+            config.to_str().unwrap(),
+        ])
+        .env("PUMGYE_ADMIN_TOKEN", "owned-admin-credential-32-bytes-long")
+        .env(
+            "PUMGYE_DECISION_TOKEN",
+            "owned-decision-credential-32-bytes-long",
+        )
+        .env_remove("OWNED_NETWORK_CALLER")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("native network resources unavailable")
+    );
+    assert!(!database.exists());
+}

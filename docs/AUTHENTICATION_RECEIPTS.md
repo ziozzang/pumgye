@@ -260,3 +260,18 @@ python tools/grpc_smoke.py --binary target/debug/sumunjang \
 The fixture’s legacy `--hangang-client` option accepts this compatible native
 qualification executable. These are debug process tests, not static-release,
 startup-resource, distributed floor/restore or permit endpoint qualification.
+
+## Network startup resources (unreleased)
+
+`--network-live <file>` loads reference-only JSON with HTTPS `address`,
+`server_name`, `ca`, `certificate`, `key` paths and `token_env`. Unknown and inline
+secret fields are rejected. The document is bounded to 16 KiB, TLS files to
+128 KiB each, and temporary buffers are zeroized. Mandatory mTLS connection is
+established before opening the DB/listeners; failures expose a generic error.
+Status reports only `network_live_configured`. Inspection/observation-only modes
+cannot load this owning client. Missing credentials are tested with the actual
+binary on an occupied listener, proving refusal before DB creation or binding.
+
+This loads the client, not a permit endpoint. Network revision floors remain
+process-local; durable restore/fleet epochs and combined final owner checks remain
+open. Existing operating deployments are unchanged.

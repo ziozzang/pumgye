@@ -12,3 +12,5 @@ pub mod authentication_live_config;
 
 mod authority_transport;
 pub mod network_live;
+
+pub mod network_live_config;
