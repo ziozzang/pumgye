@@ -60,7 +60,7 @@ Resource RPC and HTTP use the same native immutable owner evaluation/freshness
 fence. The bounded reply contains correlation, owner revision, Allow/Deny/
 Unavailable, reason and zero TTL. Handler tests cover native classification,
 assurance denial, role/capacity isolation, missing IP and stale/observe refusal.
-Workspace tests (35) and strict Clippy pass. An owned actual mTLS socket test
+Workspace tests (36) and strict Clippy pass. An owned actual mTLS socket test
 checks Allow, administrator-credential refusal, missing-client-certificate refusal
 and catalog assurance/revision changes on the same channel. Those changes are
 in-memory publications; database durability is covered separately by the HTTP

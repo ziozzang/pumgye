@@ -178,3 +178,16 @@ unknown fields. Existing service-level decision APIs retain their semantics and
 do not implicitly use resource classification. Resource query RPC, administrator
 UI, catalog-aware permit signing, DBMS adapters and operational qualification
 remain unfinished. No direct PostgreSQL access hook is enabled by this example.
+
+## v0.1.3 preparation
+
+The native owner resource catalog defines service membership, information class,
+action-to-permission mapping and minimum authentication assurance. New authenticated
+HTTP and mandatory-mTLS gRPC resource decisions require a trusted native service
+scope, retain immutable snapshot/revision/source freshness fences and have zero
+cache TTL. Existing service decision protocols remain supported. Policy JSON
+persists the catalog atomically without a separate database schema migration.
+Hangang resource dispatch and the integrated catalog view passed actual local
+four-server and remote Kubernetes/browser candidate qualification, including owner
+changes, deletion, revocation and Pod replacement. Signed release publication and
+operating adoption of this version remain pending.
