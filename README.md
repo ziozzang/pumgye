@@ -237,4 +237,3 @@ Internal deployment passed signed-artifact verification, isolated operating DB
 clone preflight, private consistent backup, exact policy preservation, actual
 mTLS management/PPG1 refusal and two restarts. Native receipt/live resources
 remain unconfigured in this existing deployment; the new endpoint fails closed.
-
