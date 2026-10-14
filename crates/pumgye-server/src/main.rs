@@ -108,6 +108,7 @@ struct Authority {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResourceQuery {
+    service_id: String,
     resource: String,
     action: String,
     subject: String,
@@ -153,6 +154,7 @@ fn credential_matches(value: &[u8], expected: &[u8]) -> bool {
             == 0
 }
 struct ResourceEvaluation<'a> {
+    service_id: &'a str,
     resource: &'a str,
     action: &'a str,
     subject: &'a str,
@@ -164,12 +166,14 @@ struct ResourceEvaluation<'a> {
 impl ResourceEvaluation<'_> {
     fn valid(&self) -> bool {
         self.aal <= 3
-            && [self.resource, self.action, self.subject].iter().all(|v| {
-                !v.is_empty()
-                    && v.len() <= 128
-                    && v.bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
-            })
+            && [self.service_id, self.resource, self.action, self.subject]
+                .iter()
+                .all(|v| {
+                    !v.is_empty()
+                        && v.len() <= 128
+                        && v.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+                })
     }
 }
 impl Authority {
@@ -189,9 +193,15 @@ impl Authority {
         if !active() || view.document.revision < q.minimum_revision {
             return None;
         }
-        let decision = view
-            .compiled
-            .evaluate_resource(q.resource, q.action, q.subject, q.ip, q.aal, q.guard);
+        let decision = view.compiled.evaluate_scoped_resource(
+            q.service_id,
+            q.resource,
+            q.action,
+            q.subject,
+            q.ip,
+            q.aal,
+            q.guard,
+        );
         self.queries.fetch_add(1, Ordering::Relaxed);
         if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
             return None;
@@ -533,6 +543,7 @@ async fn decide_resource(
         _ => return Err(StatusCode::BAD_REQUEST),
     };
     let query = ResourceEvaluation {
+        service_id: &q.service_id,
         resource: &q.resource,
         action: &q.action,
         subject: &q.subject,
@@ -887,7 +898,7 @@ mod tests {
                 request_gate,
             ))
             .with_state(owner.clone());
-        let query = serde_json::json!({"resource":"db:orders","action":"select","subject":"fixture","ip":"192.0.2.9","aal":2,"guard":"enforced_allow"});
+        let query = serde_json::json!({"service_id":"orders","resource":"db:orders","action":"select","subject":"fixture","ip":"192.0.2.9","aal":2,"guard":"enforced_allow"});
         let call = |body: serde_json::Value, token: &str| {
             axum::http::Request::builder()
                 .method("POST")

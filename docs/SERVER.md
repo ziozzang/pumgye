@@ -120,3 +120,5 @@ resource assurance, CAS catalog revocation, restart without bootstrap resurrecti
 and restoration. Router/workspace tests (33) and strict Clippy pass. This is an
 unsigned decision API, not authentication-receipt verification or permission
 issuance; resource gRPC, Hangang UI/dispatch and signed projection remain open.
+
+The unreleased resource endpoint requires `service_id` and rejects a resource owned by another service. Service scope comes from trusted enforcement context, never an application claim.

@@ -557,3 +557,89 @@ fn invalid_catalog_relations_never_compile() {
         assert!(invalid.compile().is_err());
     }
 }
+
+#[test]
+fn scoped_resource_refuses_cross_service_rights_and_catalog_reassignment() {
+    use pumgye_core::{Resource, ResourceDecision as R};
+    let mut policy = policy();
+    policy
+        .services
+        .insert("billing".into(), policy.services["orders"].clone());
+    policy.resources.insert(
+        "db:orders".into(),
+        Resource {
+            service: "orders".into(),
+            information_class: "internal".into(),
+            actions: [("select".into(), "read".into())].into(),
+            minimum_aal: 2,
+        },
+    );
+    let ip = "192.0.2.1".parse().unwrap();
+    let compiled = policy.compile().unwrap();
+    assert_eq!(
+        compiled.evaluate_scoped_resource(
+            "orders",
+            "db:orders",
+            "select",
+            "u_writer",
+            ip,
+            2,
+            G::EnforcedAllow
+        ),
+        R::Decided(D::Allow)
+    );
+    // The same principal has identical grants in both services; rights alone
+    // must not override the gateway's native service scope.
+    for service in ["billing", "missing", ""] {
+        assert_eq!(
+            compiled.evaluate_scoped_resource(
+                service,
+                "db:orders",
+                "select",
+                "u_writer",
+                ip,
+                2,
+                G::EnforcedAllow
+            ),
+            R::Decided(D::UnknownService)
+        );
+    }
+    policy.resources.get_mut("db:orders").unwrap().service = "billing".into();
+    let replacement = policy.compile().unwrap();
+    assert_eq!(
+        replacement.evaluate_scoped_resource(
+            "orders",
+            "db:orders",
+            "select",
+            "u_writer",
+            ip,
+            2,
+            G::EnforcedAllow
+        ),
+        R::Decided(D::UnknownService)
+    );
+    assert_eq!(
+        replacement.evaluate_scoped_resource(
+            "billing",
+            "db:orders",
+            "select",
+            "u_writer",
+            ip,
+            2,
+            G::EnforcedAllow
+        ),
+        R::Decided(D::Allow)
+    );
+    assert_eq!(
+        replacement.evaluate_scoped_resource(
+            "billing",
+            "db:missing",
+            "select",
+            "u_writer",
+            ip,
+            2,
+            G::EnforcedAllow
+        ),
+        R::UnknownResource
+    );
+}

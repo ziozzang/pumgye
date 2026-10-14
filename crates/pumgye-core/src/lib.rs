@@ -372,6 +372,27 @@ impl CompiledPolicy {
     pub fn resource_metadata(&self, resource: &str) -> Option<&Resource> {
         self.resources.get(resource).map(|r| &r.metadata)
     }
+    /// Bind a native gateway service scope to the catalog before evaluating rights.
+    /// Callers must obtain the service from trusted route/authentication context.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scoped_resource(
+        &self,
+        service: &str,
+        resource: &str,
+        action: &str,
+        subject: &str,
+        ip: IpAddr,
+        aal: u8,
+        guard: GuardEvidence,
+    ) -> ResourceDecision {
+        let Some(resource) = self.resources.get(resource) else {
+            return ResourceDecision::UnknownResource;
+        };
+        if resource.metadata.service != service {
+            return ResourceDecision::Decided(Decision::UnknownService);
+        }
+        self.evaluate_catalog_entry(resource, action, subject, ip, aal, guard)
+    }
     /// Resource class and minimum assurance are owned by the compiled catalog.
     pub fn evaluate_resource(
         &self,
@@ -385,6 +406,17 @@ impl CompiledPolicy {
         let Some(resource) = self.resources.get(resource) else {
             return ResourceDecision::UnknownResource;
         };
+        self.evaluate_catalog_entry(resource, action, subject, ip, aal, guard)
+    }
+    fn evaluate_catalog_entry(
+        &self,
+        resource: &CompiledResource,
+        action: &str,
+        subject: &str,
+        ip: IpAddr,
+        aal: u8,
+        guard: GuardEvidence,
+    ) -> ResourceDecision {
         let Some(permission) = resource.actions.get(action) else {
             return ResourceDecision::UnknownAction;
         };

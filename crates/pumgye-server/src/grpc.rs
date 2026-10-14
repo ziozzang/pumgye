@@ -65,6 +65,7 @@ impl pumgye_grpc::v1::resource_authorization_server::ResourceAuthorization for S
         let aal =
             u8::try_from(input.aal).map_err(|_| Status::invalid_argument("invalid assurance"))?;
         let query = crate::ResourceEvaluation {
+            service_id: &input.service_id,
             resource: &input.resource,
             action: &input.action,
             subject: &input.subject,
@@ -316,6 +317,7 @@ mod tests {
         let mut client = ResourceAuthorizationClient::new(channel);
         let request = |token: &str| {
             let mut request = Request::new(ResourceDecisionRequest {
+                service_id: "orders".into(),
                 request_id: 42,
                 minimum_revision: 1,
                 ip: vec![192, 0, 2, 9],
@@ -413,6 +415,7 @@ mod tests {
         let service = Service(owner.clone());
         let request = |token: &str| {
             let mut r = Request::new(ResourceDecisionRequest {
+                service_id: "orders".into(),
                 request_id: 42,
                 minimum_revision: 1,
                 ip: vec![192, 0, 2, 9],
@@ -442,6 +445,14 @@ mod tests {
         assert_eq!(reply.verdict, 1);
         assert_eq!(reply.revision, 1);
         assert_eq!(reply.cache_ttl_ms, 0);
+        let mut cross_service = request(&owner.decision);
+        cross_service.get_mut().service_id = "billing".into();
+        let reply = ResourceAuthorization::decide(&service, cross_service)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(reply.verdict, 2);
+        assert_eq!(reply.reason, "UnknownService");
         let mut weak = request(&owner.decision);
         weak.get_mut().aal = 1;
         let reply = ResourceAuthorization::decide(&service, weak)

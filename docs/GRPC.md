@@ -66,3 +66,5 @@ and catalog assurance/revision changes on the same channel. Those changes are
 in-memory publications; database durability is covered separately by the HTTP
 catalog smoke test. Hangang dispatch/UI adoption remains open; this unsigned
 result is not a signed permit or verified authentication receipt.
+
+Resource requests now require `service_id` from trusted gateway route/authentication context. The owner refuses a catalog entry belonging to another service even when the principal has grants there. Omitted/empty scopes are invalid. This unreleased contract requires rebuilding consumers; legacy Authorization is unchanged.
