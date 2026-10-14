@@ -145,3 +145,17 @@ sequentially and 300–323 ns with the same fixed shuffled maximum-assignment
 fixture. This is promising for host-heavy policies, but broader CIDR-only policies,
 additional memory, full-chain performance and operational adoption still require
 qualification. Current signed v0.1.1 artifacts are unchanged.
+
+## v0.1.2 publication and internal adoption
+
+[v0.1.2](https://github.com/ziozzang/pumgye/releases/tag/v0.1.2), source d3092ff,
+publishes the canonical exact-host index as five independently verified Linux
+amd64 musl assets. Workspace tests (29), strict Clippy, five release boundary
+tests, actual SIGTERM and both four-process native/gRPC durable chains passed.
+Downloaded signatures, hashes and version/target/URL binding were verified.
+
+The internal authority now runs this exact signed executable. An isolated copy
+of its durable policy passed preflight; live mTLS management/native refusal,
+unchanged durable policy and a second restart passed. Private binary/DB/config
+rollback backups remain available. Kubernetes qualification of v0.1.2, mixed-policy
+memory/CIDR costs, full-chain 100k QPS and fleet replication remain open.
