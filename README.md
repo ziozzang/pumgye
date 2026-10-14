@@ -68,3 +68,12 @@ Cancelling the listener owner aborts its connection tasks instead of detaching
 them. PPG1 framing, TLS/ALPN, peer certificate audit identity and in-memory
 authorization remain Pumgye owned. This is task lifecycle ownership, not a new
 graceful OS-signal shutdown or supervisor handover implementation.
+
+Linux release preparation defaults to static amd64 musl.
+`tools/prepare_release.py --output /secure/dist --signer /secure/offline-signer
+--seed /secure/private-seed` stages the binary, documentation archive, pinned
+public key, signed manifest and checksums. The private seed remains outside this
+repository. Preparation checks ELF/version/signing identity, verifies the actual
+Ed25519 signature with OpenSSL and binds the payload to the exact artifact.
+The release key is independent of other Hangang World authorities. This supplies
+verified installation assets; it does not implement automatic runtime updates.
