@@ -155,6 +155,8 @@ try:
   gateway_fixture.expect(worker_token,200)
   gateway_fixture.authority_console()
   gateway_fixture.exercise_guard(worker_token)
+  gateway_fixture.native_lifetime(worker_token)
+  gateway_fixture.exercise_native_lease(worker_token)
   hits=len(gateway_fixture.hits)
   gateway_fixture.expect(other_token,403);gateway_fixture.expect(None,401)
   assert len(gateway_fixture.hits)==hits and not gateway_fixture.forbidden_forwarding

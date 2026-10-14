@@ -1,5 +1,5 @@
 """Owned four-process real Kubernetes enforcement fixture. No production state."""
-import http.client,http.server,json,os,secrets,socket,ssl,subprocess,threading,time,urllib.request,urllib.error
+import http.client,http.server,json,os,secrets,socket,ssl,struct,subprocess,threading,time,urllib.request,urllib.error
 from pathlib import Path
 
 def port():
@@ -37,7 +37,7 @@ class GatewayFixture:
   start('hopae',[str(args.hopae_binary.resolve()),'run','--config',str(root/'hopae.json')])
   start('sumunjang',[str(args.sumunjang_binary.resolve()),'--listen',f'127.0.0.1:{guard_http}','--decision-listen',f'127.0.0.1:{guard_native}','--decision-tls-cert',str(root/'rpc-server.pem'),'--decision-tls-key',str(root/'rpc-server.key'),'--decision-client-ca',str(root/'rpc-ca.pem'),'--database',str(root/'guard.sqlite3'),'--policy',str(root/'guard-policy.json'),'--threads','2'])
   start('hangang',[str(args.gateway_binary.resolve()),'--config',str(root/'hangang.json'),'--listen',f'127.0.0.1:{self.public}','--admin',f'127.0.0.1:{self.admin}','--threads','2','--lua-workers','1','--tls-cert',str(root/'rpc-server.pem'),'--tls-key',str(root/'rpc-server.key'),'--guard-url',f'http://127.0.0.1:{guard_http}','--guard-decision-tcp',f'127.0.0.1:{guard_native}','--guard-token-env','HANGANG_GUARD_COLLECTOR_TOKEN','--guard-decision-server-name','127.0.0.1','--guard-decision-ca',str(root/'rpc-ca.pem'),'--guard-decision-cert',str(root/'rpc-client.pem'),'--guard-decision-key',str(root/'rpc-client.key')])
-  self.caller=caller;self.hop_http=hop_http;
+  self.caller=caller;self.hop_http=hop_http;self.hop_native=hop_native;
   self.admin_token=gateway_admin;self.guard_http=guard_http;self.guard_admin=guard_admin
   deadline=time.monotonic()+15
   while time.monotonic()<deadline:
@@ -59,8 +59,31 @@ class GatewayFixture:
   headers={'x-hopae-gateway-key':self.caller,'x-hopae-contract':'1','x-forwarded-host':'app.example.test','x-forwarded-proto':'https','x-forwarded-port':str(self.public),'x-forwarded-for':'127.0.0.1','x-original-url':f'https://app.example.test:{self.public}/secure','x-original-method':'GET','x-original-uri':'/secure','authorization':'Bearer k8s:'+token,'accept':'application/json'}
   request=urllib.request.Request(f'http://127.0.0.1:{self.hop_http}/_hopae/verify',headers=headers)
   try:
-   with urllib.request.urlopen(request,timeout=3) as response:return response.status
+   with urllib.request.urlopen(request,timeout=3) as response:
+    assert 1 <= int(response.headers['x-hopae-evidence-ttl-ms']) <= 1000, 'native evidence lifetime missing or outside bound'
+    return response.status
   except urllib.error.HTTPError as error:return error.code
+ def native_lifetime(self,token):
+  context=ssl.create_default_context(cafile=str(self.root/'rpc-ca.pem'));context.load_cert_chain(str(self.root/'rpc-client.pem'),str(self.root/'rpc-client.key'));context.set_alpn_protocols(['hop1'])
+  def exact(sock,size):
+   result=b''
+   while len(result)<size:
+    part=sock.recv(size-len(result));assert part;result+=part
+   return result
+  with context.wrap_socket(socket.create_connection(('127.0.0.1',self.hop_native),timeout=3),server_hostname='127.0.0.1')as sock:
+   def exchange(identifier,payload):
+    sock.sendall(b'HOP1'+struct.pack('!QI',identifier,len(payload))+payload)
+    magic,returned,size=struct.unpack('!4sQI',exact(sock,16));assert magic==b'HOP1' and returned==identifier
+    return exact(sock,size)
+   assert exchange(0,self.caller.encode())==b'\1'
+   headers={'x-hopae-contract':'1','x-forwarded-host':'app.example.test','x-forwarded-proto':'https','x-forwarded-port':str(self.public),'x-forwarded-for':'127.0.0.1','x-original-url':f'https://app.example.test:{self.public}/secure','x-original-method':'GET','x-original-uri':'/secure','authorization':'Bearer k8s:'+token,'accept':'application/json'}
+   payload=struct.pack('!H',len(headers))
+   for name,value in headers.items():
+    n,v=name.encode(),value.encode();payload+=struct.pack('!HI',len(n),len(v))+n+v
+   reply=exchange(1,payload);status,count=struct.unpack('!HH',reply[:4]);assert status==200;offset=4;values={}
+   for _ in range(count):
+    n,v=struct.unpack('!HI',reply[offset:offset+6]);offset+=6;name=reply[offset:offset+n].decode();offset+=n;value=reply[offset:offset+v].decode();offset+=v;assert name not in values;values[name]=value
+   assert 1<=int(values['x-hopae-evidence-ttl-ms'])<=1000
  def request(self,token=None,path='/secure',stream=False):
   headers={'Host':'app.example.test','x-forwarded-user':self.subject,'x-hopae-principal-kind':'human','x-hopae-aal':'3','x-hopae-service-id':'logs'}
   if token is not None:headers['Authorization']='Bearer k8s:'+token
@@ -76,6 +99,19 @@ class GatewayFixture:
    assert result==503,('unexpected gateway status',result,status)
    time.sleep(.05)
   raise RuntimeError('gateway policy availability deadline')
+ def exercise_native_lease(self,token):
+  deadline=time.monotonic()+12
+  while True:
+   client,response=self.request(token,path='/secure/stream',stream=True)
+   if response.status==200:break
+   assert response.status==503;response.read();client.close()
+   assert time.monotonic()<deadline,'stream admission deadline';time.sleep(.05)
+  assert response.read(5)==b'open\n'
+  started=time.monotonic()
+  try:assert response.read(1)==b''
+  except (http.client.IncompleteRead,ConnectionError):pass
+  assert time.monotonic()-started<1.5,'machine stream survived evidence/source lease'
+  client.close()
  def guard_api(self,method,path,value):
   request=urllib.request.Request(f'http://127.0.0.1:{self.guard_http}'+path,data=json.dumps(value).encode(),method=method,headers={'Authorization':'Bearer '+self.guard_admin,'Content-Type':'application/json'})
   with urllib.request.urlopen(request,timeout=3) as response:return json.load(response)
