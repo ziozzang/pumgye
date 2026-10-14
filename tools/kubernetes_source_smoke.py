@@ -32,11 +32,15 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
     run('openssl', 'x509', '-req', '-in', str(root/'server.csr'), '-CA', str(root/'ca.pem'), '-CAkey', str(root/'ca.key'), '-CAcreateserial', '-days', '1', '-extfile', str(root/'server.ext'), '-out', str(root/'server.pem'))
     credential = secrets.token_urlsafe(32)
     token_file = root/'token'; token_file.write_text(credential); token_file.chmod(0o600)
-    state = {'mode': 'valid', 'revision': 1, 'redirect_hits': 0, 'continuations': 0}
+    state = {'mode': 'valid', 'revision': 1, 'redirect_hits': 0, 'continuations': 0, 'connections': 0}
     group = 'rbac.authorization.k8s.io'
     def role(name, uid):
         return {'apiVersion':group+'/v1','kind':'Role','metadata':{'namespace':'blue','name':name,'uid':uid,'resourceVersion':'object:'+str(state['revision'])},'rules':[{'apiGroups':[''],'resources':['pods/log'],'verbs':['get']}]}
     class Handler(http.server.BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def handle_one_request(self):
+            try:super().handle_one_request()
+            except OSError:self.close_connection=True
         def log_message(self, *_):
             pass
         def do_GET(self):
@@ -44,15 +48,15 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
             if url.path == '/stolen':
                 state['redirect_hits'] += 1
             if self.headers.get('Authorization') != 'Bearer '+credential:
-                self.send_response(401); self.end_headers(); return
+                self.send_response(401); self.send_header('Content-Length','0'); self.end_headers(); return
             if state['mode'] == 'redirect':
-                self.send_response(302);self.send_header('Location','https://127.0.0.1:'+str(self.server.server_port)+'/stolen');self.end_headers();return
+                self.send_response(302);self.send_header('Location','https://127.0.0.1:'+str(self.server.server_port)+'/stolen');self.send_header('Content-Length','0');self.end_headers();return
             if state['mode'] == 'expired':
-                self.send_response(410);self.end_headers();return
+                self.send_response(410);self.send_header('Content-Length','0');self.end_headers();return
             resource = url.path.rsplit('/',1)[-1]
             kinds = {'roles':'Role','rolebindings':'RoleBinding','clusterroles':'ClusterRole','clusterrolebindings':'ClusterRoleBinding'}
             if resource not in kinds:
-                self.send_response(404);self.end_headers();return
+                self.send_response(404);self.send_header('Content-Length','0');self.end_headers();return
             query = parse_qs(url.query)
             assert query.get('limit') == ['256']
             items = []
@@ -76,7 +80,10 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
             self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers()
             try:self.wfile.write(body)
             except OSError:pass
-    server = http.server.ThreadingHTTPServer(('127.0.0.1',0), Handler)
+    class Server(http.server.ThreadingHTTPServer):
+        def get_request(self):
+            connection = super().get_request();state['connections'] += 1;return connection
+    server = Server(('127.0.0.1',0), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'server.pem',root/'server.key');server.socket=context.wrap_socket(server.socket,server_side=True)
     thread = threading.Thread(target=server.serve_forever,daemon=True);thread.start()
     db = root/'must-not-open.sqlite3'
@@ -111,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
         if args.mapping:
             assert first['candidate']['mode']=='candidate_only' and first['candidate']['mappings'][0]['active']
             assert first['candidate']['policy']['services']['logs']['users']=={'native-verified-worker':['reader']}
-        same=available();assert same['revision']==first['revision']
+        same=available();assert same['revision']==first['revision'];assert state['connections']==1,'unchanged source cycles rebuilt the TLS pool'
         state.update(mode='deleted',revision=2)
         deleted=observation(lambda v:'inventory' in v and not v['inventory']['objects']);assert deleted['revision']>first['revision']
         if args.mapping:
@@ -120,12 +127,12 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
             state['mode']=mode;unavailable()
         assert state['redirect_hits']==0
         state.update(mode='valid',revision=3);recovered=available();assert recovered['revision']>deleted['revision']
-        token_file.write_text('invalid-fixture-credential');unavailable();token_file.write_text(credential);available()
+        before=state['connections'];token_file.write_text('invalid-fixture-credential');unavailable();token_file.write_text(credential);available();assert state['connections']>=before+2,'credential rotation reused a retired pool'
         ca=(root/'ca.pem').read_bytes();(root/'ca.pem').write_text('invalid projected CA');unavailable();(root/'ca.pem').write_bytes(ca);available()
         assert not db.exists()
         process.send_signal(signal.SIGINT);assert process.wait(timeout=5)==0
         errors=process.stderr.read();assert credential not in errors
-        print('PASS: owned HTTPS paginated RBAC collection, encoded continuation, stable/change/delete revisions, source failure fencing and recovery, scope/version/redirect rejection, slow collection freshness refusal, token/CA rotation, proxy isolation, no credential output or authority DB')
+        print('PASS: owned HTTPS paginated RBAC collection, encoded continuation, stable/change/delete revisions, persistent TLS reuse and credential pool rotation, source failure fencing and recovery, scope/version/redirect rejection, slow collection freshness refusal, token/CA rotation, proxy isolation, no credential output or authority DB')
     finally:
         if process.poll() is None:process.terminate();process.wait(timeout=5)
         server.shutdown();server.server_close()

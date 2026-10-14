@@ -22,6 +22,7 @@ pub struct Collector {
     pub view: ArcSwapOption<Observation>,
     revision: u64,
     digest: Option<[u8; 32]>,
+    pool: Option<([u8; 32], Client)>,
 }
 fn identifier(s: &str) -> bool {
     !s.is_empty()
@@ -73,6 +74,7 @@ impl Collector {
             view: ArcSwapOption::empty(),
             revision: 0,
             digest: None,
+            pool: None,
         })
     }
     pub async fn refresh(&mut self, ca: &Path, token: &Path, now_ms: u64) -> Result<()> {
@@ -104,8 +106,38 @@ impl Collector {
     pub fn fresh(&self, now_ms: u64) -> Option<Arc<Observation>> {
         self.view.load_full().filter(|v| now_ms < v.valid_until_ms)
     }
-    async fn collect(&self, ca: &Path, token: &Path) -> Result<(Inventory, Vec<(String, String)>)> {
-        let certificate = Certificate::from_pem(&bounded_file(ca, 65536)?)?;
+    fn pooled_client(&mut self, ca: &[u8], token: &[u8]) -> Result<Client> {
+        let mut digest = Sha256::new();
+        digest.update(Sha256::digest(ca));
+        digest.update(Sha256::digest(token));
+        let fingerprint: [u8; 32] = digest.finalize().into();
+        if let Some((active, client)) = &self.pool
+            && *active == fingerprint
+        {
+            return Ok(client.clone());
+        }
+        // Do not retain a previous trust pool across changed or invalid material.
+        self.pool = None;
+        let client = Client::builder()
+            .https_only(true)
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(Certificate::from_pem(ca)?)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(2)
+            .pool_idle_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(3))
+            .build()?;
+        self.pool = Some((fingerprint, client.clone()));
+        Ok(client)
+    }
+    async fn collect(
+        &mut self,
+        ca: &Path,
+        token: &Path,
+    ) -> Result<(Inventory, Vec<(String, String)>)> {
+        let ca_bytes = bounded_file(ca, 65536)?;
         let bytes = bounded_file(token, 4096)?;
         let value = std::str::from_utf8(&bytes)?.trim();
         ensure!(
@@ -114,15 +146,7 @@ impl Collector {
         );
         let mut authorization = HeaderValue::from_str(&format!("Bearer {value}"))?;
         authorization.set_sensitive(true);
-        let client = Client::builder()
-            .https_only(true)
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(certificate)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(3))
-            .build()?;
+        let client = self.pooled_client(&ca_bytes, value.as_bytes())?;
         let mut items = Vec::new();
         let mut versions = Vec::new();
         let mut total_bytes = 0usize;

@@ -323,3 +323,22 @@ This fixes stale collection age, but does not establish a globally atomic
 cross-kind RBAC snapshot or continuous watch availability. Large/slow sources
 that cannot fit the budget remain unavailable until scalable reconciliation is
 implemented; the budget must not silently expand to publish old grants.
+
+
+## Source transport pool reuse
+
+The collector retains a pinned HTTPS client when the actual CA/token material
+fingerprint is unchanged. Files are still read and validated every cycle and the
+Authorization header is freshly constructed as sensitive data. Changed material
+retires the previous trust pool before constructing its replacement; invalid CA
+cannot fall back to the old pool. No raw credential is included in diagnostic
+fingerprints or output. The pool retains at most two idle connections per origin
+with ten-second idle expiry; this is transport reuse, not an authorization cache.
+Source freshness still expires one second from collection start.
+
+The owned HTTP/1.1 HTTPS fixture counts accepted TLS connections: two unchanged
+complete paginated cycles use one connection, while credential change and recovery
+open replacement connections. Existing CA failure/recovery, redirect, HTTP 410,
+slow collection and deletion checks remain. The actual Kubernetes/four-process
+and isolated renewal fixture also passes. This reduces repeated handshake work;
+full-chain throughput and scalable watch reconciliation remain unqualified.
