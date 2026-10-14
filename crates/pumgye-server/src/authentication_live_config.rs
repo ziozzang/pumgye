@@ -29,7 +29,7 @@ impl Configured {
         &self,
         checked: &CheckedService<'_>,
         receipt: &[u8],
-        clock: &dyn Fn() -> u64,
+        clock: &(dyn Fn() -> u64 + Sync),
     ) -> Result<Observation, Refused> {
         if checked.context().issuer_ref != self.issuer {
             return Err(Refused);

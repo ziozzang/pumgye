@@ -69,7 +69,7 @@ impl Client {
         &self,
         ip: IpAddr,
         minimum_revision: u64,
-        clock: &dyn Fn() -> u64,
+        clock: &(dyn Fn() -> u64 + Sync),
     ) -> Result<Observation<'_>, Refused> {
         let _permit = self.requests.try_acquire().map_err(|_| Refused)?;
         if minimum_revision > 9_007_199_254_740_991 {

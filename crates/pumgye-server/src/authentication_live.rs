@@ -69,7 +69,7 @@ impl Client {
         &self,
         checked: &CheckedService<'_>,
         receipt: &[u8],
-        clock: &dyn Fn() -> u64,
+        clock: &(dyn Fn() -> u64 + Sync),
     ) -> Result<Observation, Refused> {
         let _permit = self.requests.try_acquire().map_err(|_| Refused)?;
         let begun = Instant::now();

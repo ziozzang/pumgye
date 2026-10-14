@@ -249,3 +249,18 @@ Allow·작업 전 잘못된 IP 거부·작업 중 네트워크 리비전 증가�
 워크스페이스 62개 검사와 엄격한 all-target Clippy를 통과했습니다. 서버 라이브러리
 경계이며 요청 endpoint·실제 세 권위의 통합 프로세스 검증·라우팅/투영 소유자·
 분산 신선도·서명 permit 활성화는 추가 연결이 필요합니다. 운영은 변경하지 않았습니다.
+
+## 인증된 자원 판정 endpoint (미릴리스)
+
+POST /v1/resource/authenticated-decision은 판정 자격·인증 신뢰·호패 실시간 검증·
+수문장 네트워크 자원을 요구합니다. 4 KiB·미지 필드 거부 JSON은 request_id·정책
+minimum_revision·resource/action/ip·서명 context·정확한 receipt·집행자가 도출한
+request_sha256만 받습니다. 별도 등급·신원/AAL·Guard 판정/만료 필드는 받지 않습니다.
+로컬 서명 검증·수문장 질의·호패 소유권 검증 후 통합 자원 판정을 실행하며 await와
+작업 전후에 정확한 정책 스냅샷·건강 상태·K8s lease를 검사합니다.
+
+응답은 상관 ID·정책/네트워크 리비전·Allow 여부·TTL 0입니다. 자원 누락·전송 실패·
+소유자 회수는 Allow를 반환하지 않으며 일반 정책 거부는 Allow false입니다. 관리자
+자격 거부·자원 누락·Guard 필드 위조 거부를 검사합니다. 요청 바인딩과 IP는 인증된
+집행자 소유입니다. 판정 관측이며 서명 permit이나 상위 자격이 아닙니다. 실제 세
+권위의 성공 endpoint 검증·gRPC 대응·라우팅/계획 소유자·운영 적용은 남아 있습니다.

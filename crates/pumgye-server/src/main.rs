@@ -1,4 +1,5 @@
 //! Standalone Pumgye control/decision authority.
+mod authenticated_resource;
 mod grpc;
 mod kubernetes;
 mod kubernetes_api;
@@ -855,6 +856,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/audit", get(audit_records))
         .route("/v1/resource/decision", resource_route())
         .route(
+            "/v1/resource/authenticated-decision",
+            authenticated_resource::route(),
+        )
+        .route(
             "/v1/decision",
             post(decide).layer(axum::extract::DefaultBodyLimit::max(2048)),
         )
@@ -982,6 +987,55 @@ async fn termination_signal() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn authenticated_resource_route_requires_decision_role_and_native_resources() {
+        use tower::ServiceExt;
+        let root = tempfile::tempdir().unwrap();
+        let owner = authority(root.path());
+        let decision = owner.decision.clone();
+        let admin = owner.admin.clone();
+        let router = Router::new()
+            .route("/decision", authenticated_resource::route())
+            .with_state(owner);
+        let body = serde_json::json!({"request_id":1,"minimum_revision":1,"resource":"db:orders","action":"select","ip":"192.0.2.1","context":{"issuer_ref":"hopae","key_epoch":1,"identity_authority_epoch":"owned:service:1:app:1","identity":{"subject_ref":"s_0123456789abcdef0123456789abcdef0123456789abcdef","kind":2,"aal":0,"revision":1,"credential_generation":1},"service":"orders","audience":"orders-api","request_sha256":vec![3;32]},"receipt":vec![0;146],"request_sha256":vec![3;32]});
+        let request = |token: &str, value: &serde_json::Value| {
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/decision")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(value.to_string()))
+                .unwrap()
+        };
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(&admin, &body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(&decision, &body))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let mut spoof = body;
+        spoof["guard"] = serde_json::json!("enforced_allow");
+        assert_eq!(
+            router
+                .oneshot(request(&decision, &spoof))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
     #[tokio::test]
     async fn resource_route_uses_owner_class_and_isolates_decision_credentials() {
         use tower::ServiceExt;

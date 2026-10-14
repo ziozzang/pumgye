@@ -293,3 +293,24 @@ All 62 workspace tests and strict all-target Clippy passed. This is a server
 library boundary; the request endpoint, real three-authority combined process
 qualification, route/projection owners, distributed freshness and signed permit
 activation still need integration. Production remains unchanged.
+
+## Authenticated resource decision endpoint (unreleased)
+
+`POST /v1/resource/authenticated-decision` requires the decision credential and
+all three native resources: authentication trust, Hopae live validation and
+Sumunjang live network. The bounded 4 KiB, unknown-field-refusing JSON contains
+`request_id`, policy `minimum_revision`, `resource`, `action`, `ip`, signed
+`context`, exact `receipt` bytes and the enforcement-derived `request_sha256`.
+Raw classification, separate identity/AAL or Guard verdict/deadline fields are
+not accepted. The receipt is verified locally, Sumunjang is queried, and Hopae
+live ownership is validated before combined resource evaluation. Exact captured
+policy/health/Kubernetes lease are fenced across awaits and after private work.
+
+Replies carry correlation, policy/network revisions, Allow boolean and TTL zero.
+Missing resources, transport errors or owner retirement never yield Allow;
+ordinary native-policy denial yields Allow false. Tests cover admin-role refusal,
+missing-resource unavailability and spoofed Guard-field rejection. The authenticated
+enforcement caller still owns the bound request and client IP. This endpoint is
+a decision observation, not a signed permit or upstream credential. Actual
+three-authority positive endpoint qualification, gRPC equivalent, route/plan
+owner integration and production rollout remain open.
