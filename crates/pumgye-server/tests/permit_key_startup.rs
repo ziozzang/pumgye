@@ -33,3 +33,33 @@ fn missing_native_permit_seed_refuses_before_database_or_listener_binding() {
     );
     assert!(!database.exists());
 }
+
+#[test]
+fn invalid_authentication_trust_refuses_before_database_or_listener_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let database = root.path().join("authority.sqlite3");
+    let config = root.path().join("trust.json");
+    std::fs::write(&config, r#"{"entries":[]}"#).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pumgye"))
+        .args([
+            "--listen",
+            &listener.local_addr().unwrap().to_string(),
+            "--database",
+            database.to_str().unwrap(),
+            "--authentication-trust",
+            config.to_str().unwrap(),
+        ])
+        .env("PUMGYE_ADMIN_TOKEN", "owned-admin-credential-32-bytes-long")
+        .env(
+            "PUMGYE_DECISION_TOKEN",
+            "owned-decision-credential-32-bytes-long",
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("native authentication trust unavailable")
+    );
+    assert!(!database.exists());
+}

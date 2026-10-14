@@ -76,6 +76,9 @@ struct Args {
     /// Reference-only native permit signing resources; requires an owning server.
     #[arg(long, conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
     permit_key: Option<PathBuf>,
+    /// Native issuer/key/scope pins for authentication receipts.
+    #[arg(long, conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
+    authentication_trust: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
     #[arg(long, default_value = "PUMGYE_DECISION_TOKEN")]
@@ -96,6 +99,7 @@ struct View {
 }
 struct Authority {
     permit_signer: Option<pumgye_server::permit::Signer>,
+    authentication_trust: Option<pumgye_server::authentication_config::Trust>,
     view: ArcSwap<View>,
     store: std::sync::Mutex<store::Store>,
     admin: String,
@@ -496,6 +500,7 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "policy_source":if a.kubernetes_owned {"kubernetes"} else {"native"},
         "source_state":source_state,
         "permit_key_configured":a.permit_signer.is_some(),
+        "authentication_trust_entries":a.authentication_trust.as_ref().map_or(0, |trust| trust.entries()),
         "source_lease_remaining_ms":if a.kubernetes_owned {remaining} else {None},
         "source_writable":!a.kubernetes_owned,
         "decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0
@@ -735,11 +740,20 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|_| anyhow::anyhow!("native permit signing resources unavailable"))
         })
         .transpose()?;
+    let authentication_trust = args
+        .authentication_trust
+        .as_deref()
+        .map(|path| {
+            pumgye_server::authentication_config::load(path)
+                .map_err(|_| anyhow::anyhow!("native authentication trust unavailable"))
+        })
+        .transpose()?;
     let (mut store, document) = store::Store::open(&args.database, args.policy.as_deref())?;
     store.claim_source(args.authorize_kubernetes_rbac)?;
     let compiled = document.policy.compile()?;
     let authority = Arc::new(Authority {
         permit_signer,
+        authentication_trust,
         view: ArcSwap::from_pointee(View {
             document,
             compiled,
@@ -1172,6 +1186,7 @@ mod tests {
         let compiled = document.policy.compile().unwrap();
         Arc::new(Authority {
             permit_signer: None,
+            authentication_trust: None,
             view: ArcSwap::from_pointee(View {
                 document,
                 compiled,

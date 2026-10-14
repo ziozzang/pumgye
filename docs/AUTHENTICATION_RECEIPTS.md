@@ -85,3 +85,22 @@ retirement/rotation and dynamic publication remain open. Loading a key does not
 activate a permit RPC or satisfy live owner/network/plan checks. The option conflicts
 with inspection/observation-only modes. Existing deployments without the option
 retain their ordinary decision behavior.
+
+## Server-owned authentication trust loading (unreleased)
+
+`--authentication-trust <file>` loads a bounded 64 KiB document with 1..128
+`entries`. Each entry declares `issuer_ref`, `key_epoch`, `identity_epoch`,
+`service`, `audience`, `minimum_revision` and a base64 `public_key`. Unknown fields
+and secret fields are refused. Native validation checks references, epochs,
+revision floors and strong public material. Duplicate issuer/service/audience
+bindings, inconsistent key/epoch/identity bases for one issuer and public-material
+reuse across issuers are rejected. Different audiences for the same declared
+issuer/service can share its single active identity.
+
+Compiled trust uses borrowed issuer/service/audience hash lookups without allocating
+request-time composite keys. The request cannot choose a public key or introduce
+an undeclared scope. Invalid trust fails before DB creation or listener binding;
+administrator status reports only `authentication_trust_entries`. The option
+conflicts with inspection/observation-only modes. Loading is restart-bound and
+does not implement durable retirement floors, live Hopae revalidation, trust
+publication/rotation or permit RPC activation.
