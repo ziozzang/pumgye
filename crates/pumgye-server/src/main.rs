@@ -79,6 +79,9 @@ struct Args {
     /// Native issuer/key/scope pins for authentication receipts.
     #[arg(long, conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
     authentication_trust: Option<PathBuf>,
+    /// Native mTLS live-validation resources for one pinned Hopae issuer.
+    #[arg(long, requires = "authentication_trust", conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
+    authentication_live: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
     #[arg(long, default_value = "PUMGYE_DECISION_TOKEN")]
@@ -98,6 +101,7 @@ struct View {
     source_expires: Option<std::time::Instant>,
 }
 struct Authority {
+    authentication_live: Option<pumgye_server::authentication_live_config::Configured>,
     permit_signer: Option<pumgye_server::permit::Signer>,
     authentication_trust: Option<pumgye_server::authentication_config::Trust>,
     view: ArcSwap<View>,
@@ -500,6 +504,7 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "policy_source":if a.kubernetes_owned {"kubernetes"} else {"native"},
         "source_state":source_state,
         "permit_key_configured":a.permit_signer.is_some(),
+        "authentication_live_configured":a.authentication_live.is_some(),
         "authentication_trust_entries":a.authentication_trust.as_ref().map_or(0, |trust| trust.entries()),
         "source_lease_remaining_ms":if a.kubernetes_owned {remaining} else {None},
         "source_writable":!a.kubernetes_owned,
@@ -748,6 +753,20 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|_| anyhow::anyhow!("native authentication trust unavailable"))
         })
         .transpose()?;
+    let authentication_live = match args.authentication_live.as_deref() {
+        Some(path) => Some(
+            pumgye_server::authentication_live_config::load(
+                path,
+                authentication_trust
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("native authentication trust required"))?,
+                &|name| std::env::var(name).ok(),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("native live authentication resources unavailable"))?,
+        ),
+        None => None,
+    };
     let mut receipt_keys = authentication_trust
         .as_ref()
         .map_or_else(Vec::new, |trust| trust.receipt_keys());
@@ -767,6 +786,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
     let compiled = document.policy.compile()?;
     let authority = Arc::new(Authority {
+        authentication_live,
         permit_signer,
         authentication_trust,
         view: ArcSwap::from_pointee(View {
@@ -1202,6 +1222,7 @@ mod tests {
         Arc::new(Authority {
             permit_signer: None,
             authentication_trust: None,
+            authentication_live: None,
             view: ArcSwap::from_pointee(View {
                 document,
                 compiled,

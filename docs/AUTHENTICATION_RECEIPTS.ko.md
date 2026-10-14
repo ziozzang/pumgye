@@ -150,3 +150,17 @@ SHA-256을 대조한 뒤 네이티브 요청 digest로 호패 ValidateService를
 사용합니다. 권한 허용이나 영속 소유권 lease가 아닙니다. 서버 시작 설정·실제
 프로세스 간 클라이언트 검증·permit 집행·최종 원격 소유권 경계 연결은 남아 있습니다.
 이 라이브러리 변경으로 운영 리스너나 배포를 바꾸지 않았습니다.
+
+## 실시간 클라이언트 시작 자원 (미릴리스)
+
+--authentication-live 파일은 --authentication-trust와 함께 사용하며 issuer_ref·
+HTTPS address·server_name·ca/certificate/key 파일 경로·token_env 참조를 선언합니다.
+컴파일된 신뢰에 있는 발급자만 허용하고 알 수 없는 필드·인라인 비밀을 거부합니다.
+문서는 16 KiB·TLS 파일은 각각 128 KiB로 제한하고 임시 자격·파일 버퍼를 지웁니다.
+DB 열기·리스너 활성화 전에 자원 로딩과 인증된 TLS 연결을 완료하며 실패 시 일반
+오류만 반환합니다. 상태에는 authentication_live_configured 여부만 표시합니다.
+
+첫 설정은 하나의 발급자 endpoint를 연결하며 그 호패 뒤의 혼합 프로바이더 인증은
+유지합니다. 여러 발급자의 endpoint 선택은 후속 구현입니다. 클라이언트 로딩만으로
+permit RPC를 열지 않습니다. 실제 호패/품계 클라이언트 성공 수명주기 검증과 permit
+연결은 남아 있으며 운영 배포는 변경하지 않았습니다.

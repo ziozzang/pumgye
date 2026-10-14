@@ -126,6 +126,9 @@ impl Trust {
     pub fn revision_floors(&self) -> &[RevisionFloor] {
         &self.floors
     }
+    pub fn has_issuer(&self, issuer: &str) -> bool {
+        self.issuers.contains_key(issuer)
+    }
     pub fn entries(&self) -> usize {
         self.entries
     }

@@ -121,3 +121,40 @@ fn native_startup_persists_removal_and_refuses_retired_keys_before_binding() {
     let registry = hopae_grpc::receipt_keys::Registry::decode(&stored, 1).unwrap();
     assert_eq!(registry.revision(), 3);
 }
+
+#[test]
+fn missing_live_validation_credential_refuses_before_database_or_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let database = root.path().join("authority.sqlite3");
+    let trust = root.path().join("trust.json");
+    let live = root.path().join("live.json");
+    let public = SigningKey::from_bytes(&[11; 32]).verifying_key().to_bytes();
+    std::fs::write(&trust, serde_json::json!({"entries":[{"issuer_ref":"hopae","key_epoch":1,"identity_epoch":"owned","service":"orders","audience":"orders-api","minimum_revision":1,"public_key":STANDARD.encode(public)}]}).to_string()).unwrap();
+    std::fs::write(&live, serde_json::json!({"issuer_ref":"hopae","address":"https://127.0.0.1:1","server_name":"hopae.example.test","ca":"absent-ca","certificate":"absent-certificate","key":"absent-key","token_env":"OWNED_LIVE_CALLER"}).to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_pumgye"))
+        .args([
+            "--listen",
+            &listener.local_addr().unwrap().to_string(),
+            "--database",
+            database.to_str().unwrap(),
+            "--authentication-trust",
+            trust.to_str().unwrap(),
+            "--authentication-live",
+            live.to_str().unwrap(),
+        ])
+        .env("PUMGYE_ADMIN_TOKEN", "owned-admin-credential-32-bytes-long")
+        .env(
+            "PUMGYE_DECISION_TOKEN",
+            "owned-decision-credential-32-bytes-long",
+        )
+        .env_remove("OWNED_LIVE_CALLER")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("native live authentication resources unavailable")
+    );
+    assert!(!database.exists());
+}

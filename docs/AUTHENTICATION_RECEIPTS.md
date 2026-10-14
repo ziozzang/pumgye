@@ -170,3 +170,20 @@ monotonic elapsed time on subsequent checks. It is not a permission or durable
 owner lease. Server startup configuration, real cross-process client qualification,
 permit dispatch and final remote owner fences remain to be connected. This library
 increment does not change operating listeners or deployments.
+
+## Live-client startup resources (unreleased)
+
+`--authentication-live <file>` requires `--authentication-trust` and loads a
+reference-only JSON document: `issuer_ref`, HTTPS `address`, `server_name`,
+`ca`, `certificate`, `key` file paths and `token_env`. The issuer must exist in
+the compiled trust. Unknown/inline-secret fields are refused; document size is
+16 KiB and each TLS file is bounded to 128 KiB. Temporary credential and file
+buffers are zeroized. Loading and authenticated TLS connection complete before
+DB opening and listener activation; failure reports a generic error. Status
+exposes only `authentication_live_configured`.
+
+This initial configuration binds one issuer endpoint. Mixed-provider authentication
+behind that Hopae issuer remains supported; multi-issuer endpoint selection is
+future work. Loading the client does not activate a permit RPC. Actual successful
+Hopae/Pumgye client lifecycle qualification and permit integration remain open.
+The operating deployment is unchanged.
