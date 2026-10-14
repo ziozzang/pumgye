@@ -3,7 +3,7 @@
 import argparse,base64,json,os,queue,secrets,signal,subprocess,threading,time,socket,ssl,struct,urllib.request,urllib.error
 from pathlib import Path
 import yaml
-p=argparse.ArgumentParser();p.add_argument('--authority',action='store_true');p.add_argument('--binary',required=True,type=Path);p.add_argument('--state-dir',required=True,type=Path);a=p.parse_args();os.umask(0o077)
+p=argparse.ArgumentParser();p.add_argument('--authority',action='store_true');p.add_argument('--hopae-driver',type=Path);p.add_argument('--binary',required=True,type=Path);p.add_argument('--state-dir',required=True,type=Path);a=p.parse_args();os.umask(0o077)
 state=a.state_dir.resolve();configuration=yaml.safe_load((state/'kubeconfig').read_text());assert configuration['current-context']=='kind-zerotrust-qualification'
 c=configuration['clusters'][0]['cluster'];assert c['server'].startswith('https://127.0.0.1:')
 root=state/('rbac-'+str(int(time.time()))+'-'+secrets.token_hex(3));root.mkdir(mode=0o700);(root/'ca.pem').write_bytes(base64.b64decode(c['certificate-authority-data']))
@@ -34,7 +34,29 @@ try:
  role=json.loads(ctl('get','role','app-reader','-n',ns,'-o','json'));bind=json.loads(ctl('get','rolebinding','app-worker','-n',ns,'-o','json'))
  token=ctl('create','token','reader','-n',ns,'--duration=10m').strip();(root/'token').write_text(token)
  subject='fixture-native-subject'
+ if a.hopae_driver:
+  assert a.authority,'workload integration requires authoritative mode'
+  reader=resource('Role','source-read',[{'apiGroups':['rbac.authorization.k8s.io'],'resources':['roles','rolebindings'],'verbs':['get','list','watch']},{'apiGroups':[''],'resources':['pods','serviceaccounts'],'verbs':['get'],'resourceNames':['worker','worker-other']}]);apply(reader)
+  apply(resource('ClusterRole',global_role,[{'apiGroups':['rbac.authorization.k8s.io'],'resources':['clusterroles','clusterrolebindings'],'verbs':['get','list','watch']},{'apiGroups':['authentication.k8s.io'],'resources':['tokenreviews'],'verbs':['create']}]))
+  apply({'apiVersion':'v1','kind':'Pod','metadata':{'namespace':ns,'name':'worker'},'spec':{'serviceAccountName':'worker','terminationGracePeriodSeconds':0,'containers':[{'name':'pause','image':'registry.k8s.io/pause:3.10','imagePullPolicy':'IfNotPresent','resources':{'requests':{'cpu':'10m','memory':'16Mi'},'limits':{'cpu':'50m','memory':'32Mi'}}}]}})
+  issuer=json.loads(ctl('get','--raw','/.well-known/openid-configuration'))['issuer']
+  config={'api_origin':c['server'],'issuer':issuer,'cluster_id':'owned-kind-rbac','audience':'workload.example.test','namespaces':[ns],'timeout_ms':1000};(root/'hopae-config.json').write_text(json.dumps(config))
+  worker_token=ctl('create','token','worker','-n',ns,'--duration=10m','--audience=workload.example.test','--bound-object-kind=Pod','--bound-object-name=worker').strip()
+  def authenticate(value):
+   result=subprocess.run([str(a.hopae_driver.resolve()),str(root/'hopae-config.json'),str(root/'ca.pem'),str(root/'token')],input=json.dumps({'token':value,'now_ms':int(time.time()*1000)}),capture_output=True,text=True,timeout=10)
+   assert result.returncode==0,'native Hopae qualification failed; details suppressed'
+   assert value not in result.stdout+result.stderr and token not in result.stdout+result.stderr
+   return json.loads(result.stdout)
+  verified=authenticate(worker_token);assert verified['status']=='verified' and verified['kind']=='Workload';subject=verified['subject']
+  other_pod={'apiVersion':'v1','kind':'Pod','metadata':{'namespace':ns,'name':'worker-other'},'spec':{'serviceAccountName':'worker','terminationGracePeriodSeconds':0,'containers':[{'name':'pause','image':'registry.k8s.io/pause:3.10','imagePullPolicy':'IfNotPresent','resources':{'requests':{'cpu':'10m','memory':'16Mi'},'limits':{'cpu':'50m','memory':'32Mi'}}}]}};apply(other_pod)
+  other_token=ctl('create','token','worker','-n',ns,'--duration=10m','--audience=workload.example.test','--bound-object-kind=Pod','--bound-object-name=worker-other').strip()
+  other=authenticate(other_token);assert other['status']=='verified' and other['subject']!=subject
+  service_account=json.loads(ctl('get','serviceaccount','worker','-n',ns,'-o','json'));pod=json.loads(ctl('get','pod','worker','-n',ns,'-o','json'))
+  workload={'issuer':issuer,'namespace':ns,'service_account':'worker','service_account_uid':service_account['metadata']['uid'],'pod':'worker','pod_uid':pod['metadata']['uid']}
+
  mapping={'version':1,'cluster':'owned-kind-rbac','template':{'version':1,'information_classes':['public'],'services':{'logs':{'permissions':['read'],'roles':{'reader':{'permissions':['read'],'information_classes':['public'],'minimum_aal':0}},'users':{},'networks':[{'cidr':'192.0.2.0/24','roles':['reader']}],'require_guard':True}}},'grants':[{'service':'logs','application_role':'reader','native_subject':subject,'source_subject':{'kind':'ServiceAccount','namespace':ns,'name':'worker'},'role':{'kind':'Role','namespace':ns,'name':'app-reader','uid':role['metadata']['uid']},'binding':{'kind':'RoleBinding','namespace':ns,'name':'app-worker','uid':bind['metadata']['uid']},'required_rules':[{'api_group':'','namespace':ns,'resource':'pods/log','verb':'get','resource_name':'worker'}]}]}
+ if a.hopae_driver:
+  del mapping['grants'][0]['native_subject'];mapping['grants'][0]['workload']=workload
  (root/'mapping.json').write_text(json.dumps(mapping));db=root/('authority.sqlite3' if a.authority else 'must-not-open.db')
  command=[str(a.binary.resolve()),'--observe-kubernetes-rbac','--kubernetes-cluster','owned-kind-rbac','--kubernetes-namespace',ns,'--kubernetes-api',c['server'],'--kubernetes-ca',str(root/'ca.pem'),'--kubernetes-token',str(root/'token'),'--kubernetes-mapping',str(root/'mapping.json'),'--database',str(db)]
  env=os.environ.copy()
@@ -65,13 +87,13 @@ try:
   while len(result)<size:
    chunk=sock.recv(size-len(result));assert chunk;result+=chunk
   return result
- def native_decision(minimum=0):
+ def native_decision(minimum=0,for_subject=None):
   global native,request_id
   if native is None:
    ctx=ssl.create_default_context(cafile=str(root/'rpc-ca.pem'));ctx.load_cert_chain(str(root/'rpc-client.pem'),str(root/'rpc-client.key'));ctx.set_alpn_protocols(['ppg1'])
    native=ctx.wrap_socket(socket.create_connection(('127.0.0.1',native_port),timeout=2),server_hostname='127.0.0.1');assert native.selected_alpn_protocol()=='ppg1'
    credential=decision.encode();native.sendall(b'PPG1'+struct.pack('!H',len(credential))+credential);assert exact(native,4)==b'PPA1'
-  request_id+=1;names=['logs',subject,'read','public'];body=bytes([1,4,0,0])+struct.pack('!QQ',request_id,minimum)+socket.inet_aton('192.0.2.8')+bytes(12)+b''.join(bytes([len(v)])+v.encode() for v in names)
+  request_id+=1;names=['logs',for_subject or subject,'read','public'];body=bytes([1,4,0,0])+struct.pack('!QQ',request_id,minimum)+socket.inet_aton('192.0.2.8')+bytes(12)+b''.join(bytes([len(v)])+v.encode() for v in names)
   native.sendall(struct.pack('!H',len(body))+body);reply=exact(native,32);assert reply[0]==1 and struct.unpack('!Q',reply[4:12])[0]==request_id
   return reply[1],struct.unpack('!Q',reply[12:20])[0]
  query={'service_id':'logs','subject':subject,'ip':'192.0.2.8','permission':'read','information_class':'public','aal':0,'guard':'enforced_allow'}
@@ -111,6 +133,16 @@ try:
    if predicate(value):return value
   raise RuntimeError('real RBAC observation deadline')
  first=observation(lambda v:v.get('candidate',{}).get('mappings',[{}])[0].get('active') is True);assert first['candidate']['policy']['services']['logs']['users']=={subject:['reader']}
+ if a.hopae_driver:
+  other_query=dict(query,subject=other['subject']);deadline=time.monotonic()+10
+  while True:
+   code,result=http('/v1/decision',other_query)
+   if code==200:
+    verdict,_=native_decision(for_subject=other['subject'])
+    if verdict!=255:
+     assert not result['allow'] and verdict==2;break
+   assert time.monotonic()<deadline,'other verified Pod refusal deadline'
+   time.sleep(.05)
  ctl('delete','rolebinding','app-worker','-n',ns);deleted=observation(lambda v:'candidate'in v and not v['candidate']['mappings'][0]['active']);assert deleted['candidate']['policy']['services']['logs']['users']=={} and deleted['source']['revision']>first['source']['revision']
  apply(app_binding);recreated=json.loads(ctl('get','rolebinding','app-worker','-n',ns,'-o','json'));assert recreated['metadata']['uid']!=bind['metadata']['uid']
  observation(lambda v:'candidate'in v and not v['candidate']['mappings'][0]['active']) if a.authority else observation(lambda v:'source'in v and any(o['uid']==recreated['metadata']['uid']for o in v['source']['inventory']['objects']) and not v['candidate']['mappings'][0]['active'])
@@ -128,8 +160,11 @@ try:
   process.terminate();process.wait(timeout=5)
  else:
   assert not db.exists();process.send_signal(signal.SIGINT);assert process.wait(timeout=5)==0
+ if a.hopae_driver:
+  ctl('delete','pod','worker','-n',ns,'--force','--grace-period=0','--wait=true')
+  assert authenticate(worker_token)['status']=='invalid'
  assert token not in process.stderr.read()
- version=json.loads(ctl('version','-o','json'))['serverVersion']['gitVersion'];report={'cluster_version':version,'read_only_namespaced_and_cluster_rbac':True,'literal_mapping_candidate':True,'binding_delete_withdrawal':True,'recreated_binding_uid_refusal':True,'credential_failure_fence_recovery':True,'authority_database_untouched':not a.authority,'authoritative_native_decisions':a.authority,'pooled_mtls_ppg1_parity':a.authority,'writer_exclusion_and_restart_fence':a.authority,'native_subject_is_fixture_reference':True,'production_changed':False};(root/'report.json').write_text(json.dumps(report,indent=2)+'\n');(state/'rbac-latest.json').write_text(json.dumps({'report':str(root/'report.json')})+'\n')
+ version=json.loads(ctl('version','-o','json'))['serverVersion']['gitVersion'];report={'cluster_version':version,'read_only_namespaced_and_cluster_rbac':True,'literal_mapping_candidate':True,'binding_delete_withdrawal':True,'recreated_binding_uid_refusal':True,'credential_failure_fence_recovery':True,'authority_database_untouched':not a.authority,'authoritative_native_decisions':a.authority,'pooled_mtls_ppg1_parity':a.authority,'writer_exclusion_and_restart_fence':a.authority,'native_subject_is_fixture_reference':not bool(a.hopae_driver),'actual_hopae_workload_mapping_parity':bool(a.hopae_driver),'other_verified_pod_guest':bool(a.hopae_driver),'production_changed':False};(root/'report.json').write_text(json.dumps(report,indent=2)+'\n');(state/'rbac-latest.json').write_text(json.dumps({'report':str(root/'report.json')})+'\n')
  success=('PASS: real Kubernetes source-authoritative native decisions, durable deletion, writer exclusion and restart fence; ' if a.authority else 'PASS: real Kubernetes ')+version+' read-only RBAC collection and explicit candidate mapping, Binding deletion/recreation and credential failure recovery; production unchanged'+(' (isolated authority DB)' if a.authority else ' (no authority DB)')
 finally:
  if native is not None:native.close()
@@ -140,4 +175,4 @@ finally:
    try:ctl(*argv)
    except Exception:failed=True
  if failed:raise RuntimeError('owned RBAC fixture cleanup failed')
-print(success)
+print(success+(' ; actual Hopae workload association, different verified Pod guest and Pod-token revocation pass' if a.hopae_driver else ''))

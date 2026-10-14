@@ -22,11 +22,74 @@ pub struct Mapping {
 struct Grant {
     service: String,
     application_role: String,
+    #[serde(default)]
     native_subject: String,
+    #[serde(default)]
+    workload: Option<Workload>,
     source_subject: Subject,
     binding: Pin,
     role: Pin,
     required_rules: Vec<Requirement>,
+}
+/// Administrator-pinned workload coordinates; authentication is still owned by Hopae.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Workload {
+    issuer: String,
+    namespace: String,
+    service_account: String,
+    service_account_uid: String,
+    pod: String,
+    pod_uid: String,
+}
+impl Workload {
+    fn subject(&self, cluster: &str) -> Result<String> {
+        let issuer = reqwest::Url::parse(&self.issuer)?;
+        ensure!(
+            issuer.scheme() == "https"
+                && issuer.host_str().is_some()
+                && issuer.username().is_empty()
+                && issuer.password().is_none()
+                && issuer.query().is_none()
+                && issuer.fragment().is_none()
+                && self.issuer.len() <= 256,
+            "invalid workload issuer"
+        );
+        let mut inner = Sha256::new();
+        inner.update(b"hopae:kubernetes:pod-subject:v1\0");
+        for value in [
+            &self.namespace,
+            &self.service_account,
+            &self.service_account_uid,
+            &self.pod,
+            &self.pod_uid,
+        ] {
+            ensure!(
+                identifier(value)
+                    && value
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b)),
+                "invalid workload coordinates"
+            );
+            inner.update((value.len() as u32).to_be_bytes());
+            inner.update(value.as_bytes());
+        }
+        let workload = format!("w_{:x}", inner.finalize());
+        let mut outer = Sha256::new();
+        outer.update([2]);
+        for value in [&self.issuer, cluster, &workload] {
+            outer.update((value.len() as u64).to_be_bytes());
+            outer.update(value.as_bytes());
+        }
+        let digest = outer.finalize();
+        Ok(format!(
+            "s_{}",
+            digest[..24]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ))
+    }
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -114,10 +177,24 @@ impl Mapping {
             "mapping template cannot contain independent user grants"
         );
         let mut unique = BTreeSet::new();
-        for g in &mapping.grants {
+        for g in &mut mapping.grants {
+            if let Some(workload) = &g.workload {
+                ensure!(
+                    g.native_subject.is_empty(),
+                    "workload and native subject are mutually exclusive"
+                );
+                ensure!(
+                    g.source_subject.kind == "ServiceAccount"
+                        && g.source_subject.name == workload.service_account
+                        && g.source_subject.namespace.as_deref()
+                            == Some(workload.namespace.as_str()),
+                    "workload must match the RBAC ServiceAccount subject"
+                );
+                g.native_subject = workload.subject(&mapping.cluster)?;
+            }
             ensure!(
                 identifier(&g.native_subject),
-                "explicit verified native subject reference required"
+                "explicit native subject reference required"
             );
             let service = mapping
                 .template
@@ -318,6 +395,55 @@ mod tests {
                     .unwrap(),
             )
             .unwrap()
+    }
+    #[test]
+    fn workload_binding_is_domain_separated_uid_scoped_and_unambiguous() {
+        let mut mapping = configuration();
+        mapping["grants"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_subject");
+        mapping["grants"][0]["workload"] = serde_json::json!({
+            "issuer":"https://issuer.example.test", "namespace":"blue",
+            "service_account":"worker", "service_account_uid":"sa-1", "pod":"worker-pod", "pod_uid":"pod-1"
+        });
+        let original = candidate(&mapping, &source());
+        let subject = original.mappings[0].native_subject.clone();
+        assert_eq!(
+            subject,
+            "s_529be5b595ab327853eabe2d1adf52256e262af036510607"
+        );
+        assert_eq!(
+            original.policy.services["logs"].users[&subject],
+            vec!["reader"]
+        );
+        let original_mapping = mapping.clone();
+        for (field, replacement) in [
+            ("service_account_uid", "sa2"),
+            ("pod_uid", "pod2"),
+            ("issuer", "https://other.example.test"),
+        ] {
+            let mut changed = original_mapping.clone();
+            changed["grants"][0]["workload"][field] = Value::from(replacement);
+            assert_ne!(
+                candidate(&changed, &source()).mappings[0].native_subject,
+                subject
+            );
+        }
+        for mutation in ["namespace", "service_account"] {
+            let mut changed = original_mapping.clone();
+            changed["grants"][0]["workload"][mutation] = Value::from("other");
+            assert!(Mapping::parse(&serde_json::to_vec(&changed).unwrap()).is_err());
+        }
+        mapping["grants"][0]["native_subject"] = Value::from("conflicting-native-reference");
+        assert!(Mapping::parse(&serde_json::to_vec(&mapping).unwrap()).is_err());
+        mapping["grants"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("native_subject");
+        mapping["grants"][0]["workload"]["issuer"] =
+            Value::from("https://issuer.example.test?token=bad");
+        assert!(Mapping::parse(&serde_json::to_vec(&mapping).unwrap()).is_err());
     }
     #[test]
     fn explicit_mapping_still_requires_network_and_guard_and_deletion_removes_grants() {

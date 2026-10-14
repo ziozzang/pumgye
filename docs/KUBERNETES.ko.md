@@ -168,3 +168,41 @@ python3 tools/kubernetes_real_cluster.py --binary target/debug/pumgye \
 실제 API fixture는 격리 DB에서 네이티브 HTTP 허용/거절, 삭제의 영속 revision,
 작성자 배제, 인증 실패/복구와 재시작 시 캐시 권한 거절까지 검증합니다.
 호패의 검증된 신원 자동 연관·watch·한강 전체 연결 검증은 후속 단계입니다.
+
+
+## 호패 워크로드 신원 연관
+
+grant는 불투명 native_subject 참조 대신 workload를 사용할 수 있습니다.
+[가상 워크로드 매핑](../examples/kubernetes-workload-mapping.json)은 issuer,
+namespace, ServiceAccount 이름/UID와 Pod 이름/UID를 고정합니다. mapping의 cluster는
+호패 cluster_id와 같습니다. 정확히 같은 문자열로 호패 Workload 신원을 계산하여
+해시를 수동 복사하지 않아도 됩니다. namespace/계정은 RBAC ServiceAccount 대상과
+일치해야 하며 두 형식을 함께 지정하면 거절합니다. 다른 신원 종류는 기존 명시적
+native 참조를 사용합니다.
+
+이것은 신원 주소 계산이며 인증이 아닙니다. issuer/audience·신뢰 TokenReview·현재
+객체 UID/삭제·기한 검증은 호패가 담당하고 한강은 신뢰된 네이티브 인증 경로로
+신원을 받아야 합니다. issuer/cluster·두 UID가 신원을 구분하므로 같은 계정의
+다른 Pod나 재생성 객체가 이 고정 권한을 상속하지 않습니다. 매핑은 관리자 소유이고
+프로세스 동안 고정합니다. 실시간 자동 발견·원천 편집·UID 재고정·분산 watch는
+후속 작업입니다.
+
+호패 기존 알고리즘과 일치합니다. hopae:kubernetes:pod-subject:v1 뒤 NUL과
+namespace/계정 이름·UID/Pod 이름·UID를 각각 big-endian u32 바이트 길이와 UTF-8로
+연결하여 SHA-256한 뒤 w_와 전체 소문자 hex로 만듭니다. 종류 바이트 2 뒤
+issuer/cluster/워크로드 문자열을 각각 big-endian u64 길이와 UTF-8로 연결하여
+SHA-256하고 첫 24바이트를 s_와 소문자 hex로 만듭니다. 해시는 정책 컴파일 시만
+계산하며 서명 영수증이나 인증 근거를 대신하지 않습니다.
+
+```sh
+python3 tools/kubernetes_real_cluster.py --binary target/debug/pumgye \
+  --state-dir /private/owned-kind-qualification --authority \
+  --hopae-driver /path/to/hopae/target/debug/examples/qualify_kubernetes_tokenreview
+```
+
+소유 실제 v1.37.0 fixture에서 서명된 Pod-bound TokenRequest 토큰을 네이티브 호패
+TokenReview·현재 객체 검증으로 인증합니다. 품계가 계산한 신원과 호패 출력이
+일치하고 mTLS HTTP/지속 PPG1로 매핑 권한을 허용해야 합니다. 같은 계정의 다른
+실제 검증된 Pod는 guest이며 첫 Pod 삭제는 토큰을 거절합니다. Binding 삭제/재생성·
+원천 실패·작성자 배제·재시작 fence도 계속 검사합니다. 두 네이티브 모듈 연관
+검증이며 한강 전체 요청/스트림 연결 검증을 완료한 것은 아닙니다.

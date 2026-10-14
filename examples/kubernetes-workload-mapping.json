@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "cluster": "example-cluster",
+  "template": {
+    "version": 1,
+    "information_classes": [
+      "public"
+    ],
+    "services": {
+      "logs": {
+        "permissions": [
+          "read"
+        ],
+        "roles": {
+          "reader": {
+            "permissions": [
+              "read"
+            ],
+            "information_classes": [
+              "public"
+            ],
+            "minimum_aal": 0
+          }
+        },
+        "users": {},
+        "networks": [
+          {
+            "cidr": "192.0.2.0/24",
+            "roles": [
+              "reader"
+            ]
+          }
+        ],
+        "require_guard": true
+      }
+    }
+  },
+  "grants": [
+    {
+      "service": "logs",
+      "application_role": "reader",
+      "source_subject": {
+        "kind": "ServiceAccount",
+        "name": "worker",
+        "namespace": "example"
+      },
+      "binding": {
+        "kind": "RoleBinding",
+        "namespace": "example",
+        "name": "workers",
+        "uid": "example-binding"
+      },
+      "role": {
+        "kind": "Role",
+        "namespace": "example",
+        "name": "reader",
+        "uid": "example-role"
+      },
+      "required_rules": [
+        {
+          "api_group": "",
+          "namespace": "example",
+          "resource": "pods/log",
+          "verb": "get",
+          "resource_name": "worker"
+        }
+      ],
+      "workload": {
+        "issuer": "https://issuer.example.test",
+        "namespace": "example",
+        "service_account": "worker",
+        "service_account_uid": "example-service-account-uid",
+        "pod": "worker",
+        "pod_uid": "example-pod-uid"
+      }
+    }
+  ]
+}

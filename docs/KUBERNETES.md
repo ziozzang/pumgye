@@ -205,3 +205,48 @@ durable deletion revision, writer exclusion, authentication failure recovery and
 restart refusal of cached grants in an isolated DB. Automatic verified Hopae
 association, watch reconciliation and full Hangang integration qualification are
 subsequent gates.
+
+
+## Hopae workload subject association
+
+A grant can use `workload` instead of an opaque `native_subject` reference. The
+fictional [workload mapping](../examples/kubernetes-workload-mapping.json) pins
+issuer, namespace, ServiceAccount name/UID and Pod name/UID. The mapping's cluster
+is Hopae's configured `cluster_id`. These exact strings derive the canonical
+Hopae Workload subject, so operators do not copy opaque subject hashes manually.
+The workload namespace/account must match the grant's RBAC ServiceAccount subject.
+Supplying both forms is rejected. User, network and non-workload authentication
+continue to use their explicit native references.
+
+This derives an identity address; it does not authenticate a credential. Hopae
+still owns issuer/audience checks, trusted TokenReview, current object UID/deletion
+verification and bounded evidence. Hangang must obtain that subject through the
+trusted native authentication path. The issuer/cluster and both UIDs are part of
+the identity domain: another Pod of the same ServiceAccount receives another
+subject, and recreated objects do not inherit this pinned grant. The mapping is
+administrator-owned and static for this server process; automatic live discovery,
+source editing, UID repinning and distributed watches remain separate work.
+
+The canonical algorithm matches Hopae's existing implementation: SHA-256 of
+`hopae:kubernetes:pod-subject:v1` followed by a NUL and each namespace/account
+name/account UID/Pod name/Pod UID as a big-endian u32 byte length then UTF-8 bytes,
+rendered as `w_` plus full lowercase hex. Hash principal-kind byte `2` followed by
+issuer/cluster/that workload string, each with a big-endian u64 byte length and
+UTF-8 bytes. The first 24 digest bytes render as `s_` plus lowercase hex. Hashing
+runs during policy compilation, not per decision. This address is not a signed
+receipt or a substitute for authenticated evidence.
+
+```sh
+python3 tools/kubernetes_real_cluster.py --binary target/debug/pumgye \
+  --state-dir /private/owned-kind-qualification --authority \
+  --hopae-driver /path/to/hopae/target/debug/examples/qualify_kubernetes_tokenreview
+```
+
+The actual owned v1.37.0 fixture additionally uses signed Pod-bound TokenRequest
+credentials, native Hopae TokenReview/live-object verification and the pinned
+workload mapping. The subject computed by Pumgye must match the native Hopae
+subject and allow the mapped role over mTLS HTTP/pooled PPG1. A second genuinely
+verified Pod of the same ServiceAccount remains guest; deleting the first Pod
+invalidates its credential. Existing Binding deletion/recreation, source failure,
+writer exclusion and restart fences remain checked. This qualifies the two native
+components' association, not the complete Hangang request/stream pipeline.
