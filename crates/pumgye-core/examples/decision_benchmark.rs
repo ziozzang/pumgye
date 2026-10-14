@@ -15,7 +15,26 @@ fn main() -> anyhow::Result<()> {
         (1..=100_000_000).contains(&iterations),
         "iterations must be 1..100000000"
     );
+    let pattern = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "sequential".into());
+    anyhow::ensure!(
+        matches!(pattern.as_str(), "sequential" | "shuffled"),
+        "pattern must be sequential or shuffled"
+    );
     let count = 65_536usize;
+    let mut order: Vec<usize> = (0..count).collect();
+    if pattern == "shuffled" {
+        // Deterministic Fisher-Yates fixture; random generation is outside measurement.
+        let mut seed = 0x5a17_9d23_6c41_ef85u64;
+        for i in (1..count).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            order.swap(i, (seed as usize) % (i + 1));
+        }
+    }
+
     let subjects: Vec<String> = (0..count).map(|i| format!("fixture_{i}")).collect();
     let addresses: Vec<IpAddr> = (0..count)
         .map(|i| IpAddr::V4(Ipv4Addr::from(0xc6120000 + i as u32)))
@@ -68,7 +87,7 @@ fn main() -> anyhow::Result<()> {
     let started = Instant::now();
     let mut allows = 0usize;
     for i in 0..iterations {
-        let index = black_box(i % count);
+        let index = black_box(order[i % count]);
         let result = compiled.evaluate(
             black_box("orders"),
             black_box(&subjects[index]),
@@ -87,7 +106,7 @@ fn main() -> anyhow::Result<()> {
     );
     println!(
         "{}",
-        serde_json::json!({"scope":"single-thread compiled core; warmed sequential maximum assignments; no SQL/TLS/network", "users":count,"ipv4_prefixes":count,"verified_decisions":allows,"elapsed_seconds":elapsed,"decisions_per_second":iterations as f64/elapsed,"nanoseconds_per_decision":elapsed*1e9/iterations as f64})
+        serde_json::json!({"scope":"single-thread compiled core; warmed maximum assignments; no SQL/TLS/network", "access_pattern":pattern, "users":count,"ipv4_prefixes":count,"verified_decisions":allows,"elapsed_seconds":elapsed,"decisions_per_second":iterations as f64/elapsed,"nanoseconds_per_decision":elapsed*1e9/iterations as f64})
     );
     Ok(())
 }

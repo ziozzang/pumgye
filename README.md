@@ -122,3 +122,12 @@ Three single-thread samples took 295–319 ns/decision. This synthetic sequentia
 workload excludes compilation, SQL and transport; it does not establish server
 throughput, random-key latency or full-chain 100k QPS capacity. Host contention
 and loopback locality limit extrapolation. No Kubernetes load test was run.
+
+The [paired access-order measurement](docs/core-access-performance.json) uses
+the same core executable and precomputed sequential/shuffled permutations of
+all 65,536 assignments. Run the second mode with
+`cargo run --release -p pumgye-core --example decision_benchmark -- 1000000 shuffled`.
+Three sequential samples took 243–268 ns/decision; shuffled samples took
+753–930 ns/decision. The difference demonstrates sensitivity to cache locality.
+The fixed shuffled order repeats, uses one role/service and is not an adversarial
+or production traffic model. These core samples cannot establish server QPS.

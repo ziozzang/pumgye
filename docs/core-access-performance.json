@@ -1,0 +1,71 @@
+{
+  "scope": "Single-thread synthetic maximum assignment core; same binary and precomputed input ordering; no network or SQL. Fixed shuffled permutation repeats every 65536 queries and is not adversarial traffic.",
+  "samples": [
+    {
+      "access_pattern": "sequential",
+      "decisions_per_second": 3901115.3550174725,
+      "elapsed_seconds": 0.256336947,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 256.33694699999995,
+      "scope": "single-thread compiled core; warmed maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000,
+      "trial": 1
+    },
+    {
+      "access_pattern": "sequential",
+      "decisions_per_second": 4120099.0751984417,
+      "elapsed_seconds": 0.24271261,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 242.71261,
+      "scope": "single-thread compiled core; warmed maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000,
+      "trial": 2
+    },
+    {
+      "access_pattern": "sequential",
+      "decisions_per_second": 3736142.581781677,
+      "elapsed_seconds": 0.267655738,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 267.655738,
+      "scope": "single-thread compiled core; warmed maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000,
+      "trial": 3
+    },
+    {
+      "access_pattern": "shuffled",
+      "decisions_per_second": 1126054.071346349,
+      "elapsed_seconds": 0.888056822,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 888.056822,
+      "scope": "single-thread compiled core; warmed maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000,
+      "trial": 1
+    },
+    {
+      "access_pattern": "shuffled",
+      "decisions_per_second": 1075518.2576435586,
+      "elapsed_seconds": 0.929784309,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 929.784309,
+      "scope": "single-thread compiled core; warmed maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000,
+      "trial": 2
+    },
+    {
+      "access_pattern": "shuffled",
+      "decisions_per_second": 1327467.5004727212,
+      "elapsed_seconds": 0.753314111,
+      "ipv4_prefixes": 65536,
+      "nanoseconds_per_decision": 753.314111,
+      "scope": "single-thread compiled core; warmed maximum assignments; no SQL/TLS/network",
+      "users": 65536,
+      "verified_decisions": 1000000,
+      "trial": 3
+    }
+  ]
+}
