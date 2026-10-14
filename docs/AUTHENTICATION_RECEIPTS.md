@@ -409,3 +409,10 @@ This qualifies the real gRPC positive/lifecycle path previously left open. It
 does not qualify static newly released gRPC assets, Kubernetes gRPC admission,
 Hangang client/dispatch or signed permit/projection. Operating releases remain
 unchanged by this source/fixture increment.
+
+The fixture now offers `--nonempty-entity` to bind an owned nonempty entity,
+with the empty-body default preserved. Both Pumgye's native client and the actual
+Hangang prepared-request/receipt clients pass the persistent gRPC lifecycle
+fixture in this mode. Hangang SDK qualification supersedes that client gate
+above; actual gateway transformation/upstream dispatch remains open. These
+source tests do not change operating release or issuer configuration.

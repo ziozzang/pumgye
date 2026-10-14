@@ -13,6 +13,7 @@ def main():
     parser.add_argument('--pumgye', required=True, type=Path)
     parser.add_argument('--sumunjang', required=True, type=Path)
     parser.add_argument('--grpc-decisions', action='store_true')
+    parser.add_argument('--nonempty-entity', action='store_true', help='bind an owned nonempty entity instead of an empty request body')
     args = parser.parse_args()
     os.umask(0o077)
     def port():
@@ -39,7 +40,7 @@ def main():
         pin=base64.b64encode(public[-32:]).decode()
         config={'state_dir':str(root/'state'),'listen':{'portal':f'127.0.0.1:{portal}','gateway':f'127.0.0.1:{gateway}','grpc_gateway':f'127.0.0.1:{grpc}','admin':f'127.0.0.1:{admin}','native_gateway_tls':{'certificate':str(root/'server.pem'),'key':str(root/'server.key'),'client_ca':str(root/'ca.pem')}},'portal':{'public_url':'https://auth.example.test'},'gateway':{'kind':'hangang','caller_key_env':'OWNED_RECEIPT_CALLER'},'apps':[{'app_id':'orders','hosts':['orders.example.test']}],'admin':{'public_url':'https://admin.example.test','hangang_delegation':{'authority':'hangang','key_env':'OWNED_RECEIPT_DELEGATION'}},'authentication_gateway':profile,'receipt_issuer':{'issuer_ref':'owned','key_epoch':1,'identity_authority_epoch':'epoch1','public_key':pin,'seed_env':'OWNED_RECEIPT_SEED','scopes':[{'service':'orders','audience':'orders-api'}]}}
         server_config=root/'server.json';server_config.write_text(json.dumps(config))
-        client_config={'settings':{'transport':'grpc','address':f'localhost:{grpc}','tls':{'server_name':'hopae.example.test','ca':str(root/'ca.pem'),'certificate':str(root/'client.pem'),'key':str(root/'client.key')}},'issuer_ref':'owned','key_epoch':1,'public_key':pin,'service':'orders','audience':'orders-api','method':'GET','target':'/private','body':'','headers':[['x-hopae-contract','1'],['x-forwarded-host','orders.example.test'],['x-forwarded-proto','https'],['x-forwarded-port','443'],['x-forwarded-for','203.0.113.9'],['x-original-method','GET'],['x-original-url','https://orders.example.test/private']]}
+        client_config={'settings':{'transport':'grpc','address':f'localhost:{grpc}','tls':{'server_name':'hopae.example.test','ca':str(root/'ca.pem'),'certificate':str(root/'client.pem'),'key':str(root/'client.key')}},'issuer_ref':'owned','key_epoch':1,'public_key':pin,'service':'orders','audience':'orders-api','method':'GET','target':'/private','body':'owned transformed entity' if args.nonempty_entity else '','headers':[['x-hopae-contract','1'],['x-forwarded-host','orders.example.test'],['x-forwarded-proto','https'],['x-forwarded-port','443'],['x-forwarded-for','203.0.113.9'],['x-original-method','GET'],['x-original-url','https://orders.example.test/private']]}
         client_config['pumgye_endpoint']=f'http://127.0.0.1:{pum_http}/v1/resource/authenticated-decision'
         if args.grpc_decisions:client_config['pumgye_grpc_address']=f'https://localhost:{pum_grpc}'
         client_path=root/'client.json';client_path.write_text(json.dumps(client_config))
