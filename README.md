@@ -61,3 +61,10 @@ Qualify the earlier owned gateway baseline with
 [Kubernetes source adapter](docs/KUBERNETES.md): bounded inspection, HTTPS polling, explicit mapping and sole-writer source-authoritative decisions are implemented and qualified against an owned real API. Scalable watches and automatic verified identity association remain pending.
 
 [Additional gRPC decisions](docs/GRPC.md) use the same core and snapshots. Optional mTLS listener, locally qualified; production/Kubernetes and cross-component integration remain pending. Workspace builds now require `protoc`.
+
+Native and management TCP listeners use pinned hangang-runtime 0.1.2 connection
+admission and task ownership (4,096 native; 2,048 management connections).
+Cancelling the listener owner aborts its connection tasks instead of detaching
+them. PPG1 framing, TLS/ALPN, peer certificate audit identity and in-memory
+authorization remain Pumgye owned. This is task lifecycle ownership, not a new
+graceful OS-signal shutdown or supervisor handover implementation.

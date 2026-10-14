@@ -14,7 +14,6 @@ use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpListener,
-    sync::Semaphore,
     time::timeout,
 };
 use tokio_rustls::TlsAcceptor;
@@ -25,41 +24,44 @@ pub async fn http(
     config: Option<Arc<ServerConfig>>,
     router: Router,
 ) -> Result<()> {
-    let capacity = Arc::new(Semaphore::new(2048));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let Ok(permit) = capacity.clone().try_acquire_owned() else {
-            continue;
-        };
-        stream.set_nodelay(true)?;
-        let config = config.clone();
-        let router = router.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            if let Some(config) = config {
-                if let Ok(Ok(tls)) = timeout(
-                    Duration::from_secs(3),
-                    TlsAcceptor::from(config).accept(stream),
-                )
-                .await
-                {
-                    let Some(cert) = tls.get_ref().1.peer_certificates().and_then(|c| c.first())
-                    else {
-                        return;
-                    };
-                    let peer = PeerIdentity(format!("mtls:{:x}", Sha256::digest(cert.as_ref())));
-                    serve_http(tls, router, peer).await;
+    hangang_runtime::serve_connections(
+        listener,
+        std::num::NonZeroUsize::new(2048).unwrap(),
+        Duration::ZERO,
+        move |stream, _peer| {
+            let config = config.clone();
+            let router = router.clone();
+            async move {
+                if let Some(config) = config {
+                    if let Ok(Ok(tls)) = timeout(
+                        Duration::from_secs(3),
+                        TlsAcceptor::from(config).accept(stream),
+                    )
+                    .await
+                    {
+                        let Some(cert) =
+                            tls.get_ref().1.peer_certificates().and_then(|c| c.first())
+                        else {
+                            return;
+                        };
+                        let peer =
+                            PeerIdentity(format!("mtls:{:x}", Sha256::digest(cert.as_ref())));
+                        serve_http(tls, router, peer).await;
+                    }
+                } else {
+                    serve_http(
+                        stream,
+                        router,
+                        PeerIdentity("loopback-administrator".into()),
+                    )
+                    .await;
                 }
-            } else {
-                serve_http(
-                    stream,
-                    router,
-                    PeerIdentity("loopback-administrator".into()),
-                )
-                .await;
             }
-        });
-    }
+        },
+        std::future::pending(),
+    )
+    .await?;
+    Ok(())
 }
 async fn serve_http<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
     stream: S,
@@ -88,32 +90,35 @@ pub async fn native(
     config: Option<Arc<ServerConfig>>,
     authority: Arc<Authority>,
 ) -> Result<()> {
-    let capacity = Arc::new(Semaphore::new(4096));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let Ok(permit) = capacity.clone().try_acquire_owned() else {
-            continue;
-        };
-        stream.set_nodelay(true)?;
-        let config = config.clone();
-        let authority = authority.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            if let Some(config) = config {
-                if let Ok(Ok(tls)) = timeout(
-                    Duration::from_secs(3),
-                    TlsAcceptor::from(config).accept(stream),
-                )
-                .await
-                    && tls.get_ref().1.alpn_protocol() == Some(b"ppg1")
-                {
-                    let _ = timeout(Duration::from_secs(300), native_session(tls, authority)).await;
+    hangang_runtime::serve_connections(
+        listener,
+        std::num::NonZeroUsize::new(4096).unwrap(),
+        Duration::ZERO,
+        move |stream, _peer| {
+            let config = config.clone();
+            let authority = authority.clone();
+            async move {
+                if let Some(config) = config {
+                    if let Ok(Ok(tls)) = timeout(
+                        Duration::from_secs(3),
+                        TlsAcceptor::from(config).accept(stream),
+                    )
+                    .await
+                        && tls.get_ref().1.alpn_protocol() == Some(b"ppg1")
+                    {
+                        let _ =
+                            timeout(Duration::from_secs(300), native_session(tls, authority)).await;
+                    }
+                } else {
+                    let _ =
+                        timeout(Duration::from_secs(300), native_session(stream, authority)).await;
                 }
-            } else {
-                let _ = timeout(Duration::from_secs(300), native_session(stream, authority)).await;
             }
-        });
-    }
+        },
+        std::future::pending(),
+    )
+    .await?;
+    Ok(())
 }
 async fn native_session<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
@@ -163,5 +168,39 @@ async fn native_session<S: AsyncRead + AsyncWrite + Unpin>(
             .await??;
             pending = 0;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn cancelling_native_owner_closes_authenticated_connection() {
+        let root = tempfile::tempdir().unwrap();
+        let authority = crate::tests::authority(root.path());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let credential = authority.decision.clone();
+        let running = tokio::spawn(native(listener, None, authority));
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        socket.write_all(pumgye_protocol::HELLO).await.unwrap();
+        socket.write_u16(credential.len() as u16).await.unwrap();
+        socket.write_all(credential.as_bytes()).await.unwrap();
+        let mut ack = [0; 4];
+        timeout(Duration::from_secs(2), socket.read_exact(&mut ack))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&ack, pumgye_protocol::ACK);
+        running.abort();
+        assert!(running.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            timeout(Duration::from_secs(2), socket.read_u8())
+                .await
+                .unwrap()
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
     }
 }
