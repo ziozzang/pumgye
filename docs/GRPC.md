@@ -68,3 +68,16 @@ catalog smoke test. Hangang dispatch/UI adoption remains open; this unsigned
 result is not a signed permit or verified authentication receipt.
 
 Resource requests now require `service_id` from trusted gateway route/authentication context. The owner refuses a catalog entry belonging to another service even when the principal has grants there. Omitted/empty scopes are invalid. This unreleased contract requires rebuilding consumers; legacy Authorization is unchanged.
+
+## Native resource signer fence (unreleased)
+
+Resource HTTP/gRPC evaluations now share `resource_authorize_then`. Only an actual
+scoped owner Allow can invoke its private callback, which receives the immutable
+owner's resource metadata and revision. The same snapshot, readiness/source lease
+and health must still be current after the callback; retired output is discarded.
+Callbacks must retain candidate signatures privately and avoid irreversible external
+effects before success. Tests refuse weak/invalid assurance, wrong service/action,
+revision floors and same-revision snapshot replacement or health retirement during
+candidate production. This prepares the Pumgye signer boundary; it does not verify
+Hopae receipts or issue a signed permit yet. Resource HTTP now also validates native
+service syntax consistently with gRPC.

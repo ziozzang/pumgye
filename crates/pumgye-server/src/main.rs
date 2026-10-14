@@ -181,6 +181,25 @@ impl Authority {
         &self,
         q: &ResourceEvaluation<'_>,
     ) -> Option<(u64, pumgye_core::ResourceDecision)> {
+        self.resource_authorize_then(q, |revision, _| {
+            (
+                revision,
+                pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::Allow),
+            )
+        })
+        .map(Some)
+        .unwrap_or_else(|refusal| refusal)
+    }
+    /// Signer output remains private until the exact allowing catalog is still
+    /// current. The callback receives owner metadata, never caller classification.
+    fn resource_authorize_then<T>(
+        &self,
+        q: &ResourceEvaluation<'_>,
+        operation: impl FnOnce(u64, &pumgye_core::Resource) -> T,
+    ) -> Result<T, Option<(u64, pumgye_core::ResourceDecision)>> {
+        if !q.valid() {
+            return Err(None);
+        }
         let view = self.view.load();
         let active = || {
             self.healthy.load(Ordering::Acquire)
@@ -191,7 +210,7 @@ impl Authority {
                             .is_some_and(|deadline| std::time::Instant::now() < deadline)))
         };
         if !active() || view.document.revision < q.minimum_revision {
-            return None;
+            return Err(None);
         }
         let decision = view.compiled.evaluate_scoped_resource(
             q.service_id,
@@ -204,9 +223,17 @@ impl Authority {
         );
         self.queries.fetch_add(1, Ordering::Relaxed);
         if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
-            return None;
+            return Err(None);
         }
-        Some((view.document.revision, decision))
+        if decision != pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::Allow) {
+            return Err(Some((view.document.revision, decision)));
+        }
+        let metadata = view.compiled.resource_metadata(q.resource).ok_or(None)?;
+        let output = operation(view.document.revision, metadata);
+        if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
+            return Err(None);
+        }
+        Ok(output)
     }
     fn available(&self) -> bool {
         self.healthy.load(Ordering::Acquire)
@@ -525,13 +552,15 @@ async fn decide_resource(
         return Err(StatusCode::UNAUTHORIZED);
     }
     if q.aal > 3
-        || [&q.resource, &q.action, &q.subject].iter().any(|v| {
-            v.is_empty()
-                || v.len() > 128
-                || !v
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
-        })
+        || [&q.service_id, &q.resource, &q.action, &q.subject]
+            .iter()
+            .any(|v| {
+                v.is_empty()
+                    || v.len() > 128
+                    || !v
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"_.:-".contains(&b))
+            })
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -979,6 +1008,94 @@ mod tests {
                 .status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[test]
+    fn resource_signer_only_receives_current_owner_metadata_after_allow() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = authority(root.path());
+        let mut document: Document =
+            serde_json::from_str(include_str!("../../../examples/resource-catalog.json")).unwrap();
+        document.revision = 1;
+        owner.view.store(Arc::new(View {
+            compiled: document.policy.compile().unwrap(),
+            document: document.clone(),
+            source_expires: None,
+        }));
+        let mut query = ResourceEvaluation {
+            service_id: "orders",
+            resource: "db:orders",
+            action: "select",
+            subject: "fixture",
+            ip: "192.0.2.9".parse().unwrap(),
+            aal: 2,
+            guard: GuardEvidence::EnforcedAllow,
+            minimum_revision: 1,
+        };
+        assert_eq!(
+            owner
+                .resource_authorize_then(&query, |revision, metadata| {
+                    assert_eq!(metadata.service, "orders");
+                    assert_eq!(metadata.information_class, "internal");
+                    assert_eq!(metadata.minimum_aal, 2);
+                    assert_eq!(metadata.actions["select"], "read");
+                    revision
+                })
+                .unwrap(),
+            1
+        );
+        query.aal = 4;
+        assert!(
+            owner
+                .resource_authorize_then(&query, |_, _| panic!("invalid assurance cannot sign"))
+                .unwrap_err()
+                .is_none()
+        );
+        query.aal = 1;
+        assert!(
+            owner
+                .resource_authorize_then(&query, |_, _| panic!("weak assurance cannot sign"))
+                .is_err()
+        );
+        query.aal = 2;
+        query.service_id = "billing";
+        assert!(
+            owner
+                .resource_authorize_then(&query, |_, _| panic!("cross-service scope cannot sign"))
+                .is_err()
+        );
+        query.service_id = "orders";
+        query.action = "drop";
+        assert!(
+            owner
+                .resource_authorize_then(&query, |_, _| panic!("unknown action cannot sign"))
+                .is_err()
+        );
+        query.action = "select";
+        query.minimum_revision = 2;
+        assert!(
+            owner
+                .resource_authorize_then(&query, |_, _| panic!("stale authority cannot sign"))
+                .unwrap_err()
+                .is_none()
+        );
+        query.minimum_revision = 1;
+        let retired = owner.resource_authorize_then(&query, |_, _| {
+            // Even the same numeric revision cannot make a replacement Arc the
+            // original allowing owner snapshot.
+            owner.view.store(Arc::new(View {
+                compiled: document.policy.compile().unwrap(),
+                document: document.clone(),
+                source_expires: None,
+            }));
+            "private signed candidate"
+        });
+        assert!(retired.unwrap_err().is_none());
+        let unavailable = owner.resource_authorize_then(&query, |_, _| {
+            owner.healthy.store(false, Ordering::Release);
+            "private signed candidate"
+        });
+        assert!(unavailable.unwrap_err().is_none());
     }
 
     #[test]

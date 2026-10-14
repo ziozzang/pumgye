@@ -59,6 +59,8 @@ def main():
                 assert api(endpoint, admin, query, 'POST')[0] == 401
                 assert api(endpoint, decision, query, 'POST')[1]['allow'] is True
                 assert api(endpoint, decision, dict(query, service_id='billing'), 'POST')[1]['reason'] == 'UnknownService'
+                assert api(endpoint, decision, dict(query, service_id=''), 'POST')[0] == 400
+                assert api(endpoint, decision, dict(query, service_id='orders/other'), 'POST')[0] == 400
                 missing = dict(query); del missing['service_id']
                 assert api(endpoint, decision, missing, 'POST')[0] == 422
                 assert api(endpoint, decision, dict(query, information_class='public'), 'POST')[0] == 422
