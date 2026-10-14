@@ -1,0 +1,102 @@
+{
+  "date": "2026-10-14",
+  "server_source": "508bb732b4f6ef696e70486b42eff6faec3a4460",
+  "server_sha256": "c268598123ade9251638cf7c6dd571c4e09302b45dce0eed02c6ff133fa59c40",
+  "generator_sha256": "6abeec03f4c77fe308374c8f2f2e90908e986401dcd437901c2d478dedf03e2f",
+  "generator_source": "commit containing this report",
+  "cpu": "AMD Ryzen 7 8745HS",
+  "physical_cores": 8,
+  "logical_cpus": 16,
+  "scope": "separate native server/client processes, mTLS loopback, batch one, closed-loop 16 workers; synthetic guard and assurance evidence; no gateway/provider chain",
+  "hot_policy_trials": [
+    {
+      "batch": 1,
+      "batch_p50_us": 110,
+      "batch_p99_us": 180,
+      "cardinality": 0,
+      "concurrency": 16,
+      "elapsed_seconds": 10.004441703,
+      "minimum_duration_seconds": 10,
+      "qps": 140189.9317959372,
+      "requests": 1402522,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 1
+    },
+    {
+      "batch": 1,
+      "batch_p50_us": 108,
+      "batch_p99_us": 177,
+      "cardinality": 0,
+      "concurrency": 16,
+      "elapsed_seconds": 10.005223768,
+      "minimum_duration_seconds": 10,
+      "qps": 142299.8658514361,
+      "requests": 1423742,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 2
+    },
+    {
+      "batch": 1,
+      "batch_p50_us": 111,
+      "batch_p99_us": 182,
+      "cardinality": 0,
+      "concurrency": 16,
+      "elapsed_seconds": 10.00579712,
+      "minimum_duration_seconds": 10,
+      "qps": 138790.24163144335,
+      "requests": 1388707,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 3
+    }
+  ],
+  "distributed_policy_trials": [
+    {
+      "batch": 1,
+      "batch_p50_us": 115,
+      "batch_p99_us": 183,
+      "cardinality": 4096,
+      "concurrency": 16,
+      "elapsed_seconds": 10.004977081,
+      "minimum_duration_seconds": 10,
+      "qps": 134343.73603439142,
+      "requests": 1344106,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 1
+    },
+    {
+      "batch": 1,
+      "batch_p50_us": 118,
+      "batch_p99_us": 191,
+      "cardinality": 4096,
+      "concurrency": 16,
+      "elapsed_seconds": 10.004928281,
+      "minimum_duration_seconds": 10,
+      "qps": 131015.03211065347,
+      "requests": 1310796,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 2
+    },
+    {
+      "batch": 1,
+      "batch_p50_us": 119,
+      "batch_p99_us": 195,
+      "cardinality": 4096,
+      "concurrency": 16,
+      "elapsed_seconds": 10.004979125,
+      "minimum_duration_seconds": 10,
+      "qps": 129079.92948960801,
+      "requests": 1291442,
+      "revision": 1,
+      "transport": "PPG1/mTLS",
+      "trial": 3
+    }
+  ],
+  "varying_users": 4096,
+  "varying_ipv4_prefixes": 4096,
+  "base_conformance_user_and_prefix": 1
+}

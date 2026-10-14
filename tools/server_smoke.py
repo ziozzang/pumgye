@@ -2,7 +2,7 @@
 """Owned mTLS server fixtures: no operational credentials or external targets."""
 import argparse, concurrent.futures, copy, http.client, json, os, secrets, socket, sqlite3, ssl, struct, subprocess, tempfile, time
 from pathlib import Path
-p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--client',type=Path);p.add_argument('--benchmark',type=int,default=0);args=p.parse_args();binary=args.binary.resolve()
+p=argparse.ArgumentParser();p.add_argument('--binary',required=True,type=Path);p.add_argument('--client',type=Path);p.add_argument('--benchmark',type=int,default=0);p.add_argument('--benchmark-cardinality',type=int,default=0);p.add_argument('--benchmark-batch',type=int,default=64);p.add_argument('--benchmark-concurrency',type=int,default=16);p.add_argument('--benchmark-seconds',type=int,default=10);args=p.parse_args();binary=args.binary.resolve()
 def run(*argv):return subprocess.run(argv,check=True,capture_output=True)
 def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
@@ -29,6 +29,10 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
         c=context();c.set_alpn_protocols(['http/1.1']);return c
     admin=secrets.token_urlsafe(32);decision=secrets.token_urlsafe(32);env=dict(os.environ,PUMGYE_ADMIN_TOKEN=admin,PUMGYE_DECISION_TOKEN=decision)
     policy={'version':1,'information_classes':['public','internal'],'services':{'orders':{'permissions':['read'],'require_guard':True,'roles':{'reader':{'permissions':['read'],'information_classes':['public'],'minimum_aal':1}},'users':{'fixture':['reader']},'networks':[{'cidr':'192.0.2.0/24','roles':['reader']}]}}}
+    assert 0<=args.benchmark_cardinality<=4096 and (not args.benchmark_cardinality or args.benchmark_batch==1)
+    for i in range(args.benchmark_cardinality):
+        policy['services']['orders']['users']['fixture-'+str(i)]=['reader']
+        policy['services']['orders']['networks'].append({'cidr':f'198.18.{i//256}.{i%256}/32','roles':['reader']})
     initial=root/'initial.json';initial.write_text(json.dumps({'revision':500,'policy':policy}));database=root/'pumgye.sqlite3';http_port,native_port=port(),port()
     argv=[str(binary),'--listen',f'0.0.0.0:{http_port}','--decision-listen',f'0.0.0.0:{native_port}','--database',str(database),'--policy',str(initial),'--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--client-ca',str(root/'ca.pem')]
     rejected=subprocess.run([str(binary),'--listen','0.0.0.0:0','--database',str(root/'rejected.db'),'--policy',str(initial)],env=env,capture_output=True);assert rejected.returncode!=0 and not (root/'rejected.db').exists()
@@ -83,8 +87,9 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
             subprocess.run([str(args.client.resolve()),'--address',f'127.0.0.1:{native_port}','--ca',str(root/'ca.pem'),'--cert',str(root/'client.pem'),'--key',str(root/'client.key'),'--requests','512','--concurrency','8'],env=env,check=True,capture_output=True)
         if args.client and args.benchmark:
             assert 1000<=args.benchmark<=10000000
+            assert 1<=args.benchmark_batch<=64 and 1<=args.benchmark_concurrency<=256 and 1<=args.benchmark_seconds<=60
             for trial in range(3):
-                measured=subprocess.run([str(args.client.resolve()),'--address',f'127.0.0.1:{native_port}','--ca',str(root/'ca.pem'),'--cert',str(root/'client.pem'),'--key',str(root/'client.key'),'--requests',str(args.benchmark),'--concurrency','16','--seconds','10'],env=env,check=True,capture_output=True,text=True)
+                measured=subprocess.run([str(args.client.resolve()),'--address',f'127.0.0.1:{native_port}','--ca',str(root/'ca.pem'),'--cert',str(root/'client.pem'),'--key',str(root/'client.key'),'--requests',str(args.benchmark),'--concurrency',str(args.benchmark_concurrency),'--seconds',str(args.benchmark_seconds),'--batch',str(args.benchmark_batch),'--cardinality',str(args.benchmark_cardinality)],env=env,check=True,capture_output=True,text=True)
                 result=json.loads(measured.stdout);result['trial']=trial+1
                 print(json.dumps(result),flush=True)
         with connect() as s:

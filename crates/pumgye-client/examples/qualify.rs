@@ -31,6 +31,8 @@ struct Args {
     concurrency: usize,
     #[arg(long, default_value_t = 64)]
     batch: usize,
+    #[arg(long, default_value_t = 0)]
+    cardinality: usize,
 }
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,7 +40,9 @@ async fn main() -> Result<()> {
     ensure!(
         args.requests > 0
             && (1..=64).contains(&args.batch)
-            && (1..=256).contains(&args.concurrency),
+            && (1..=256).contains(&args.concurrency)
+            && args.cardinality <= 4096
+            && (args.cardinality == 0 || args.batch == 1),
         "invalid load fixture size"
     );
     let tls = match (&args.ca, &args.cert, &args.key) {
@@ -63,6 +67,7 @@ async fn main() -> Result<()> {
         let total = args.requests / args.concurrency
             + usize::from(worker < args.requests % args.concurrency);
         let batch = args.batch;
+        let cardinality = args.cardinality;
         let duration = Duration::from_secs(args.seconds);
         jobs.spawn(async move {
             let query = Query {
@@ -84,6 +89,26 @@ async fn main() -> Result<()> {
                     batch
                 } else {
                     remaining.min(batch)
+                };
+                let index = if cardinality > 0 {
+                    (completed * 17 + worker * 131) % cardinality
+                } else {
+                    0
+                };
+                let subject = if cardinality > 0 {
+                    format!("fixture-{index}")
+                } else {
+                    "fixture".to_owned()
+                };
+                let query = Query {
+                    subject: &subject,
+                    ip: if cardinality > 0 {
+                        std::net::Ipv4Addr::new(198, 18, (index / 256) as u8, (index % 256) as u8)
+                            .into()
+                    } else {
+                        query.ip
+                    },
+                    ..query
                 };
                 let start = Instant::now();
                 let replies = if count == 1 {
@@ -118,7 +143,7 @@ async fn main() -> Result<()> {
     latencies.sort_unstable();
     println!(
         "{}",
-        serde_json::json!({"transport":if args.ca.is_some(){"PPG1/mTLS"}else{"PPG1/loopback"},"requests":actual,"concurrency":args.concurrency,"batch":args.batch,"elapsed_seconds":elapsed,"minimum_duration_seconds":args.seconds,"qps":actual as f64/elapsed,"batch_p50_us":latencies[latencies.len()/2],"batch_p99_us":latencies[(latencies.len()-1)*99/100],"revision":client.revision()})
+        serde_json::json!({"transport":if args.ca.is_some(){"PPG1/mTLS"}else{"PPG1/loopback"},"requests":actual,"concurrency":args.concurrency,"batch":args.batch,"cardinality":args.cardinality,"elapsed_seconds":elapsed,"minimum_duration_seconds":args.seconds,"qps":actual as f64/elapsed,"batch_p50_us":latencies[latencies.len()/2],"batch_p99_us":latencies[(latencies.len()-1)*99/100],"revision":client.revision()})
     );
     Ok(())
 }

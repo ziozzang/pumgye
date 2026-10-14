@@ -29,3 +29,24 @@ python3 tools/server_smoke.py --binary target/release/pumgye --client target/rel
 검증합니다. 전체 Hangang/호패/수문장 HTTP 처리량·외부 프로바이더·복제본 lease/증감·
 물리 네트워크 지연·큰 정책 규모의 증거는 아닙니다. 이 항목은 별도 통과 조건으로 남으며
 네이티브 여유는 메모리·지속 연결 설계의 근거입니다.
+
+## 단일 요청 mTLS 검증 — 2026-10-14
+
+[원시 측정](native-single-request-performance.json)은 batch **1**, native 연결 16개로
+10초씩 3회 측정합니다. 같은 8코어/16스레드 Ryzen 7 8745HS에서 서버와 Rust 생성기를
+분리합니다. 작은 hot 정책은 검증 판단 138,790~142,300건/초·p99 177~182µs입니다.
+사용자/IP /32 prefix 각 4096개를 순환하면(기본 적합성 사용자/prefix 하나 별도)
+129,080~134,344건/초·p50 115~119µs·p99 183~195µs입니다. 여기의 batch 지연은
+판단 한 건 완료 시간입니다.
+
+```sh
+cargo build --locked --release -p pumgye-client --example qualify
+python3 tools/server_smoke.py --binary target/release/pumgye --client target/release/examples/qualify --benchmark 1000000 --benchmark-batch 1 --benchmark-cardinality 4096
+```
+
+생성기는 신원과 주소를 모두 바꾸고 모든 허용/correlation/revision 하한을 검사합니다.
+주변 fixture는 신뢰/토큰 거절·CAS·즉시 회수·감사·재시작도 검사합니다. 서비스/역할/
+권한은 하나, 등급은 둘이며 assurance/수문장 근거는 합성입니다. 이 조건에서 native
+품계 10만건/초 이상의 여유를 보인 결과이며 전체 한강/호패/수문장 처리량은 아닙니다.
+closed-loop·loopback·warm 정책과 도착률 overload 미주입의 한계를 명시합니다.
+운영 서비스를 부하 대상으로 쓰지 않습니다.
