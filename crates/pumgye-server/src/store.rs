@@ -93,6 +93,25 @@ impl Store {
             document,
         ))
     }
+    /// Persist ownership: a source-managed DB cannot silently become a native writer on restart.
+    pub fn claim_source(&mut self, kubernetes: bool) -> Result<()> {
+        self.connection.execute_batch("CREATE TABLE IF NOT EXISTS source_owner (id INTEGER PRIMARY KEY CHECK(id=1), source TEXT NOT NULL)")?;
+        let owner: Option<String> = self
+            .connection
+            .query_row("SELECT source FROM source_owner WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        ensure!(
+            owner.as_deref().is_none_or(|v| v == "kubernetes") && (kubernetes || owner.is_none()),
+            "source-owned database requires Kubernetes reconciliation"
+        );
+        if kubernetes && owner.is_none() {
+            self.connection
+                .execute("INSERT INTO source_owner VALUES(1,'kubernetes')", [])?;
+        }
+        Ok(())
+    }
     pub fn audit_after(&self, after: u64) -> Result<Vec<AuditRecord>> {
         ensure!(after <= i64::MAX as u64, "invalid audit cursor");
         let mut statement=self.connection.prepare("SELECT revision,at_unix,actor,sha256 FROM audit WHERE revision>?1 ORDER BY revision LIMIT 100")?;

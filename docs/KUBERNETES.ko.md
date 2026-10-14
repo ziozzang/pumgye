@@ -130,3 +130,41 @@ python3 tools/kubernetes_real_cluster.py --binary target/debug/pumgye \
 Python PyYAML·클러스터 내 kubectl이 필요합니다. native subject는 명시적 가상 참조이며
 호패 워크로드 연관·자동 권위 게시·운영 활성화를 주장하지 않습니다. v1.37.0을
 검증했고 다른 버전·확장 watch는 별도 단계입니다.
+
+
+## Kubernetes 원천 권위 판단
+
+`--authorize-kubernetes-rbac`는 동일 수집기·명시적 매핑을 서버 정책의 유일한
+작성자로 사용합니다. 관찰 연결 옵션과 `--kubernetes-mapping`, 일반 서버의 DB·
+초기 정책·관리/판단 인증·TLS 옵션을 함께 지정합니다. 별도 DB를 사용하며 검사·
+관찰·권위 모드는 동시에 선택할 수 없습니다.
+
+매핑 정책을 컴파일하고 정책·revision·감사를 한 트랜잭션으로 커밋한 뒤 메모리에
+설치합니다. 정책 변경만 영속 revision을 높이며 동일 정책 갱신은 감사 기록을
+추가하지 않습니다. Binding 삭제·UID 교체는 재수집 시 배정을 제거합니다.
+관리자 `PUT /v1/policy`는 409를 반환합니다. DB에 원천 소유 표시를 저장하여
+플래그를 빠뜨려 네이티브 작성자로 재시작하는 것도 거절합니다. 원천 변경은
+별도 명시적 마이그레이션이 필요합니다.
+
+기존 SQLite 허용 정책이 있어도 프로세스 시작 시 판단은 사용할 수 없습니다.
+매번 완전 수집 전에 판단을 철회하며 HTTP·매핑·컴파일 실패는 이전 허용을
+재사용하지 않습니다. 스냅샷은 컴파일·커밋 시간을 포함한 원래 수집기의 1초
+만료를 따릅니다. 저장 불확실성은 재시작까지 차단합니다. 수집 간 대기는
+500ms입니다. `/healthz`와 인증된 `/v1/status`는 원천 가용성을 표시하고 관리
+정책 조회는 마지막 영속 정책 점검에 사용할 수 있습니다. HTTP·PPG1 모두
+같은 원천 검사를 적용하며 요청마다 DB를 읽지 않습니다.
+
+보수적 polling이므로 수집 중에는 사용 불가 구간이 있습니다. 고가용성 watch·
+follower 구현이나 종류 간 전역 원자적 관찰을 의미하지 않습니다. native_subject는
+여전히 관리자 명시 연관이며 호패의 검증된 워크로드와 자동으로 연결되지는
+않습니다. 비공개 매핑 파일·UID 핀·권한 변환을 검토하고 미검증 클라이언트
+헤더를 신원으로 사용하지 않습니다. fixture는 운영 원천 모드를 활성화하지 않습니다.
+
+```sh
+python3 tools/kubernetes_real_cluster.py --binary target/debug/pumgye \
+  --state-dir /private/owned-kind-qualification --authority
+```
+
+실제 API fixture는 격리 DB에서 네이티브 HTTP 허용/거절, 삭제의 영속 revision,
+작성자 배제, 인증 실패/복구와 재시작 시 캐시 권한 거절까지 검증합니다.
+호패의 검증된 신원 자동 연관·watch·한강 전체 연결 검증은 후속 단계입니다.

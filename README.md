@@ -13,7 +13,7 @@ The workspace separates four packages:
 - `pumgye-protocol`: bounded PPG1 codec, with borrowed query identifiers and fixed replies.
 - `pumgye-client`: authenticated persistent connections, bounded pools/deadlines, batches, correlation and monotonic revision floors.
 
-SQLite is the policy source of truth. Startup recovers and compiles its committed
+Native mode uses SQLite as the policy source of truth. Startup recovers and compiles its committed
 policy; successful CAS publication atomically commits policy, revision and audit,
 then replaces an immutable `ArcSwap` memory snapshot. Decisions never read the DB.
 The snapshot remains until the next publication; it is not a 1–5 second decision
@@ -58,4 +58,4 @@ Qualify the earlier owned gateway baseline with
 
 [Native transport measurements](docs/PERFORMANCE.md) record three 10-second mTLS trials and their exact scope/limitations.
 
-[Kubernetes source adapter](docs/KUBERNETES.md): bounded read-only RBAC inspection is implemented; live watch and authoritative publication remain pending.
+[Kubernetes source adapter](docs/KUBERNETES.md): bounded inspection, HTTPS polling, explicit mapping and sole-writer source-authoritative decisions are implemented and qualified against an owned real API. Scalable watches and automatic verified identity association remain pending.

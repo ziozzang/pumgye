@@ -29,9 +29,7 @@ Offline output does not verify ServiceAccount identity or token validity. It doe
 not change the existing SQLite authority or active memory snapshot.
 
 Next gates are authenticated bounded list/watch and full relist recovery, explicit
-application permission mapping and source-aware publication. Workload identity
-verification through TokenReview remains pending. Revocation, follower fences and
-actual cluster qualification are also required. Do not use this
+application permission mapping and source-aware publication. Hopae separately verifies workload identity through TokenReview and live object UID checks. Distributed follower fences and full-chain qualification are still required. Do not use this
 inventory as an allow decision. Four-component source ownership and Kubernetes
 semantics are defined in [ADR 0015](https://github.com/ziozzang/hangang-zerotrust/blob/main/docs/adr/0015-kubernetes-iam-authority.md).
 
@@ -76,8 +74,7 @@ The collector waits one second between complete collection cycles. This is an
 initial read-only polling path, not the planned scalable watch adapter. Do not
 turn it on for every production replica as a substitute for bounded shared
 list/watch reconciliation. Watch bookmarks, resource-specific resume, source-aware
-publication, replica recovery and actual Kubernetes API-server qualification
-remain required. Current native policy authority and production settings are
+replica recovery and scalable watch reconciliation remain required. Current native policy authority and production settings are
 unchanged.
 
 Run the owned HTTPS fixture:
@@ -103,7 +100,7 @@ pumgye --inspect-kubernetes-rbac examples/kubernetes-rbac-list.json \
 ```
 
 A mapping defines a full native policy template with no independent user grants,
-then explicit grants selecting a service/application role, verified native subject
+then explicit grants selecting a service/application role, administrator-supplied native subject
 reference, exact Kubernetes subject and pinned Role/Binding kind, namespace, name
 and UID. A same-name recreated Role/Binding does not satisfy its old pin. All source
 rule requirements must match literal API group/resource (including subresource),
@@ -161,3 +158,50 @@ Native subject is an explicit fictional reference: this fixture does not claim
 Hopae workload association, automatic authoritative publication or production
 activation. v1.37.0 is qualified here; other versions and scalable watches remain
 separate gates.
+
+
+## Kubernetes source-authoritative decisions
+
+`--authorize-kubernetes-rbac` runs the same collector and explicit mapping as the
+sole writer of the server's durable policy and immutable decision view. Supply
+all observation connection arguments plus `--kubernetes-mapping`, the usual
+`--database`, initial `--policy`, administrator/decision credentials and listener
+TLS options. Use a separate database for this source mode. Inspection, observation
+and authoritative modes are mutually exclusive.
+
+The server compiles the mapped policy and commits policy/revision/audit together
+before installing it. Policy changes advance the durable revision; identical
+policy renewal does not create audit churn. Binding deletion or UID replacement
+removes mapped users on reconciliation. Administrator `PUT /v1/policy` returns
+409 in this mode. A persisted source-owner marker also rejects restarting that
+DB as a native-policy writer. Switching authority requires an explicit migration,
+not omission of a command-line flag.
+
+Every process starts with decisions unavailable, even with a previously granted
+policy in SQLite. It withdraws availability before each complete collection;
+HTTP/mapping/compilation failures never reuse the previous permit. A live view
+expires at the collector's original one-second deadline, including compilation
+and durable-write time. Persistence uncertainty fences the authority until restart.
+The loop pauses 500 ms between collections. Source health and decision eligibility
+are reported by `/healthz` and authenticated `/v1/status`; administrative policy
+reads remain available for inspection of the last durable policy. HTTP and PPG1
+use the same source gate, without a DB access on each decision.
+
+This conservative polling implementation deliberately has unavailable intervals
+while collecting. It is not a high-availability watch/follower implementation or a
+claim of globally atomic cross-kind RBAC observation. Each `native_subject` remains
+an explicit administrator association; this phase does not automatically establish
+its relationship with Hopae's verified workload identity. Keep the file private,
+review exact UID pins and application translation, and never use unverified client
+headers as subjects. Production source mode has not been enabled by this fixture.
+
+```sh
+python3 tools/kubernetes_real_cluster.py --binary target/debug/pumgye \
+  --state-dir /private/owned-kind-qualification --authority
+```
+
+The owned actual API fixture additionally verifies native HTTP allow/deny,
+durable deletion revision, writer exclusion, authentication failure recovery and
+restart refusal of cached grants in an isolated DB. Automatic verified Hopae
+association, watch reconciliation and full Hangang integration qualification are
+subsequent gates.

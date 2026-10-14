@@ -1,6 +1,7 @@
 //! Standalone Pumgye control/decision authority.
 mod kubernetes;
 mod kubernetes_api;
+mod kubernetes_authority;
 mod kubernetes_mapping;
 mod store;
 mod transport;
@@ -25,18 +26,21 @@ use std::{
 };
 #[derive(Parser)]
 #[command(name = "pumgye", version)]
-#[command(group(clap::ArgGroup::new("kubernetes_source").args(["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])))]
+#[command(group(clap::ArgGroup::new("kubernetes_source").args(["inspect_kubernetes_rbac", "observe_kubernetes_rbac", "authorize_kubernetes_rbac"])))]
 struct Args {
     /// Continuously collect read-only Kubernetes RBAC observations over verified HTTPS.
     #[arg(long, requires_all = ["kubernetes_cluster", "kubernetes_api", "kubernetes_ca", "kubernetes_token"], conflicts_with = "inspect_kubernetes_rbac")]
     observe_kubernetes_rbac: bool,
-    #[arg(long, requires = "observe_kubernetes_rbac")]
+    /// Use Kubernetes RBAC plus explicit administrator mapping as the sole policy writer.
+    #[arg(long, requires_all = ["kubernetes_cluster", "kubernetes_api", "kubernetes_ca", "kubernetes_token", "kubernetes_mapping"])]
+    authorize_kubernetes_rbac: bool,
+    #[arg(long, requires = "kubernetes_source")]
     kubernetes_api: Option<String>,
-    #[arg(long, requires = "observe_kubernetes_rbac")]
+    #[arg(long, requires = "kubernetes_source")]
     kubernetes_ca: Option<PathBuf>,
-    #[arg(long, requires = "observe_kubernetes_rbac")]
+    #[arg(long, requires = "kubernetes_source")]
     kubernetes_token: Option<PathBuf>,
-    #[arg(long, requires = "observe_kubernetes_rbac")]
+    #[arg(long, requires = "kubernetes_source")]
     kubernetes_namespace: Option<String>,
     /// Inspect a bounded complete RBAC List without opening the database or listeners.
     #[arg(long, requires = "kubernetes_cluster")]
@@ -78,6 +82,7 @@ struct Document {
 struct View {
     document: Document,
     compiled: CompiledPolicy,
+    source_expires: Option<std::time::Instant>,
 }
 struct Authority {
     view: ArcSwap<View>,
@@ -86,6 +91,8 @@ struct Authority {
     decision: String,
     queries: AtomicU64,
     healthy: AtomicBool,
+    kubernetes_owned: bool,
+    source_ready: AtomicBool,
     publications: Arc<tokio::sync::Semaphore>,
     requests: Arc<tokio::sync::Semaphore>,
     management: Arc<tokio::sync::Semaphore>,
@@ -126,9 +133,24 @@ fn credential_matches(value: &[u8], expected: &[u8]) -> bool {
             == 0
 }
 impl Authority {
+    fn available(&self) -> bool {
+        self.healthy.load(Ordering::Acquire)
+            && (!self.kubernetes_owned
+                || (self.source_ready.load(Ordering::Acquire)
+                    && self
+                        .view
+                        .load()
+                        .source_expires
+                        .is_some_and(|expiry| std::time::Instant::now() < expiry)))
+    }
     fn evaluate(&self, q: &pumgye_protocol::Query<'_>) -> pumgye_protocol::Reply {
         let view = self.view.load();
         let decision = if !self.healthy.load(Ordering::Acquire)
+            || (self.kubernetes_owned
+                && (!self.source_ready.load(Ordering::Acquire)
+                    || view
+                        .source_expires
+                        .is_none_or(|expiry| std::time::Instant::now() >= expiry)))
             || view.document.revision < q.minimum_revision
         {
             None
@@ -206,6 +228,9 @@ async fn publish(
     if !authorized(&headers, &a.admin) {
         return Err(StatusCode::UNAUTHORIZED);
     }
+    if a.kubernetes_owned {
+        return Err(StatusCode::CONFLICT);
+    }
     let mut values = headers.get_all("if-match").iter();
     let expected = values
         .next()
@@ -256,6 +281,7 @@ async fn publish(
         a.view.store(Arc::new(View {
             document: next.clone(),
             compiled,
+            source_expires: None,
         }));
         Ok(Json(next))
     })
@@ -290,7 +316,7 @@ async fn audit_records(
 }
 async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
     Json(
-        serde_json::json!({"version":1,"policy_revision":a.view.load().document.revision,"healthy":a.healthy.load(Ordering::Acquire),"decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0}),
+        serde_json::json!({"version":1,"policy_revision":a.view.load().document.revision,"healthy":a.available(),"policy_source":if a.kubernetes_owned {"kubernetes"} else {"native"},"decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0}),
     )
 }
 
@@ -460,19 +486,41 @@ async fn main() -> anyhow::Result<()> {
     } else {
         (None, None)
     };
-    let (store, document) = store::Store::open(&args.database, args.policy.as_deref())?;
+    let (mut store, document) = store::Store::open(&args.database, args.policy.as_deref())?;
+    store.claim_source(args.authorize_kubernetes_rbac)?;
     let compiled = document.policy.compile()?;
     let authority = Arc::new(Authority {
-        view: ArcSwap::from_pointee(View { document, compiled }),
+        view: ArcSwap::from_pointee(View {
+            document,
+            compiled,
+            source_expires: None,
+        }),
         store: std::sync::Mutex::new(store),
         admin,
         decision,
         queries: AtomicU64::new(0),
         healthy: AtomicBool::new(true),
+        kubernetes_owned: args.authorize_kubernetes_rbac,
+        source_ready: AtomicBool::new(false),
         publications: Arc::new(tokio::sync::Semaphore::new(4)),
         requests: Arc::new(tokio::sync::Semaphore::new(4096)),
         management: Arc::new(tokio::sync::Semaphore::new(4)),
     });
+    if args.authorize_kubernetes_rbac {
+        let collector = kubernetes_api::Collector::new(
+            args.kubernetes_api.as_deref().unwrap(),
+            args.kubernetes_namespace,
+            args.kubernetes_cluster.unwrap(),
+        )?;
+        let active = authority.clone();
+        tokio::spawn(kubernetes_authority::run(
+            active,
+            collector,
+            mapping.unwrap(),
+            args.kubernetes_ca.unwrap(),
+            args.kubernetes_token.unwrap(),
+        ));
+    }
     let health = authority.clone();
     let router = Router::new()
         .route(
@@ -480,7 +528,7 @@ async fn main() -> anyhow::Result<()> {
             get(move || {
                 let health = health.clone();
                 async move {
-                    if health.healthy.load(Ordering::Acquire) {
+                    if health.available() {
                         StatusCode::OK
                     } else {
                         StatusCode::SERVICE_UNAVAILABLE
@@ -517,25 +565,31 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn authority(root: &std::path::Path) -> Arc<Authority> {
+    pub(super) fn authority(root: &std::path::Path) -> Arc<Authority> {
         let initial = root.join("initial.json");
         std::fs::write(&initial,r#"{"revision":0,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#).unwrap();
         let (store, document) =
             store::Store::open(&root.join("authority.sqlite3"), Some(&initial)).unwrap();
         let compiled = document.policy.compile().unwrap();
         Arc::new(Authority {
-            view: ArcSwap::from_pointee(View { document, compiled }),
+            view: ArcSwap::from_pointee(View {
+                document,
+                compiled,
+                source_expires: None,
+            }),
             store: std::sync::Mutex::new(store),
             admin: "fixture-admin-credential".into(),
             decision: "fixture-decision-credential".into(),
             queries: AtomicU64::new(0),
             healthy: AtomicBool::new(true),
+            kubernetes_owned: false,
+            source_ready: AtomicBool::new(false),
             publications: Arc::new(tokio::sync::Semaphore::new(4)),
             requests: Arc::new(tokio::sync::Semaphore::new(4096)),
             management: Arc::new(tokio::sync::Semaphore::new(4)),
         })
     }
-    fn headers() -> HeaderMap {
+    pub(super) fn headers() -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(
             "authorization",
