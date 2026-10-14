@@ -87,6 +87,7 @@ struct CompiledService {
     permissions: HashMap<String, u64>,
     users: HashMap<String, Rights>,
     networks: PrefixTrie<Rights>,
+    hosts: HashMap<IpAddr, Rights>,
     require_guard: bool,
 }
 fn name(s: &str) -> bool {
@@ -227,15 +228,19 @@ impl Policy {
                 users.insert(subject.clone(), assignment(ids, &roles)?);
             }
             let mut networks = PrefixTrie::default();
+            let mut hosts = HashMap::new();
             for network in &service.networks {
                 let cidr = network.cidr.trunc();
                 ensure!(cidr == network.cidr, "network has host bits");
-                ensure!(
-                    networks
-                        .insert(cidr, assignment(&network.roles, &roles)?)
-                        .is_none(),
-                    "duplicate network"
-                );
+                let rights = assignment(&network.roles, &roles)?;
+                let exact = matches!(cidr, IpNet::V4(n) if n.prefix_len() == 32)
+                    || matches!(cidr, IpNet::V6(n) if n.prefix_len() == 128);
+                let previous = if exact {
+                    hosts.insert(cidr.addr().to_canonical(), rights)
+                } else {
+                    networks.insert(cidr, rights)
+                };
+                ensure!(previous.is_none(), "duplicate network");
             }
             services.insert(
                 id.clone(),
@@ -243,6 +248,7 @@ impl Policy {
                     permissions,
                     users,
                     networks,
+                    hosts,
                     require_guard: service.require_guard,
                 },
             );
@@ -279,7 +285,11 @@ impl CompiledPolicy {
         if user.permissions == 0 {
             return Decision::Guest;
         }
-        let Some(network) = service.networks.longest(ip) else {
+        let Some(network) = service
+            .hosts
+            .get(&ip.to_canonical())
+            .or_else(|| service.networks.longest(ip))
+        else {
             return Decision::NetworkGuest;
         };
         let Some(permission) = service.permissions.get(permission) else {

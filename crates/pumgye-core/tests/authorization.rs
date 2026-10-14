@@ -317,3 +317,45 @@ fn highest_right_bit_and_ipv6_specific_guest_override_survive_compilation() {
     policy.information_classes.push("overflow".into());
     assert!(policy.compile().is_err());
 }
+
+#[test]
+fn canonical_host_index_preserves_guest_override_and_rejects_mapped_duplicates() {
+    let mut policy = policy();
+    policy
+        .services
+        .get_mut("orders")
+        .unwrap()
+        .networks
+        .push(pumgye_core::Network {
+            cidr: "2001:db8::7/128".parse().unwrap(),
+            roles: vec!["guest".into()],
+        });
+    let compiled = policy.compile().unwrap();
+    for ip in ["192.0.2.7", "::ffff:192.0.2.7", "2001:db8::7"] {
+        assert_eq!(
+            compiled.evaluate(
+                "orders",
+                "u_writer",
+                ip.parse().unwrap(),
+                "read",
+                "public",
+                3,
+                G::EnforcedAllow
+            ),
+            D::PermissionDenied
+        );
+    }
+    policy
+        .services
+        .get_mut("orders")
+        .unwrap()
+        .networks
+        .push(pumgye_core::Network {
+            cidr: "::ffff:192.0.2.7/128".parse().unwrap(),
+            roles: vec!["reader".into()],
+        });
+    assert!(
+        policy.compile().is_err(),
+        "mapped duplicate must not replace guest with reader"
+    );
+}

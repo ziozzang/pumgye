@@ -131,3 +131,17 @@ Three sequential samples took 243–268 ns/decision; shuffled samples took
 753–930 ns/decision. The difference demonstrates sensitivity to cache locality.
 The fixed shuffled order repeats, uses one role/service and is not an adversarial
 or production traffic model. These core samples cannot establish server QPS.
+
+### Exact-host lookup optimization (unreleased)
+
+Compiled policies now index IPv4 /32 and IPv6 /128 assignments in a separate
+canonical-address HashMap; broader CIDRs retain the compressed radix trie. Exact
+host assignments are always most specific, including guest overrides. Mapped IPv4
+identities share the canonical host entry and duplicate canonical host rules are
+refused. Request lookups remain allocation-free and snapshots remain immutable.
+
+[Candidate measurements](docs/core-host-index-performance.json) took 175–187 ns
+sequentially and 300–323 ns with the same fixed shuffled maximum-assignment
+fixture. This is promising for host-heavy policies, but broader CIDR-only policies,
+additional memory, full-chain performance and operational adoption still require
+qualification. Current signed v0.1.1 artifacts are unchanged.
