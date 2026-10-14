@@ -152,15 +152,30 @@ impl Authority {
                         .is_some_and(|expiry| std::time::Instant::now() < expiry)))
     }
     fn evaluate(&self, q: &pumgye_protocol::Query<'_>) -> pumgye_protocol::Reply {
+        self.authorize_then(q, |revision| pumgye_protocol::Reply {
+            request_id: q.request_id,
+            revision,
+            decision: Some(pumgye_core::Decision::Allow),
+        })
+        .unwrap_or_else(|reply| reply)
+    }
+    /// A native permit signer may run only after an actual owner Allow. Callback
+    /// output must remain private until success: final owner retirement drops it.
+    fn authorize_then<T>(
+        &self,
+        q: &pumgye_protocol::Query<'_>,
+        operation: impl FnOnce(u64) -> T,
+    ) -> Result<T, pumgye_protocol::Reply> {
         let view = self.view.load();
-        let decision = if !self.healthy.load(Ordering::Acquire)
-            || (self.kubernetes_owned
-                && (!self.source_ready.load(Ordering::Acquire)
-                    || view
-                        .source_expires
-                        .is_none_or(|expiry| std::time::Instant::now() >= expiry)))
-            || view.document.revision < q.minimum_revision
-        {
+        let active = || {
+            self.healthy.load(Ordering::Acquire)
+                && (!self.kubernetes_owned
+                    || (self.source_ready.load(Ordering::Acquire)
+                        && view
+                            .source_expires
+                            .is_some_and(|expiry| std::time::Instant::now() < expiry)))
+        };
+        let decision = if !active() || view.document.revision < q.minimum_revision {
             None
         } else {
             Some(view.compiled.evaluate(
@@ -174,11 +189,22 @@ impl Authority {
             ))
         };
         self.queries.fetch_add(1, Ordering::Relaxed);
-        pumgye_protocol::Reply {
+        let refusal = |decision| pumgye_protocol::Reply {
             request_id: q.request_id,
             revision: view.document.revision,
             decision,
+        };
+        if decision != Some(pumgye_core::Decision::Allow) {
+            return Err(refusal(decision));
         }
+        if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
+            return Err(refusal(None));
+        }
+        let output = operation(view.document.revision);
+        if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
+            return Err(refusal(None));
+        }
+        Ok(output)
     }
 }
 
@@ -725,6 +751,58 @@ async fn termination_signal() -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn owner_allow_callback_cannot_emit_after_snapshot_retirement() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = authority(root.path());
+        let policy:Policy=serde_json::from_value(serde_json::json!({"version":1,"information_classes":["public"],"services":{"orders":{"permissions":["read"],"roles":{"reader":{"permissions":["read"],"information_classes":["public"]}},"users":{"worker":["reader"]},"networks":[{"cidr":"192.0.2.0/24","roles":["reader"]}],"require_guard":true}}})).unwrap();
+        owner.view.store(Arc::new(View {
+            document: Document {
+                revision: 1,
+                policy: policy.clone(),
+            },
+            compiled: policy.compile().unwrap(),
+            source_expires: None,
+        }));
+        let query = pumgye_protocol::Query {
+            request_id: 42,
+            minimum_revision: 1,
+            ip: "192.0.2.9".parse().unwrap(),
+            aal: 0,
+            guard: GuardEvidence::EnforcedAllow,
+            service_id: "orders",
+            subject: "worker",
+            permission: "read",
+            information_class: "public",
+        };
+        assert_eq!(
+            owner.authorize_then(&query, |revision| revision).unwrap(),
+            1
+        );
+        let retired = owner
+            .authorize_then(&query, |_| {
+                owner.view.store(Arc::new(View {
+                    document: Document {
+                        revision: 2,
+                        policy: policy.clone(),
+                    },
+                    compiled: policy.compile().unwrap(),
+                    source_expires: None,
+                }));
+                "private permit candidate"
+            })
+            .unwrap_err();
+        assert!(retired.decision.is_none());
+        assert_eq!(retired.request_id, 42);
+        let mut denied = query;
+        denied.permission = "write";
+        assert!(
+            owner
+                .authorize_then(&denied, |_| panic!("denial cannot invoke signer"))
+                .is_err()
+        );
+    }
+
     pub(super) fn authority(root: &std::path::Path) -> Arc<Authority> {
         let initial = root.join("initial.json");
         std::fs::write(&initial,r#"{"revision":0,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#).unwrap();

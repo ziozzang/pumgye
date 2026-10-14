@@ -83,3 +83,19 @@ discovery does not establish peer identity. The client resolves on each new pool
 connection under the existing decision deadline and validates the configured TLS
 server name/CA and client credential. Existing pooled connections keep their normal
 retirement bounds; this is not replica membership or source-revision coherence.
+
+## Native Allow publication fence (unreleased)
+
+Authority evaluation now shares an `authorize_then` boundary. Only an actual
+compiled owner Allow can invoke private follow-up work; denial/unavailability
+never invokes it. The same active immutable snapshot is checked before and after
+that work, including source lease/readiness and persistence health. Retirement
+discards the candidate and returns unavailable. Normal HTTP/native/gRPC decisions
+also use this final fence. Callbacks must not publish output or perform irreversible
+external effects before successful return.
+
+The snapshot-replacement/denied-signer regression, 30 workspace tests, strict
+Clippy and actual four-process native/gRPC durable request chains passed. This
+is the owner boundary for future signing, not a permission-receipt API: native
+resource/catalog mapping, authentication/network receipt verification, signer
+key lifecycle and downstream projection replay admission remain unfinished.
