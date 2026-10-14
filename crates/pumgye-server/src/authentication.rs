@@ -28,10 +28,14 @@ pub struct Configuration {
 /// and a native resource Allow before permission signing or secret projection.
 pub struct CheckedService<'a> {
     context: receipt_binding::Context<'a>,
+    verified_ms: u64,
     expires_ms: u64,
     receipt_sha256: [u8; 32],
 }
 impl CheckedService<'_> {
+    pub fn valid_at(&self, now_ms: u64) -> bool {
+        now_ms >= self.verified_ms && now_ms < self.expires_ms
+    }
     pub fn context(&self) -> &receipt_binding::Context<'_> {
         &self.context
     }
@@ -140,6 +144,7 @@ impl ServiceTrust {
         )
         .map_err(|_| Refused)?;
         Ok(CheckedService {
+            verified_ms: now_ms,
             context: receipt_binding::Context {
                 issuer_ref: context.issuer_ref,
                 key_epoch: context.key_epoch,

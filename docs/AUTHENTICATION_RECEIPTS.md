@@ -28,3 +28,20 @@ resource Allow and final request/plan binding, then recheck those owners before
 releasing its private candidate. Replay consumption remains required at projection.
 Server trust configuration loading/publication, durable retirement floors and RPC
 integration remain open. Existing service/resource transports are unchanged.
+
+## Checked identity resource boundary (unreleased)
+
+`authorization::authorize_resource_then` evaluates only the service, canonical
+subject and AAL held by `CheckedService`. Its native resource request has no
+identity, service, assurance or class override. The compiled catalog selects
+classification/action rights. Mandatory owner-fence and clock callbacks guard
+admission, candidate production and final return. Authentication verification time
+is a rollback floor; authentication/network expiry and backward time refuse the
+candidate. The operation receives owner metadata and must keep output private.
+
+Tests combine a real signed authentication receipt with native resource Allow and
+refuse network/unknown-action denial, initial retirement/expiry, retirement during
+candidate production, authentication/network expiry and clock rollback after work.
+This public server-library adapter remains unwired to an RPC. The current-owner
+callback must be supplied by real identity/key/network/policy/route/plan owners;
+this helper supplies no remote freshness discovery or signed permit by itself.
