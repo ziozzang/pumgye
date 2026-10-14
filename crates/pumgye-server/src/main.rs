@@ -748,8 +748,18 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|_| anyhow::anyhow!("native authentication trust unavailable"))
         })
         .transpose()?;
+    let mut receipt_keys = authentication_trust
+        .as_ref()
+        .map_or_else(Vec::new, |trust| trust.receipt_keys());
+    if let Some(signer) = &permit_signer {
+        receipt_keys.push(signer.receipt_key());
+    }
+    // Reject invalid combined descriptors before opening persistence or listeners.
+    hopae_grpc::receipt_keys::Registry::compile(1, &receipt_keys, None)
+        .map_err(|_| anyhow::anyhow!("native receipt key configuration refused"))?;
     let (mut store, document) = store::Store::open(&args.database, args.policy.as_deref())?;
     store.claim_source(args.authorize_kubernetes_rbac)?;
+    store.reconcile_receipt_keys(&receipt_keys)?;
     let compiled = document.policy.compile()?;
     let authority = Arc::new(Authority {
         permit_signer,

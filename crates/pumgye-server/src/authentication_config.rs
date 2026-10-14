@@ -94,6 +94,18 @@ impl Trust {
             entries: count,
         })
     }
+    /// Public descriptors only; persistent ownership remains in the server store.
+    pub fn receipt_keys(&self) -> Vec<hopae_grpc::receipt_keys::Key> {
+        self.issuers
+            .iter()
+            .map(|(issuer, value)| hopae_grpc::receipt_keys::Key {
+                issuer_ref: issuer.clone(),
+                purpose: hopae_grpc::receipt::Purpose::Authentication,
+                epoch: value.key_epoch,
+                public_key: value.public,
+            })
+            .collect()
+    }
     pub fn entries(&self) -> usize {
         self.entries
     }

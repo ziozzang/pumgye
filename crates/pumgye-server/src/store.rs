@@ -112,6 +112,45 @@ impl Store {
         }
         Ok(())
     }
+    /// Startup-only public key publication. Queries never read this table.
+    /// Empty configuration retires all active keys while preserving history.
+    pub fn reconcile_receipt_keys(&mut self, keys: &[hopae_grpc::receipt_keys::Key]) -> Result<()> {
+        use hopae_grpc::receipt_keys::Registry;
+        let transaction = self.connection.transaction()?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS receipt_keys (id INTEGER PRIMARY KEY CHECK(id=1), document TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS receipt_key_audit (revision INTEGER PRIMARY KEY, sha256 TEXT NOT NULL)")?;
+        let stored: Option<String> = transaction
+            .query_row("SELECT document FROM receipt_keys WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let prior = stored
+            .as_deref()
+            .map(|bytes| {
+                Registry::decode(bytes, 1)
+                    .map_err(|_| anyhow::anyhow!("stored receipt key history refused"))
+            })
+            .transpose()?;
+        let revision = prior
+            .as_ref()
+            .map_or(Some(1), |registry| registry.revision().checked_add(1))
+            .context("receipt key revision exhausted")?;
+        let next = Registry::compile(revision, keys, prior.as_ref())
+            .map_err(|_| anyhow::anyhow!("receipt key retirement or rotation refused"))?;
+        let bytes = next
+            .encode()
+            .map_err(|_| anyhow::anyhow!("receipt key snapshot refused"))?;
+        transaction.execute("INSERT INTO receipt_keys VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET document=excluded.document", [&bytes])?;
+        transaction.execute(
+            "INSERT INTO receipt_key_audit VALUES(?1,?2)",
+            params![
+                revision as i64,
+                format!("{:x}", Sha256::digest(bytes.as_bytes()))
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
     pub fn audit_after(&self, after: u64) -> Result<Vec<AuditRecord>> {
         ensure!(after <= i64::MAX as u64, "invalid audit cursor");
         let mut statement=self.connection.prepare("SELECT revision,at_unix,actor,sha256 FROM audit WHERE revision>?1 ORDER BY revision LIMIT 100")?;
@@ -202,6 +241,54 @@ fn private_file(path: &Path) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn receipt_retirement_survives_restart_and_failed_publication_is_atomic() {
+        use hopae_grpc::{receipt::Purpose, receipt_keys::Key};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("policy.sqlite3");
+        let initial = root.path().join("initial.json");
+        std::fs::write(&initial, r#"{"revision":1,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#).unwrap();
+        let key = |epoch, seed| Key {
+            issuer_ref: "hopae".into(),
+            purpose: Purpose::Authentication,
+            epoch,
+            public_key: ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+                .verifying_key()
+                .to_bytes(),
+        };
+        let (mut store, _) = Store::open(&path, Some(&initial)).unwrap();
+        store.reconcile_receipt_keys(&[key(1, 7)]).unwrap();
+        store.reconcile_receipt_keys(&[key(1, 7)]).unwrap();
+        store.reconcile_receipt_keys(&[]).unwrap();
+        drop(store);
+        let (mut store, _) = Store::open(&path, None).unwrap();
+        let snapshot = || {
+            store
+                .connection
+                .query_row("SELECT document FROM receipt_keys", [], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap()
+        };
+        let before = snapshot();
+        assert!(store.reconcile_receipt_keys(&[key(1, 7)]).is_err());
+        assert!(store.reconcile_receipt_keys(&[key(2, 7)]).is_err());
+        assert_eq!(
+            before,
+            store
+                .connection
+                .query_row("SELECT document FROM receipt_keys", [], |row| row
+                    .get::<_, String>(0))
+                .unwrap()
+        );
+        store.reconcile_receipt_keys(&[key(2, 8)]).unwrap();
+        store.reject_writes();
+        assert!(store.reconcile_receipt_keys(&[]).is_err());
+        drop(store);
+        let (mut store, _) = Store::open(&path, None).unwrap();
+        store.reconcile_receipt_keys(&[key(2, 8)]).unwrap();
+        assert!(store.reconcile_receipt_keys(&[key(3, 7)]).is_err());
+    }
     #[test]
     fn single_owner_transaction_cas_and_restart() {
         let root = tempfile::tempdir().unwrap();

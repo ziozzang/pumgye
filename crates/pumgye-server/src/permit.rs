@@ -54,6 +54,15 @@ impl SignedPermit<'_> {
     }
 }
 impl Signer {
+    /// Public descriptor for the native durable retirement fence.
+    pub fn receipt_key(&self) -> hopae_grpc::receipt_keys::Key {
+        hopae_grpc::receipt_keys::Key {
+            issuer_ref: self.issuer.clone(),
+            purpose: receipt::Purpose::Permit,
+            epoch: self.key_epoch,
+            public_key: self.key.verifying_key().to_bytes(),
+        }
+    }
     /// Caller loads an independent native permit key from owning resources.
     pub fn new(issuer: String, key_epoch: u64, key: SigningKey) -> Result<Self, Refused> {
         if issuer.is_empty()

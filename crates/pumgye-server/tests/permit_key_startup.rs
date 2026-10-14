@@ -63,3 +63,61 @@ fn invalid_authentication_trust_refuses_before_database_or_listener_binding() {
     );
     assert!(!database.exists());
 }
+
+#[test]
+fn native_startup_persists_removal_and_refuses_retired_keys_before_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let database = root.path().join("authority.sqlite3");
+    let initial = root.path().join("initial.json");
+    let config = root.path().join("trust.json");
+    std::fs::write(
+        &initial,
+        r#"{"revision":1,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#,
+    )
+    .unwrap();
+    let write = |epoch, seed| {
+        let public = SigningKey::from_bytes(&[seed; 32])
+            .verifying_key()
+            .to_bytes();
+        std::fs::write(&config, serde_json::json!({"entries":[{"issuer_ref":"hopae","key_epoch":epoch,"identity_epoch":"owned1","service":"orders","audience":"orders-api","minimum_revision":1,"public_key":STANDARD.encode(public)}]}).to_string()).unwrap();
+    };
+    let run = |trust: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_pumgye"));
+        command.args([
+            "--listen",
+            &listener.local_addr().unwrap().to_string(),
+            "--database",
+            database.to_str().unwrap(),
+            "--policy",
+            initial.to_str().unwrap(),
+        ]);
+        if trust {
+            command.args(["--authentication-trust", config.to_str().unwrap()]);
+        }
+        let output = command
+            .env("PUMGYE_ADMIN_TOKEN", "owned-admin-credential-32-bytes-long")
+            .env(
+                "PUMGYE_DECISION_TOKEN",
+                "owned-decision-credential-32-bytes-long",
+            )
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    write(1, 7);
+    assert!(!run(true).contains("receipt key retirement or rotation refused"));
+    assert!(database.exists());
+    assert!(!run(false).contains("receipt key retirement or rotation refused"));
+    write(2, 7);
+    assert!(run(true).contains("receipt key retirement or rotation refused"));
+    write(2, 8);
+    assert!(!run(true).contains("receipt key retirement or rotation refused"));
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    let stored: String = connection
+        .query_row("SELECT document FROM receipt_keys", [], |row| row.get(0))
+        .unwrap();
+    let registry = hopae_grpc::receipt_keys::Registry::decode(&stored, 1).unwrap();
+    assert_eq!(registry.revision(), 3);
+}

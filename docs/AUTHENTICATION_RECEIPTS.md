@@ -80,8 +80,8 @@ fail before database creation or listener binding. Administrator status exposes
 only `permit_key_configured`.
 
 Use a separate deployment permit identity from release artifact and Hopae
-authentication identities. Restart is the current loading boundary; durable key
-retirement/rotation and dynamic publication remain open. Loading a key does not
+authentication identities. Restart is the current loading boundary; dynamic
+publication remains open. The durable startup fence is described below. Loading a key does not
 activate a permit RPC or satisfy live owner/network/plan checks. The option conflicts
 with inspection/observation-only modes. Existing deployments without the option
 retain their ordinary decision behavior.
@@ -102,5 +102,25 @@ request-time composite keys. The request cannot choose a public key or introduce
 an undeclared scope. Invalid trust fails before DB creation or listener binding;
 administrator status reports only `authentication_trust_entries`. The option
 conflicts with inspection/observation-only modes. Loading is restart-bound and
-does not implement durable retirement floors, live Hopae revalidation, trust
-publication/rotation or permit RPC activation.
+does not implement live Hopae revalidation, dynamic trust publication or permit
+RPC activation. Key retirement is fenced by the durable startup transition below.
+
+## Durable startup key history (unreleased)
+
+Before opening listeners, the server compiles the combined authentication and
+permit public descriptors and commits their immutable registry plus SHA-256 audit
+in its private SQLite database. The combined set permits up to 64 active keys,
+128 authority/purpose floors and 256 historical public keys; the 128 trust-scope
+limit remains separate. Queries perform no database access for this fence.
+
+Each successful startup transition advances the registry revision. Removing either
+configuration retires its keys while retaining history. Restarting with an unchanged
+active key is allowed; rotation requires a higher epoch and fresh public material.
+Removed or replaced material cannot return at any epoch or move between issuers
+or authentication/permit purposes. Failed transitions leave snapshot and audit
+unchanged and refuse startup. Tests exercise actual process startup, SQLite restart,
+retirement, fresh replacement and write failure.
+
+This history does not persist service profile minimum revisions or identity epochs,
+prove live provider/app freshness, fence rollback of the whole DB backup, or activate
+permit RPC. Distributed floors and restore protection remain required.
