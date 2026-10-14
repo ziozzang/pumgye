@@ -314,3 +314,28 @@ enforcement caller still owns the bound request and client IP. This endpoint is
 a decision observation, not a signed permit or upstream credential. Actual
 three-authority positive endpoint qualification, gRPC equivalent, route/plan
 owner integration and production rollout remain open.
+
+## Actual three-authority endpoint qualification (unreleased)
+
+`tools/authenticated_resource_smoke.py` owns ephemeral TLS/issuer keys, profiles,
+private databases and actual Hopae, Sumunjang and Pumgye debug processes. The
+Pumgye startup paths establish both native mTLS clients; a real service receipt
+is posted to the authenticated resource endpoint. A guard-required native catalog
+Allow passed, Sumunjang block/removal caused refusal/restoration, and profile
+withdrawal/restoration advanced the identity generation. A cached unexpired
+receipt was directly posted to Pumgye after withdrawal and refused. A fresh
+receipt was directly posted after the owned Hopae process was terminated and
+also refused. Seven caller/key/scope/TLS trust refusal cases passed. Strict
+workspace/all-target Clippy passed.
+
+```sh
+python3 tools/authenticated_resource_smoke.py \
+  --server /qualified/hopae --sumunjang /qualified/sumunjang \
+  --pumgye /qualified/pumgye \
+  --client target/debug/examples/hopae_live_qualification --live-validation
+```
+
+Only owned loopback management/decision adapters use HTTP; the inter-authority
+queries use mTLS. No operating data or credentials are used. Static releases,
+Kubernetes combined endpoint, Hangang request dispatch, gRPC equivalent and
+signed permit/route/projection ownership remain separate gates.

@@ -29,6 +29,7 @@ struct Settings {
 }
 #[derive(Deserialize)]
 struct Config {
+    pumgye_endpoint: Option<String>,
     settings: Settings,
     issuer_ref: String,
     key_epoch: u64,
@@ -71,6 +72,39 @@ fn context(reply: &v1::ServiceReceiptReply) -> Result<receipt_binding::Context<'
         audience: &c.audience,
         request_sha256: c.request_sha256.as_slice().try_into()?,
     })
+}
+async fn endpoint(
+    config: &Config,
+    checked: &pumgye_server::authentication::CheckedService<'_>,
+    receipt: &[u8],
+) -> Result<bool> {
+    let endpoint = config
+        .pumgye_endpoint
+        .as_ref()
+        .ok_or_else(|| anyhow!("endpoint absent"))?;
+    ensure!(
+        endpoint.starts_with("http://127.0.0.1:"),
+        "owned endpoint required"
+    );
+    let c = checked.context();
+    let body = serde_json::json!({"request_id":1,"minimum_revision":1,"resource":"db:orders","action":"select","ip":"203.0.113.9","context":{"issuer_ref":c.issuer_ref,"key_epoch":c.key_epoch,"identity_authority_epoch":c.identity_authority_epoch,"identity":{"subject_ref":c.identity.subject_ref,"kind":2,"aal":0,"revision":c.identity.revision,"credential_generation":c.identity.credential_generation},"service":c.service,"audience":c.audience,"request_sha256":c.request_sha256},"receipt":receipt,"request_sha256":c.request_sha256});
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()?
+        .post(endpoint)
+        .bearer_auth(std::env::var("PUMGYE_DECISION_TOKEN")?)
+        .json(&body)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Ok(false);
+    }
+    let result: serde_json::Value = response.json().await?;
+    ensure!(
+        result["request_id"] == 1 && result["ttl_ms"] == 0,
+        "invalid native reply"
+    );
+    Ok(result["allow"] == true)
 }
 #[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
@@ -136,7 +170,10 @@ async fn main() -> Result<()> {
     for command in std::io::stdin().lock().lines() {
         let command = command?;
         ensure!(
-            matches!(command.as_str(), "allow" | "deny" | "outage"),
+            matches!(
+                command.as_str(),
+                "allow" | "deny" | "deny-network" | "outage"
+            ),
             "unknown command"
         );
         if command == "outage" {
@@ -154,6 +191,12 @@ async fn main() -> Result<()> {
                 live.validate(&checked, &old.receipt, &now).await.is_err(),
                 "outage validation accepted"
             );
+            if config.pumgye_endpoint.is_some() {
+                ensure!(
+                    !endpoint(&config, &checked, &old.receipt).await?,
+                    "endpoint accepted authority outage"
+                );
+            }
             println!("{}", serde_json::json!({"allowed":false}));
             std::io::stdout().flush()?;
             continue;
@@ -172,6 +215,7 @@ async fn main() -> Result<()> {
                     live.validate(&checked, &old.receipt, &now).await.is_err(),
                     "retired proof accepted"
                 );
+                if config.pumgye_endpoint.is_some() { assert!(!endpoint(&config, &checked, &old.receipt).await?, "endpoint accepted retired proof"); }
             }
             let mut headers: Vec<_> = config
                 .headers
@@ -218,6 +262,7 @@ async fn main() -> Result<()> {
             let resource_request = pumgye_server::authorization::ResourceRequest { resource: "db:orders", action: "select", ip: "203.0.113.9".parse()?, guard: pumgye_core::GuardEvidence::Unavailable, network_expires_ms: checked.expires_ms() };
             let native_class = pumgye_server::authorization::authorize_live_resource_then(&compiled, &resource_request, &checked, &observation, now, || std::sync::Arc::ptr_eq(&owner.load_full(), &compiled), |resource| resource.information_class.clone()).map_err(|_| anyhow!("native resource refused"))?;
             ensure!(native_class == "internal", "owner classification changed");
+            if config.pumgye_endpoint.is_some() { ensure!(endpoint(&config, &checked, &reply.receipt).await?, "native endpoint refused Allow"); }
             let revision = checked.revision();
             prior = Some(reply);
             Ok::<_, anyhow::Error>(revision)
@@ -228,7 +273,9 @@ async fn main() -> Result<()> {
                 "{}",
                 serde_json::json!({"allowed":true,"revision":revision})
             ),
-            ("deny", Err(_)) => println!("{}", serde_json::json!({"allowed":false})),
+            ("deny" | "deny-network", Err(_)) => {
+                println!("{}", serde_json::json!({"allowed":false}))
+            }
             _ => return Err(anyhow!("result differed from expected outcome")),
         }
         std::io::stdout().flush()?;
