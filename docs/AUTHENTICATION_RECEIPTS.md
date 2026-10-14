@@ -220,3 +220,20 @@ projection ownership. The Pumgye server currently has no native readers for thos
 three revision owners. Permit activation must connect these owners; request-supplied
 revision numbers or an unconditional current callback must not substitute for them.
 No permit endpoint or operating deployment was enabled by this increment.
+
+## Native Sumunjang observation client (unreleased)
+
+`network_live::Client` uses persistent mandatory mTLS, collector credentials,
+128-request admission and 128/64-byte encode/decode limits. It accepts only
+well-formed Enforce/Allow, exact correlation, nonzero safe revision at or above
+the configured/in-process floor and TTL in 1..5000 ms. Observation validity is
+capped at one second starting before RPC; elapsed monotonic time includes network
+work. IP mismatch, observe, deny, unavailable, malformed reply, rollback, expiry
+and transport failure produce no evidence. Newer valid refusals advance the
+process-local floor and invalidate older Allow observations too.
+
+TLS channel construction is statically shared with the Hopae live client. The
+opaque observation carries IP/revision/expiry; it is not a signed network receipt
+or a distributed lease. Startup/configuration, actual Sumunjang/Pumgye wire
+qualification, durable floor/backbone replication and permit integration remain
+open. Neither endpoint nor deployment is activated by this library increment.
