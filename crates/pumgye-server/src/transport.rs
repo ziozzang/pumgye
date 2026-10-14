@@ -1,4 +1,5 @@
-//! Authenticated remote listeners. Plaintext is restricted to loopback.
+//! Authenticated remote decision/management listeners. Only the separate readiness
+//! router may use plaintext outside loopback; it never exposes domain APIs.
 use crate::{Authority, PeerIdentity};
 use anyhow::{Result, ensure};
 use axum::Router;

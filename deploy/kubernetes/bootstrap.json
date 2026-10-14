@@ -1,0 +1,14 @@
+{
+  "apiVersion": "v1",
+  "kind": "ConfigMap",
+  "metadata": {
+    "name": "pumgye-bootstrap",
+    "labels": {
+      "app.kubernetes.io/name": "pumgye",
+      "app.kubernetes.io/part-of": "hangang-world"
+    }
+  },
+  "data": {
+    "policy.json": "{\"revision\": 0, \"policy\": {\"version\": 1, \"information_classes\": [\"public\", \"internal\", \"confidential\", \"restricted\"], \"services\": {}}}"
+  }
+}

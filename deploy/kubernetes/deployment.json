@@ -1,0 +1,174 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {
+    "name": "pumgye",
+    "labels": {
+      "app.kubernetes.io/name": "pumgye",
+      "app.kubernetes.io/part-of": "hangang-world"
+    }
+  },
+  "spec": {
+    "replicas": 1,
+    "strategy": {
+      "type": "Recreate"
+    },
+    "selector": {
+      "matchLabels": {
+        "app.kubernetes.io/name": "pumgye"
+      }
+    },
+    "template": {
+      "metadata": {
+        "labels": {
+          "app.kubernetes.io/name": "pumgye",
+          "app.kubernetes.io/part-of": "hangang-world"
+        }
+      },
+      "spec": {
+        "serviceAccountName": "pumgye",
+        "automountServiceAccountToken": false,
+        "terminationGracePeriodSeconds": 30,
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 65532,
+          "runAsGroup": 65532,
+          "fsGroup": 65532,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "containers": [
+          {
+            "name": "pumgye",
+            "image": "registry.example.invalid/pumgye:REPLACE_WITH_QUALIFIED_VERSION",
+            "imagePullPolicy": "IfNotPresent",
+            "args": [
+              "--listen",
+              "0.0.0.0:9084",
+              "--decision-listen",
+              "0.0.0.0:9085",
+              "--readiness-listen",
+              "0.0.0.0:9086",
+              "--database",
+              "/state/pumgye.sqlite3",
+              "--policy",
+              "/config/policy.json",
+              "--tls-cert",
+              "/tls/tls.crt",
+              "--tls-key",
+              "/tls/tls.key",
+              "--client-ca",
+              "/tls/ca.crt"
+            ],
+            "env": [
+              {
+                "name": "PUMGYE_ADMIN_TOKEN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "name": "pumgye-credentials",
+                    "key": "admin-token"
+                  }
+                }
+              },
+              {
+                "name": "PUMGYE_DECISION_TOKEN",
+                "valueFrom": {
+                  "secretKeyRef": {
+                    "name": "pumgye-credentials",
+                    "key": "decision-token"
+                  }
+                }
+              }
+            ],
+            "ports": [
+              {
+                "name": "management",
+                "containerPort": 9084
+              },
+              {
+                "name": "ppg1",
+                "containerPort": 9085
+              },
+              {
+                "name": "readiness",
+                "containerPort": 9086
+              }
+            ],
+            "readinessProbe": {
+              "httpGet": {
+                "path": "/-/ready",
+                "port": "readiness"
+              },
+              "periodSeconds": 2,
+              "timeoutSeconds": 1,
+              "failureThreshold": 1
+            },
+            "livenessProbe": {
+              "tcpSocket": {
+                "port": "management"
+              },
+              "initialDelaySeconds": 10,
+              "periodSeconds": 10
+            },
+            "resources": {
+              "requests": {
+                "cpu": "100m",
+                "memory": "64Mi"
+              },
+              "limits": {
+                "memory": "256Mi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "state",
+                "mountPath": "/state"
+              },
+              {
+                "name": "bootstrap",
+                "mountPath": "/config",
+                "readOnly": true
+              },
+              {
+                "name": "tls",
+                "mountPath": "/tls",
+                "readOnly": true
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "state",
+            "persistentVolumeClaim": {
+              "claimName": "pumgye-state"
+            }
+          },
+          {
+            "name": "bootstrap",
+            "configMap": {
+              "name": "pumgye-bootstrap"
+            }
+          },
+          {
+            "name": "tls",
+            "secret": {
+              "secretName": "pumgye-tls",
+              "defaultMode": 416
+            }
+          }
+        ]
+      }
+    }
+  }
+}

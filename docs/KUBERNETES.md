@@ -356,3 +356,42 @@ inspectable during a source outage and must not be mistaken for a live grant.
 Errors are bounded categories; provider bodies, URLs and credential paths are not
 returned. Hangang displays these facts with source-managed editing disabled.
 This does not implement Kubernetes source editing or full package deployment.
+
+## Hangang World deployment building block
+
+`deploy/kubernetes` is the Pumgye building block for the integrated Hangang World
+package, not a standalone claim of four-component deployment. Kustomize rendering
+and the real API server's dry-run accept these resources. Actual Pod rollout and
+package integration remain unqualified. Replace the deliberately unusable image
+reference with the exact qualified image digest before applying an overlay.
+
+The native-authoritative baseline uses one SQLite writer, `Recreate`, persistent
+state and a deny-all initial policy. Do not scale this SQLite deployment; distributed
+followers/backbone require separate qualification. Bootstrap changes do not override
+an established database. Select the storage class and retention/recovery policy in
+the package overlay; PVC deletion can delete storage with a Delete reclaim policy.
+Provision `pumgye-tls` with `tls.crt`, `tls.key`, `ca.crt` and distinct credentials
+in `pumgye-credentials` keys `admin-token`, `decision-token`. No example credentials
+are generated. Client certificates must verify the Pumgye Service DNS name.
+
+Management (9084) and PPG1 (9085) remain mTLS plus role-separated credentials.
+The optional `--readiness-listen` endpoint serves only `GET /-/ready`, an empty
+200/503 response with `Cache-Control: no-store`; no policy, status, audit or decision
+route exists there. Port 9086 is not exported by the Service. Readiness consults
+the same in-memory freshness fence as decisions, including Kubernetes startup,
+expiry and persistence failure. Liveness is a socket check and does not assert
+policy availability. Protect the probe port with the package network policy.
+The native baseline does not mount an API token or grant RBAC. Kubernetes-authoritative
+mode needs an explicit mapping, bounded projected token, CA and namespaced/cluster
+RBAC source permissions; it must never silently fall back to this native baseline.
+
+Build the static binary and run native fixtures before packaging:
+
+```sh
+CARGO_INCREMENTAL=0 cargo build --locked --release --target x86_64-unknown-linux-musl -p pumgye-server
+docker build -f deploy/Dockerfile -t pumgye:QUALIFIED_VERSION .
+kubectl kustomize deploy/kubernetes
+```
+
+Use the configured cluster wrapper for validation and deployment. This packaging
+recipe does not publish a release or authorize overwriting an existing installation.

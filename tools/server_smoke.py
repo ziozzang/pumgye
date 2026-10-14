@@ -33,8 +33,8 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
     for i in range(args.benchmark_cardinality):
         policy['services']['orders']['users']['fixture-'+str(i)]=['reader']
         policy['services']['orders']['networks'].append({'cidr':f'198.18.{i//256}.{i%256}/32','roles':['reader']})
-    initial=root/'initial.json';initial.write_text(json.dumps({'revision':500,'policy':policy}));database=root/'pumgye.sqlite3';http_port,native_port=port(),port()
-    argv=[str(binary),'--listen',f'0.0.0.0:{http_port}','--decision-listen',f'0.0.0.0:{native_port}','--database',str(database),'--policy',str(initial),'--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--client-ca',str(root/'ca.pem')]
+    initial=root/'initial.json';initial.write_text(json.dumps({'revision':500,'policy':policy}));database=root/'pumgye.sqlite3';http_port,native_port,readiness_port=port(),port(),port()
+    argv=[str(binary),'--listen',f'0.0.0.0:{http_port}','--decision-listen',f'0.0.0.0:{native_port}','--readiness-listen',f'0.0.0.0:{readiness_port}','--database',str(database),'--policy',str(initial),'--tls-cert',str(root/'server.pem'),'--tls-key',str(root/'server.key'),'--client-ca',str(root/'ca.pem')]
     rejected=subprocess.run([str(binary),'--listen','0.0.0.0:0','--database',str(root/'rejected.db'),'--policy',str(initial)],env=env,capture_output=True);assert rejected.returncode!=0 and not (root/'rejected.db').exists()
     class LocalHTTPS(http.client.HTTPSConnection):
         def connect(self):self.sock=self._context.wrap_socket(socket.create_connection(('127.0.0.1',http_port),timeout=3),server_hostname='pumgye.example.test')
@@ -60,8 +60,18 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
         names=['orders',subject,'read','public'];body=bytes([1,4,1,guard])+struct.pack('!QQ',i,minimum)+socket.inet_aton('192.0.2.8')+bytes(12)+b''.join(bytes([len(v)])+v.encode() for v in names);return struct.pack('!H',len(body))+body
     def reply(s,i):
         data=exact(s,32);assert data[0]==1 and struct.unpack('!Q',data[4:12])[0]==i and data[2:4]==bytes(2) and data[20:]==bytes(12);return data[1],struct.unpack('!Q',data[12:20])[0]
+    def readiness_get(path):
+        c=http.client.HTTPConnection('127.0.0.1',readiness_port,timeout=3)
+        try:
+            c.request('GET',path);response=c.getresponse()
+            return response.status,response.getheader('Cache-Control'),response.read()
+        finally:c.close()
     process=start()
     try:
+        assert readiness_get('/-/ready')==(200,'no-store',b'')
+        for forbidden in ['/v1/policy','/v1/status','/v1/decision','/v1/audit','/healthz']:
+            assert readiness_get(forbidden)[0]==404
+
         assert api('GET','/v1/policy')[0]==401
         assert api('GET','/v1/status',token=decision)[0]==401
         assert api('GET','/v1/audit')[0]==401
@@ -115,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
         assert database.stat().st_mode&0o077==0
         status,records=api('GET','/v1/audit?after_revision=1',token=admin);assert status==200 and [r['revision'] for r in records]==[2,3] and all(r['actor'].startswith('mtls:') and len(r['sha256'])==64 for r in records)
         status,result=api('GET','/v1/status',token=admin);assert status==200 and result['healthy'] and result['policy_revision']==3
-        print('PASS: independent remote mTLS HTTP/PPG1, trust/token isolation, bounded pipelining, revision floor, CAS races, immediate policy revocation, exclusive DB ownership, audit and restart recovery.')
+        print('PASS: independent remote mTLS HTTP/PPG1, trust/token isolation, bounded pipelining, revision floor, CAS races, immediate policy revocation, exclusive DB ownership, audit, restart recovery and isolated no-store readiness.')
     finally:
         process.terminate()
         try:process.wait(timeout=5)

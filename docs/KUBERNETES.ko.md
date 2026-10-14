@@ -295,3 +295,40 @@ Binding/원천/재시작 검사를 마친 뒤 이전 검증 후보로 별도 nat
 분류로만 반환하며 프로바이더 응답·주소·자격 경로는 노출하지 않습니다.
 한강은 이 상태를 표시하고 외부 원천 정책의 자체 편집을 비활성화합니다.
 Kubernetes 원천 수정이나 전체 패키지 배포 구현 완료를 의미하지 않습니다.
+
+## 한강 월드 배포 구성요소
+
+`deploy/kubernetes`는 한강 월드 통합 패키지의 품계 구성요소입니다. Kustomize
+렌더링과 실제 API 서버의 dry-run을 통과했으나 실제 Pod 배포 및 네 모듈 통합은
+미검증입니다. 의도적으로 실행 불가능한 이미지 참조를 검증한 이미지 digest로
+교체한 overlay를 사용합니다.
+
+자체 원천 기준 설정은 SQLite 단일 작성자, Recreate 전략, 영속 상태와 초기
+전체 거부 정책을 사용합니다. 이 SQLite 배포를 scale하지 않습니다. 분산
+follower·백본은 별도 검증이 필요하며 bootstrap 수정은 기존 DB를 덮어쓰지
+않습니다. 패키지 overlay에서 StorageClass와 보존·복구 정책을 지정합니다.
+Delete 회수 정책의 PVC 삭제는 저장소를 삭제할 수 있습니다. `pumgye-tls`의
+`tls.crt`, `tls.key`, `ca.crt`와 `pumgye-credentials`의 서로 다른 `admin-token`,
+`decision-token`을 별도로 공급합니다. 예제 자격은 만들지 않습니다. 클라이언트는
+인증서의 품계 Service DNS를 검증해야 합니다.
+
+관리 9084와 PPG1 9085는 mTLS 및 역할별 자격을 유지합니다. 선택적
+`--readiness-listen`은 `GET /-/ready`에 본문 없는 200/503과 no-store만
+반환하며 정책·상태·감사·판단 API는 제공하지 않습니다. 9086은 Service에
+노출하지 않습니다. readiness는 판단과 같은 메모리 신선도 경계를 사용하므로
+Kubernetes 시작·만료·영속화 실패 시 거부합니다. liveness 소켓 검사는 정책
+사용 가능을 보장하지 않습니다. probe 포트는 패키지 네트워크 정책으로 제한합니다.
+자체 원천 기준에는 API 토큰이나 RBAC 권한이 없습니다. Kubernetes 원천에는
+명시적 매핑, 제한된 projected token, CA와 Namespace·클러스터 RBAC 조회 권한이
+필요하며 자체 원천으로 자동 fallback하지 않습니다.
+
+정적 바이너리를 빌드하고 네이티브 fixture를 통과한 뒤 이미지로 묶습니다.
+
+```sh
+CARGO_INCREMENTAL=0 cargo build --locked --release --target x86_64-unknown-linux-musl -p pumgye-server
+docker build -f deploy/Dockerfile -t pumgye:QUALIFIED_VERSION .
+kubectl kustomize deploy/kubernetes
+```
+
+설정된 클러스터 wrapper로 검증·배포합니다. 이 절차 자체는 릴리즈 게시나
+기존 설치 덮어쓰기를 의미하지 않습니다.

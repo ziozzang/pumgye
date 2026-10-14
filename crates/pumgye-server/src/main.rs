@@ -55,6 +55,9 @@ struct Args {
     /// Persistent PPG1 decision endpoint (mTLS mandatory outside loopback).
     #[arg(long)]
     decision_listen: Option<SocketAddr>,
+    /// Optional plaintext kubelet readiness listener; exposes only /-/ready, no policy API.
+    #[arg(long)]
+    readiness_listen: Option<SocketAddr>,
     #[arg(long, requires_all = ["tls_key", "client_ca"])]
     tls_cert: Option<PathBuf>,
     #[arg(long, requires_all = ["tls_cert", "client_ca"])]
@@ -315,6 +318,21 @@ async fn audit_records(
     .await
     .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
 }
+async fn readiness(State(a): State<Arc<Authority>>) -> impl IntoResponse {
+    let code = if a.available() {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, [(axum::http::header::CACHE_CONTROL, "no-store")])
+}
+fn readiness_router(a: Arc<Authority>) -> Router {
+    // Deliberately separate from the authenticated management router.
+    Router::new()
+        .route("/-/ready", get(readiness))
+        .with_state(a)
+}
+
 async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
     let view = a.view.load();
     let remaining = view.source_expires.map(|deadline| {
@@ -586,15 +604,30 @@ async fn main() -> anyhow::Result<()> {
         ))
         .with_state(authority.clone());
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    if let Some(address) = args.decision_listen {
-        let native = tokio::net::TcpListener::bind(address).await?;
-        tokio::try_join!(
-            transport::http(listener, http_tls, router),
-            transport::native(native, native_tls, authority)
-        )?;
-    } else {
-        transport::http(listener, http_tls, router).await?;
-    }
+    let native = match args.decision_listen {
+        Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
+        None => None,
+    };
+    let readiness_listener = match args.readiness_listen {
+        Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
+        None => None,
+    };
+    let readiness_router = readiness_router(authority.clone());
+    tokio::try_join!(
+        transport::http(listener, http_tls, router),
+        async move {
+            match native {
+                Some(listener) => transport::native(listener, native_tls, authority).await,
+                None => std::future::pending::<anyhow::Result<()>>().await,
+            }
+        },
+        async move {
+            match readiness_listener {
+                Some(listener) => transport::http(listener, None, readiness_router).await,
+                None => std::future::pending::<anyhow::Result<()>>().await,
+            }
+        }
+    )?;
     Ok(())
 }
 

@@ -95,12 +95,24 @@ pub async fn run(
 mod tests {
     use super::*;
     use crate::tests::{authority, headers};
+    use axum::response::IntoResponse;
     #[tokio::test]
     async fn management_distinguishes_source_failure_and_expired_grants() {
         let root = tempfile::tempdir().unwrap();
         let mut a = authority(root.path());
         Arc::get_mut(&mut a).unwrap().kubernetes_owned = true;
         let current = crate::status(crate::State(a.clone())).await.0;
+        let ready = crate::readiness(crate::State(a.clone()))
+            .await
+            .into_response();
+        assert_eq!(ready.status(), crate::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(ready.headers()["cache-control"], "no-store");
+        assert!(
+            axum::body::to_bytes(ready.into_body(), 16)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(current["source_state"], "starting");
         assert_eq!(current["healthy"], false);
         for (phase, name) in [
@@ -118,6 +130,13 @@ mod tests {
         install(&a, policy, Instant::now() + Duration::from_secs(1)).unwrap();
         a.source_phase.store(2, Ordering::Release);
         let current = crate::status(crate::State(a.clone())).await.0;
+        assert_eq!(
+            crate::readiness(crate::State(a.clone()))
+                .await
+                .into_response()
+                .status(),
+            crate::StatusCode::OK
+        );
         assert_eq!(current["source_state"], "fresh");
         assert_eq!(current["healthy"], true);
         assert!(current["source_lease_remaining_ms"].as_u64().unwrap() <= 1000);
@@ -128,6 +147,13 @@ mod tests {
             source_expires: Some(Instant::now()),
         }));
         let current = crate::status(crate::State(a.clone())).await.0;
+        assert_eq!(
+            crate::readiness(crate::State(a.clone()))
+                .await
+                .into_response()
+                .status(),
+            crate::StatusCode::SERVICE_UNAVAILABLE
+        );
         assert_eq!(current["source_state"], "expired");
         assert_eq!(current["healthy"], false);
         assert_eq!(current["source_lease_remaining_ms"], 0);
