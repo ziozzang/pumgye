@@ -92,3 +92,10 @@ The v0.1.1 candidate passed the complete workspace tests and strict Clippy,
 static ELF and actual SIGTERM checks, and actual four-process native/gRPC
 request chains with durable restart. The published v0.1.0 remains the operating
 release until candidate signing, publication and rollout are completed.
+
+Pumgye [v0.1.1](https://github.com/ziozzang/pumgye/releases/tag/v0.1.1) is now
+published at da45832 with five independently verified Linux amd64 musl assets.
+Internal adoption passed an isolated policy DB clone, exact durable policy
+preservation, live mTLS management/native refusal, signed binary digest checks
+and a second service restart. Private rollback backups are retained. Kubernetes
+rollout of this version and in-flight gRPC completion remain unqualified.

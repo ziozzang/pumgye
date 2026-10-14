@@ -79,3 +79,9 @@ gRPC 스트림 완료나 운영·K8s 반영까지 검증하지는 않습니다.
 v0.1.1 후보는 workspace 테스트·엄격한 Clippy·정적 ELF·실제 SIGTERM 및
 영속 재시작을 포함한 실제 네 프로세스 native/gRPC 요청 체인을 통과했습니다.
 후보 서명·공개·운영 반영을 마치기 전까지 공개 v0.1.0이 운영 릴리즈입니다.
+
+품계 [v0.1.1](https://github.com/ziozzang/pumgye/releases/tag/v0.1.1)을
+da45832에서 Linux amd64 musl 서명 자산 5개로 공개했습니다. 내부 운영 반영은
+격리 DB 복사본·영속 정책 완전 보존·실제 mTLS 관리/native 거부·서명 바이너리
+digest·두 번째 서비스 재시작을 통과했습니다. 비공개 복구 백업을 보존합니다.
+이 버전의 K8s 반영과 진행 중인 gRPC 완료는 아직 검증하지 않았습니다.
