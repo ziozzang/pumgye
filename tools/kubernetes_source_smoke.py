@@ -72,7 +72,10 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
                     items = [{'apiVersion':group+'/v1','kind':'RoleBinding','metadata':{'name':'workers','namespace':'blue','uid':'b1','resourceVersion':'object:'+str(state['revision'])},'roleRef':{'apiGroup':group,'kind':'Role','name':'reader'},'subjects':[{'kind':'ServiceAccount','name':'worker','namespace':'blue'}]}]
             value = {'apiVersion':group+'/v1','kind':kinds[resource]+'List','metadata':{'resourceVersion':rv,'continue':continuation},'items':items}
             body = json.dumps(value).encode()
-            self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+            if state['mode']=='slow':time.sleep(1.2)
+            self.send_response(200);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers()
+            try:self.wfile.write(body)
+            except OSError:pass
     server = http.server.ThreadingHTTPServer(('127.0.0.1',0), Handler)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(root/'server.pem',root/'server.key');server.socket=context.wrap_socket(server.socket,server_side=True)
     thread = threading.Thread(target=server.serve_forever,daemon=True);thread.start()
@@ -113,7 +116,7 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
         deleted=observation(lambda v:'inventory' in v and not v['inventory']['objects']);assert deleted['revision']>first['revision']
         if args.mapping:
             assert deleted['candidate']['policy']['services']['logs']['users']=={} and not deleted['candidate']['mappings'][0]['active']
-        for mode in ['changed-version','wrong-namespace','redirect','expired']:
+        for mode in ['changed-version','wrong-namespace','redirect','expired','slow']:
             state['mode']=mode;unavailable()
         assert state['redirect_hits']==0
         state.update(mode='valid',revision=3);recovered=available();assert recovered['revision']>deleted['revision']
@@ -122,7 +125,7 @@ with tempfile.TemporaryDirectory(prefix='pumgye-kubernetes-owned-') as directory
         assert not db.exists()
         process.send_signal(signal.SIGINT);assert process.wait(timeout=5)==0
         errors=process.stderr.read();assert credential not in errors
-        print('PASS: owned HTTPS paginated RBAC collection, encoded continuation, stable/change/delete revisions, source failure fencing and recovery, scope/version/redirect rejection, token/CA rotation, proxy isolation, no credential output or authority DB')
+        print('PASS: owned HTTPS paginated RBAC collection, encoded continuation, stable/change/delete revisions, source failure fencing and recovery, scope/version/redirect rejection, slow collection freshness refusal, token/CA rotation, proxy isolation, no credential output or authority DB')
     finally:
         if process.poll() is None:process.terminate();process.wait(timeout=5)
         server.shutdown();server.server_close()

@@ -38,6 +38,15 @@ fn bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>> {
     ensure!(bytes.len() <= limit, "source credential capacity exceeded");
     Ok(bytes)
 }
+fn source_deadline(start_ms: u64, elapsed: Duration) -> Result<u64> {
+    ensure!(
+        elapsed < Duration::from_millis(1000),
+        "source collection freshness exhausted"
+    );
+    start_ms
+        .checked_add(1000)
+        .ok_or_else(|| anyhow::anyhow!("source lease exhausted"))
+}
 impl Collector {
     pub fn new(origin: &str, namespace: Option<String>, cluster: String) -> Result<Self> {
         let origin = Url::parse(origin)?;
@@ -70,11 +79,13 @@ impl Collector {
         // Fence the old observation before network work; it is never an authorization grant.
         self.view.store(None);
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(Duration::from_secs(15), self.collect(ca, token)).await;
+        let result =
+            tokio::time::timeout(Duration::from_millis(1000), self.collect(ca, token)).await;
         let (inventory, versions) =
             result.map_err(|_| anyhow::anyhow!("source collection deadline"))??;
         let bytes = serde_json::to_vec(&(&inventory, &versions))?;
         let digest: [u8; 32] = Sha256::digest(bytes).into();
+        let valid_until_ms = source_deadline(now_ms, started.elapsed())?;
         if self.digest != Some(digest) {
             self.revision = self
                 .revision
@@ -82,14 +93,9 @@ impl Collector {
                 .ok_or_else(|| anyhow::anyhow!("source revision exhausted"))?;
             self.digest = Some(digest);
         }
-        let completed = now_ms
-            .checked_add(u64::try_from(started.elapsed().as_millis())?)
-            .ok_or_else(|| anyhow::anyhow!("source clock exhausted"))?;
         self.view.store(Some(Arc::new(Observation {
             revision: self.revision,
-            valid_until_ms: completed
-                .checked_add(1000)
-                .ok_or_else(|| anyhow::anyhow!("source lease exhausted"))?,
+            valid_until_ms,
             collection_versions: versions,
             inventory,
         })));
@@ -277,6 +283,16 @@ mod tests {
     use super::*;
     fn page(rv: &str, next: &str) -> Value {
         serde_json::json!({"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleList","metadata":{"resourceVersion":rv,"continue":next},"items":[{"kind":"Role"}]})
+    }
+    #[test]
+    fn collection_time_consumes_source_lease_and_never_restarts_it() {
+        assert_eq!(
+            source_deadline(10, Duration::from_millis(900)).unwrap(),
+            1010
+        );
+        assert!(source_deadline(10, Duration::from_millis(1000)).is_err());
+        assert!(source_deadline(10, Duration::from_millis(15000)).is_err());
+        assert!(source_deadline(u64::MAX, Duration::ZERO).is_err());
     }
     #[test]
     fn typed_collection_supplies_omitted_item_type_but_never_overrides_conflicts() {

@@ -53,7 +53,7 @@ read-only identity, not the Ingress controller's unrelated credentials.
 Only an HTTPS origin with the configured CA is accepted: public root trust,
 redirects and environment proxies are disabled. Bounded token/CA files are read
 again every collection cycle. Each HTTP request has a three-second deadline;
-the whole collection has fifteen seconds. There are at most 32 pages per kind,
+the whole collection has one second. There are at most 32 pages per kind,
 4096 total objects and 4 MiB total response bytes. Continuation tokens are encoded
 as query parameters and cycles are rejected; each kind's opaque collection version
 must remain identical across pages. Any HTTP error, including expired continuation,
@@ -65,7 +65,7 @@ An immutable ArcSwap observation has a local process revision, the four collecti
 versions, inventory and process-relative `valid_until_ms`. Changes, deletion and
 source version changes advance this local revision; identical observations retain
 it. The old view is removed before collection and failures emit `available:false`.
-Freshness lasts at most one second after collection. Output is diagnostic metadata,
+Freshness ends one second after collection starts; network, parsing and hashing consume that budget. Output is diagnostic metadata,
 not a reusable authorization receipt; it contains no verified workload identities,
 application mapping or policy grants. Revisions are not durable authorization
 floors and reset when the observer restarts.
@@ -180,7 +180,7 @@ not omission of a command-line flag.
 Every process starts with decisions unavailable, even with a previously granted
 policy in SQLite. It withdraws availability before each complete collection;
 HTTP/mapping/compilation failures never reuse the previous permit. A live view
-expires at the collector's original one-second deadline, including compilation
+expires one second after collection starts, including compilation
 and durable-write time. Persistence uncertainty fences the authority until restart.
 The loop pauses 500 ms between collections. Source health and decision eligibility
 are reported by `/healthz` and authenticated `/v1/status`; administrative policy
@@ -313,3 +313,13 @@ RBAC watch continuity is not qualified. This advances actual provider renewal
 qualification without treating authentication and authorization source freshness
 as interchangeable. Distributed watches, failure topology and fleet throughput
 remain additional gates.
+
+
+Slow complete collections are refused instead of being given a fresh lease at
+completion. The one-second whole-collection timeout and post-normalization age
+check fence network and CPU delay; overflow is refused. A 1.2-second owned HTTPS
+response must produce unavailable and then recover on the next successful cycle.
+This fixes stale collection age, but does not establish a globally atomic
+cross-kind RBAC snapshot or continuous watch availability. Large/slow sources
+that cannot fit the budget remain unavailable until scalable reconciliation is
+implemented; the budget must not silently expand to publish old grants.
