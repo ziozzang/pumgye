@@ -167,8 +167,8 @@ returns no observation; no fallback or acceptance cache is provided.
 
 The opaque observation binds the exact receipt hash and original expiry and uses
 monotonic elapsed time on subsequent checks. It is not a permission or durable
-owner lease. Server startup configuration, real cross-process client qualification,
-permit dispatch and final remote owner fences remain to be connected. This library
+owner lease. Server startup resources and actual cross-process client qualification are
+implemented below; permit dispatch and final remote owner fences remain open. This library
 increment does not change operating listeners or deployments.
 
 ## Live-client startup resources (unreleased)
@@ -184,6 +184,22 @@ exposes only `authentication_live_configured`.
 
 This initial configuration binds one issuer endpoint. Mixed-provider authentication
 behind that Hopae issuer remains supported; multi-issuer endpoint selection is
-future work. Loading the client does not activate a permit RPC. Actual successful
-Hopae/Pumgye client lifecycle qualification and permit integration remain open.
+future work. Loading the client does not activate a permit RPC. Actual successful Hopae/Pumgye client lifecycle qualification is recorded below;
+permit integration remains open.
 The operating deployment is unchanged.
+
+## Actual Hopae/Pumgye live-client qualification (unreleased)
+
+`examples/hopae_live_qualification.rs` runs the production Pumgye Client against
+an actual isolated Hopae executable using the portable
+[receipt fixture](https://github.com/ziozzang/hopae/blob/main/tools/service_receipt_smoke.py)
+with `--live-validation`. Persistent channels passed signed issuance/local trust
+verification/live validation, cached unexpired receipt refusal after signed profile
+CAS removal, restoration with a new revision, and authority outage refusal after
+terminating the owned Hopae process while a fresh receipt remained locally valid.
+Caller/issuer/service/audience/server-name/key/epoch refusals also passed.
+
+This run used current debug executables, ephemeral TLS/signing keys and synthetic
+profiles only. No operating credentials, data or listeners were used. Strict
+workspace/all-target Clippy passed. Static release, actual Pumgye server permit
+endpoint, distributed freshness/restore and Kubernetes live-client gates remain.
