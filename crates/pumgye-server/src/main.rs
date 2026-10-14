@@ -73,6 +73,9 @@ struct Args {
     /// Initial policy for an empty database; ignored on subsequent starts.
     #[arg(long)]
     policy: Option<PathBuf>,
+    /// Reference-only native permit signing resources; requires an owning server.
+    #[arg(long, conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
+    permit_key: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
     #[arg(long, default_value = "PUMGYE_DECISION_TOKEN")]
@@ -92,6 +95,7 @@ struct View {
     source_expires: Option<std::time::Instant>,
 }
 struct Authority {
+    permit_signer: Option<pumgye_server::permit::Signer>,
     view: ArcSwap<View>,
     store: std::sync::Mutex<store::Store>,
     admin: String,
@@ -491,6 +495,7 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "version":1,"policy_revision":view.document.revision,"healthy":a.available(),
         "policy_source":if a.kubernetes_owned {"kubernetes"} else {"native"},
         "source_state":source_state,
+        "permit_key_configured":a.permit_signer.is_some(),
         "source_lease_remaining_ms":if a.kubernetes_owned {remaining} else {None},
         "source_writable":!a.kubernetes_owned,
         "decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0
@@ -722,10 +727,19 @@ async fn main() -> anyhow::Result<()> {
     } else {
         (None, None)
     };
+    let permit_signer = args
+        .permit_key
+        .as_deref()
+        .map(|path| {
+            pumgye_server::permit_config::load(path, &|name| std::env::var(name).ok())
+                .map_err(|_| anyhow::anyhow!("native permit signing resources unavailable"))
+        })
+        .transpose()?;
     let (mut store, document) = store::Store::open(&args.database, args.policy.as_deref())?;
     store.claim_source(args.authorize_kubernetes_rbac)?;
     let compiled = document.policy.compile()?;
     let authority = Arc::new(Authority {
+        permit_signer,
         view: ArcSwap::from_pointee(View {
             document,
             compiled,
@@ -1157,6 +1171,7 @@ mod tests {
             store::Store::open(&root.join("authority.sqlite3"), Some(&initial)).unwrap();
         let compiled = document.policy.compile().unwrap();
         Arc::new(Authority {
+            permit_signer: None,
             view: ArcSwap::from_pointee(View {
                 document,
                 compiled,

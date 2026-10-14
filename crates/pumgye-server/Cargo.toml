@@ -13,6 +13,8 @@ path = "src/main.rs"
 hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "896ece5665018f94670fa8a51e85976f3d20b93f" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.3"
+base64 = "0.22"
+zeroize = "1"
 hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "819177c631acb43dcdac8662403e80a13bb6c636" }
 pumgye-grpc = { path = "../pumgye-grpc" }
 tonic = { version = "0.14.6", features = ["tls-ring"] }

@@ -67,3 +67,21 @@ Native owner state and the mandatory freshness callback must originate in actual
 owners. Signing key loading/rotation, owner discovery/coherence, RPC wiring,
 receiver replay consumption and credential projection remain required. No operating
 permit issuer is activated by this source change.
+
+## Native permit signing resources (unreleased)
+
+`--permit-key <file>` optionally loads reference-only JSON with `issuer_ref`,
+`key_epoch`, `public_key` (base64 Ed25519 public bytes) and `seed_env` (environment
+reference). Unknown fields, including inline `seed`, are refused. Files are bounded
+to 16 KiB. Public identity/epoch/reference syntax is checked before resolving
+secret material. The 32-byte seed must match the declared non-weak public key;
+encoded seed and decode/file buffers are zeroized. Missing or invalid resources
+fail before database creation or listener binding. Administrator status exposes
+only `permit_key_configured`.
+
+Use a separate deployment permit identity from release artifact and Hopae
+authentication identities. Restart is the current loading boundary; durable key
+retirement/rotation and dynamic publication remain open. Loading a key does not
+activate a permit RPC or satisfy live owner/network/plan checks. The option conflicts
+with inspection/observation-only modes. Existing deployments without the option
+retain their ordinary decision behavior.

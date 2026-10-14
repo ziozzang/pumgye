@@ -3,3 +3,4 @@
 pub mod authentication;
 pub mod authorization;
 pub mod permit;
+pub mod permit_config;
