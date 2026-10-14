@@ -93,3 +93,10 @@ The fixture also refuses missing/invalid credentials, observe evidence and expli
 IP blocking before load. No authentication protocol peer is mocked. Owned state,
 keys and processes are discarded at completion; errors/response statuses remain
 visible rather than counted as throughput success.
+
+
+The request-local Guard evidence variant records 11,764–12,492/s with 16 workers,
+p50 1,256–1,328 µs, p99 1,862–2,110 µs and zero failed replies in three ten-second
+trials. Its issued proof remains bound to authority/IP/revision/deadline; expired
+or unusable proof re-queries. Raw variant source/hash is included above. This is
+an observed result, not a guaranteed percentage improvement or a 100k/s claim.

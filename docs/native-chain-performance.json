@@ -159,5 +159,60 @@
   "production_affected": false,
   "100k_full_chain_qualified": false,
   "python_origin_preliminary_generator_sha256": null,
-  "python_origin_preliminary_provenance": "preliminary before fast-origin mode; hash not captured; main hashes describe workers16/workers32 final trials"
+  "python_origin_preliminary_provenance": "preliminary before fast-origin mode; hash not captured; main hashes describe workers16/workers32 final trials",
+  "request_local_guard_reuse": {
+    "gateway_source": "d3742b8027a35b056418ef27f4dc697689f897a9",
+    "gateway_sha256": "b40d2d15989abf4b17c9540e482e1056d0883f3a40c59e5ee543dafa89649cf7",
+    "trials": [
+      {
+        "elapsed_seconds": 10.001801297,
+        "failures": 0,
+        "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+        "p50_us": 1256,
+        "p99_us": 1862,
+        "statuses": {
+          "200": 124945
+        },
+        "verified_qps": 12492.24977479574,
+        "verified_responses": 124945,
+        "workers": 16,
+        "trial": 1,
+        "all_components_real": true,
+        "origin": "Go validated origin"
+      },
+      {
+        "elapsed_seconds": 10.002488561,
+        "failures": 0,
+        "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+        "p50_us": 1313,
+        "p99_us": 1946,
+        "statuses": {
+          "200": 119973
+        },
+        "verified_qps": 11994.315141511712,
+        "verified_responses": 119973,
+        "workers": 16,
+        "trial": 2,
+        "all_components_real": true,
+        "origin": "Go validated origin"
+      },
+      {
+        "elapsed_seconds": 10.00225663,
+        "failures": 0,
+        "load": "closed-loop HTTPS, native HOP1/PPG1/HGD1 mTLS, native API key",
+        "p50_us": 1328,
+        "p99_us": 2110,
+        "statuses": {
+          "200": 117667
+        },
+        "verified_qps": 11764.045290247666,
+        "verified_responses": 117667,
+        "workers": 16,
+        "trial": 3,
+        "all_components_real": true,
+        "origin": "Go validated origin"
+      }
+    ],
+    "scope": "same controlled 16-worker native API-key workload; issued Guard proof reused only inside its request and validity window; not a shared cache or guaranteed gain"
+  }
 }

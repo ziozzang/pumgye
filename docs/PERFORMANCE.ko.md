@@ -80,3 +80,9 @@ python3 tools/native_chain_benchmark.py --pumgye /path/to/pumgye --gateway /path
 부하 전 미인증/잘못된 자격·observe·IP 차단도 거절합니다. 인증 프로토콜 대역이
 없고 별도 상태/키/프로세스를 정리합니다. 실패/status를 숨기거나 성공 처리량으로
 계산하지 않습니다.
+
+
+요청 내부 Guard 근거 재사용 변형은 16 workers·10초씩 3회에서 11,764~12,492/s,
+p50 1,256~1,328µs·p99 1,862~2,110µs·실패 0입니다. 근거는 authority/IP/revision/
+기한에 묶이고 만료/불가 시 재질의합니다. 원시 변형 source/해시도 포함합니다.
+관찰 결과이며 보장된 개선 비율이나 10만/s 주장은 아닙니다.
