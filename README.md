@@ -196,3 +196,14 @@ preflight, private binary/database/configuration rollback backups, exact policy
 preservation, live management/native mTLS denial and a second durable restart.
 The catalog is available without automatically enabling new gateway resource gates;
 full provider/fleet/projection and automatic-update work remains open.
+
+## v0.1.4 release candidate
+
+This candidate adds server-owned service receipt verification and signed permit
+candidates, reference-only signing/trust configuration, durable key retirement
+and scope revision floors, and explicit owner-lock release after SQLite closes.
+Receipt/permit RPC activation and live distributed owner checks remain open;
+loading these resources alone does not grant access. Existing resource decision
+APIs and independent static server deployment remain supported. See
+[receipt boundaries](docs/AUTHENTICATION_RECEIPTS.md). Candidate qualification,
+signed publication and internal rollout are recorded separately after completion.
