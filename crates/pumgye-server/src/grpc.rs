@@ -102,17 +102,12 @@ impl
                     Status::permission_denied("authentication refused")
                 }
                 _ => Status::unavailable("native authority unavailable"),
-            })?
-            .0;
+            })?;
         Ok(Response::new(pumgye_grpc::v1::AuthenticatedResourceReply {
             request_id: input.request_id,
-            revision: result["revision"]
-                .as_u64()
-                .ok_or_else(|| Status::internal("invalid native result"))?,
-            network_revision: result["network_revision"]
-                .as_u64()
-                .ok_or_else(|| Status::internal("invalid native result"))?,
-            verdict: if result["allow"] == true { 1 } else { 2 },
+            revision: result.revision,
+            network_revision: result.network_revision,
+            verdict: if result.allow { 1 } else { 2 },
             cache_ttl_ms: 0,
         }))
     }

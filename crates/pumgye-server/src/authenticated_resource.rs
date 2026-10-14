@@ -57,6 +57,15 @@ pub(crate) struct Query {
     pub(crate) receipt: Vec<u8>,
     pub(crate) request_sha256: Vec<u8>,
 }
+#[derive(Serialize)]
+pub(crate) struct Outcome {
+    version: u8,
+    pub(crate) request_id: u64,
+    pub(crate) revision: u64,
+    pub(crate) network_revision: u64,
+    pub(crate) allow: bool,
+    ttl_ms: u8,
+}
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -66,17 +75,19 @@ async fn decide(
     State(a): State<Arc<Authority>>,
     headers: HeaderMap,
     Json(q): Json<Query>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Json<Outcome>, StatusCode> {
     if !authorized(&headers, &a.decision) {
         return Err(StatusCode::UNAUTHORIZED);
     }
-    evaluate(&a, q, &|| authorized(&headers, &a.decision)).await
+    evaluate(&a, q, &|| authorized(&headers, &a.decision))
+        .await
+        .map(Json)
 }
 pub(crate) async fn evaluate(
     a: &Authority,
     q: Query,
     caller: &(dyn Fn() -> bool + Sync),
-) -> Result<Json<serde_json::Value>, StatusCode> {
+) -> Result<Outcome, StatusCode> {
     if !caller() {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -187,9 +198,14 @@ pub(crate) async fn evaluate(
     {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
-    Ok(Json(
-        serde_json::json!({"version":1,"request_id":q.request_id,"revision":view.document.revision,"network_revision":network.revision(),"allow":allow,"ttl_ms":0}),
-    ))
+    Ok(Outcome {
+        version: 1,
+        request_id: q.request_id,
+        revision: view.document.revision,
+        network_revision: network.revision(),
+        allow,
+        ttl_ms: 0,
+    })
 }
 pub fn route() -> axum::routing::MethodRouter<Arc<Authority>> {
     post(decide).layer(axum::extract::DefaultBodyLimit::max(4096))

@@ -387,3 +387,9 @@ context, unavailable resources and existing resource-channel regressions. All
 HTTP Allow/revocation/outage fixture passed again after evaluation extraction.
 The gRPC positive three-authority path, Hangang client/dispatch integration and
 signed permit remain subsequent gates; operating releases are unchanged.
+
+The common evaluator now returns a typed native outcome. The gRPC adapter
+constructs its reply directly, without intermediate JSON objects or field
+reinterpretation; HTTP serializes the same outcome with unchanged response
+fields. All 64 workspace tests, strict Clippy and the actual three-authority
+HTTP regression passed after this hot-path refinement.
