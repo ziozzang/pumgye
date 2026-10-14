@@ -303,3 +303,19 @@ all-target Clippy를 통과했습니다.
 이 K8s endpoint 단계는 정상 허용만 증명하며 receipt 회수/장애는 로컬 정적 세
 권위에서 검증했습니다. 서명 permit·운영 한강 전달·분산 복구/다중 노드 경계는
 남아 있고 이 예제 변경으로 서버 릴리스 자산은 바꾸지 않았습니다.
+
+## 타입 기반 인증 자원 gRPC 어댑터 (미릴리스)
+
+필수 mTLS AuthenticatedResourceAuthorization/Decide 서비스는 HTTP endpoint와
+정확히 같은 네이티브 판정 함수를 사용합니다. 호패의 공용 생성
+AuthenticationReceiptContext를 빌드 스키마 내보내기/extern-path로 공유하므로
+문맥 스키마 복사나 요청 중 JSON 파싱이 없습니다. IP 바이트·자원/액션·정확한
+receipt·기대 요청 hash를 제한하며 문맥 변환 전에 판정 자격/공용 수용량을
+검사합니다. 송수신 한도는 4 KiB/128바이트이고 응답은 상관 ID·정책/네트워크
+리비전·Allow/Deny·캐시 TTL 0입니다.
+
+실제 mTLS 서비스 등록·관리자 자격 거부·잘못된/누락 문맥·자원 미설정과 기존
+자원 채널 회귀를 검사했습니다. 워크스페이스 64개 검사와 엄격한 all-target
+Clippy를 통과하고 함수 추출 뒤 실제 세 권위 HTTP Allow/회수/장애 검사도 재통과했습니다.
+gRPC 세 권위의 성공 경로·한강 클라이언트/전달·서명 permit은 다음 단계이며 운영
+릴리스는 변경하지 않았습니다.

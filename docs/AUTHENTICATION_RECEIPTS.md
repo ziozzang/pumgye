@@ -369,3 +369,21 @@ This Kubernetes endpoint step proves positive admission only; receipt-specific
 withdrawal/outage was qualified in the local static three-authority fixture.
 Signed permits, production Hangang dispatch and distributed restore/fleet
 fences remain open. Server release assets are unchanged by this example update.
+
+## Typed authenticated resource gRPC adapter (unreleased)
+
+The mandatory-mTLS `AuthenticatedResourceAuthorization/Decide` service shares
+the HTTP endpoint's exact native evaluation function. Its protobuf request uses
+Hopae's canonical generated `AuthenticationReceiptContext` via build-time schema
+export and extern-path mapping; no duplicate context schema or request-time JSON
+parse is used. Packed IP, native resource/action, exact receipt and expected
+request hash remain bounded. Decision-role authentication and shared admission
+precede context conversion; decoding/encoding limits are 4 KiB/128 bytes. Replies
+carry correlation, policy/network revisions, Allow/Deny and cache TTL zero.
+
+Tests cover real mTLS service registration, admin-role refusal, invalid/missing
+context, unavailable resources and existing resource-channel regressions. All
+64 workspace tests and strict all-target Clippy passed. The actual three-authority
+HTTP Allow/revocation/outage fixture passed again after evaluation extraction.
+The gRPC positive three-authority path, Hangang client/dispatch integration and
+signed permit remain subsequent gates; operating releases are unchanged.

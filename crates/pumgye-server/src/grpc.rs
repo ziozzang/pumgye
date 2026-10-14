@@ -39,6 +39,85 @@ impl Service {
     }
 }
 #[tonic::async_trait]
+impl
+    pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorization
+    for Service
+{
+    async fn decide(
+        &self,
+        request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::AuthenticatedResourceReply>, Status> {
+        let _permit = self.admission(request.metadata())?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        if input.receipt.len() != hopae_grpc::receipt::LENGTH || input.request_sha256.len() != 32 {
+            return Err(Status::invalid_argument("invalid receipt bounds"));
+        }
+        let ip = match input.ip.as_slice() {
+            bytes if bytes.len() == 4 => {
+                IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(bytes).unwrap()))
+            }
+            bytes if bytes.len() == 16 => {
+                IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).unwrap()))
+            }
+            _ => return Err(Status::invalid_argument("invalid address size")),
+        };
+        let context = crate::authenticated_resource::ReceiptContext::from_wire(
+            input
+                .context
+                .ok_or_else(|| Status::invalid_argument("receipt context required"))?,
+        )
+        .map_err(|_| Status::invalid_argument("invalid service context"))?;
+        let query = crate::authenticated_resource::Query {
+            request_id: input.request_id,
+            minimum_revision: input.minimum_revision,
+            ip,
+            resource: input.resource,
+            action: input.action,
+            context,
+            receipt: input.receipt,
+            request_sha256: input.request_sha256,
+        };
+        let caller = || {
+            let mut values = metadata.get_all("authorization").iter();
+            let token = values
+                .next()
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "));
+            values.next().is_none()
+                && token.is_some_and(|token| {
+                    crate::credential_matches(token.as_bytes(), self.0.decision.as_bytes())
+                })
+        };
+        let result = crate::authenticated_resource::evaluate(&self.0, query, &caller)
+            .await
+            .map_err(|status| match status {
+                axum::http::StatusCode::BAD_REQUEST => {
+                    Status::invalid_argument("invalid authenticated request")
+                }
+                axum::http::StatusCode::UNAUTHORIZED => {
+                    Status::unauthenticated("decision credential required")
+                }
+                axum::http::StatusCode::FORBIDDEN => {
+                    Status::permission_denied("authentication refused")
+                }
+                _ => Status::unavailable("native authority unavailable"),
+            })?
+            .0;
+        Ok(Response::new(pumgye_grpc::v1::AuthenticatedResourceReply {
+            request_id: input.request_id,
+            revision: result["revision"]
+                .as_u64()
+                .ok_or_else(|| Status::internal("invalid native result"))?,
+            network_revision: result["network_revision"]
+                .as_u64()
+                .ok_or_else(|| Status::internal("invalid native result"))?,
+            verdict: if result["allow"] == true { 1 } else { 2 },
+            cache_ttl_ms: 0,
+        }))
+    }
+}
+#[tonic::async_trait]
 impl pumgye_grpc::v1::resource_authorization_server::ResourceAuthorization for Service {
     async fn decide(
         &self,
@@ -187,11 +266,12 @@ pub async fn serve(
         )
         .add_service(
             pumgye_grpc::v1::resource_authorization_server::ResourceAuthorizationServer::new(
-                Service(authority),
+                Service(authority.clone()),
             )
             .max_decoding_message_size(2048)
             .max_encoding_message_size(1024),
         )
+        .add_service(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128))
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
     Ok(())
@@ -200,6 +280,76 @@ pub async fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn authenticated_admission_precedes_context_and_missing_resources_fail_closed() {
+        use pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorization;
+        let root = tempfile::tempdir().unwrap();
+        let owner = crate::tests::authority(root.path());
+        let service = Service(owner.clone());
+        let message = pumgye_grpc::v1::AuthenticatedResourceRequest {
+            request_id: 1,
+            minimum_revision: 1,
+            ip: vec![192, 0, 2, 1],
+            resource: "db:orders".into(),
+            action: "select".into(),
+            context: None,
+            receipt: vec![0; 146],
+            request_sha256: vec![3; 32],
+        };
+        let call = |token: &str, message| {
+            let mut request = Request::new(message);
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            request
+        };
+        assert_eq!(
+            AuthenticatedResourceAuthorization::decide(
+                &service,
+                call(&owner.admin, message.clone())
+            )
+            .await
+            .err()
+            .unwrap()
+            .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            AuthenticatedResourceAuthorization::decide(
+                &service,
+                call(&owner.decision, message.clone())
+            )
+            .await
+            .err()
+            .unwrap()
+            .code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut valid = message;
+        valid.context = Some(hopae_grpc::v1::AuthenticationReceiptContext {
+            issuer_ref: "hopae".into(),
+            key_epoch: 1,
+            identity_authority_epoch: "owned:service:1:app:1".into(),
+            identity: Some(hopae_grpc::v1::ReceiptIdentity {
+                subject_ref: "s_0123456789abcdef0123456789abcdef0123456789abcdef".into(),
+                kind: 2,
+                aal: 0,
+                revision: 1,
+                credential_generation: 1,
+            }),
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            request_sha256: vec![3; 32],
+        });
+        assert_eq!(
+            AuthenticatedResourceAuthorization::decide(&service, call(&owner.decision, valid))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unavailable
+        );
+    }
     #[tokio::test]
     async fn actual_resource_mtls_channel_tracks_catalog_changes_and_refuses_missing_certificate() {
         use pumgye_grpc::v1::{
@@ -314,6 +464,41 @@ mod tests {
             .connect()
             .await
             .unwrap();
+        let mut authenticated = pumgye_grpc::v1::authenticated_resource_authorization_client::AuthenticatedResourceAuthorizationClient::new(channel.clone());
+        let authenticated_request = |token: &str| {
+            let mut request = Request::new(pumgye_grpc::v1::AuthenticatedResourceRequest {
+                request_id: 43,
+                minimum_revision: 1,
+                ip: vec![192, 0, 2, 9],
+                resource: "db:orders".into(),
+                action: "select".into(),
+                context: None,
+                receipt: vec![0; 146],
+                request_sha256: vec![3; 32],
+            });
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            request
+        };
+        assert_eq!(
+            authenticated
+                .decide(authenticated_request(&owner.admin))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            authenticated
+                .decide(authenticated_request(&owner.decision))
+                .await
+                .err()
+                .unwrap()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
         let mut client = ResourceAuthorizationClient::new(channel);
         let request = |token: &str| {
             let mut request = Request::new(ResourceDecisionRequest {

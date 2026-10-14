@@ -1,5 +1,6 @@
 syntax = "proto3";
 package hangang.pumgye.v1;
+import "gateway.proto";
 service Authorization { rpc Decide(DecisionRequest) returns (DecisionReply); }
 // The authenticated enforcement caller owns identity and network evidence.
 // Raw application claims must never be copied here without verification.
@@ -39,3 +40,8 @@ service ResourceAuthorization { rpc Decide(ResourceDecisionRequest) returns (Res
 // Classification and action mapping come from the authoritative resource catalog.
 message ResourceDecisionRequest { uint64 request_id = 1; uint64 minimum_revision = 2; bytes ip = 3; uint32 aal = 4; GuardEvidence guard = 5; string resource = 6; string action = 7; string subject = 8; string service_id = 9; }
 message ResourceDecisionReply { uint64 request_id = 1; uint64 revision = 2; Verdict verdict = 3; string reason = 4; uint32 cache_ttl_ms = 5; }
+
+// The canonical Hopae generated context is shared without copying or JSON parsing.
+service AuthenticatedResourceAuthorization { rpc Decide(AuthenticatedResourceRequest) returns (AuthenticatedResourceReply); }
+message AuthenticatedResourceRequest { uint64 request_id = 1; uint64 minimum_revision = 2; bytes ip = 3; string resource = 4; string action = 5; hangang.hopae.v1.AuthenticationReceiptContext context = 6; bytes receipt = 7; bytes request_sha256 = 8; }
+message AuthenticatedResourceReply { uint64 request_id = 1; uint64 revision = 2; uint64 network_revision = 3; Verdict verdict = 4; uint32 cache_ttl_ms = 5; }

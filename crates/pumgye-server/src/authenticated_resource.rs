@@ -11,7 +11,7 @@ struct Identity {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ReceiptContext {
+pub(crate) struct ReceiptContext {
     issuer_ref: String,
     key_epoch: u64,
     identity_authority_epoch: String,
@@ -20,17 +20,42 @@ struct ReceiptContext {
     audience: String,
     request_sha256: Vec<u8>,
 }
+impl ReceiptContext {
+    pub(crate) fn from_wire(
+        context: hopae_grpc::v1::AuthenticationReceiptContext,
+    ) -> Result<Self, StatusCode> {
+        let identity = context.identity.ok_or(StatusCode::BAD_REQUEST)?;
+        if identity.kind != 2 || identity.aal != 0 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Ok(Self {
+            issuer_ref: context.issuer_ref,
+            key_epoch: context.key_epoch,
+            identity_authority_epoch: context.identity_authority_epoch,
+            identity: Identity {
+                subject_ref: identity.subject_ref,
+                kind: 2,
+                aal: 0,
+                revision: identity.revision,
+                credential_generation: identity.credential_generation,
+            },
+            service: context.service,
+            audience: context.audience,
+            request_sha256: context.request_sha256,
+        })
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Query {
-    request_id: u64,
-    minimum_revision: u64,
-    resource: String,
-    action: String,
-    ip: IpAddr,
-    context: ReceiptContext,
-    receipt: Vec<u8>,
-    request_sha256: Vec<u8>,
+pub(crate) struct Query {
+    pub(crate) request_id: u64,
+    pub(crate) minimum_revision: u64,
+    pub(crate) resource: String,
+    pub(crate) action: String,
+    pub(crate) ip: IpAddr,
+    pub(crate) context: ReceiptContext,
+    pub(crate) receipt: Vec<u8>,
+    pub(crate) request_sha256: Vec<u8>,
 }
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -43,6 +68,16 @@ async fn decide(
     Json(q): Json<Query>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     if !authorized(&headers, &a.decision) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    evaluate(&a, q, &|| authorized(&headers, &a.decision)).await
+}
+pub(crate) async fn evaluate(
+    a: &Authority,
+    q: Query,
+    caller: &(dyn Fn() -> bool + Sync),
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !caller() {
         return Err(StatusCode::UNAUTHORIZED);
     }
     if !(1..=9_007_199_254_740_991).contains(&q.request_id)
@@ -148,7 +183,7 @@ async fn decide(
     if !current()
         || !observation.valid_for(&checked, now())
         || !network.valid_at(q.ip, now())
-        || !authorized(&headers, &a.decision)
+        || !caller()
     {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
