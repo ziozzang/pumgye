@@ -416,3 +416,10 @@ Hangang prepared-request/receipt clients pass the persistent gRPC lifecycle
 fixture in this mode. Hangang SDK qualification supersedes that client gate
 above; actual gateway transformation/upstream dispatch remains open. These
 source tests do not change operating release or issuer configuration.
+
+`--fragmented-entity` requires `--nonempty-entity` and a client that reports
+two prepared entity frames. The actual Hangang client passes this three-authority
+fixture after bounded geometric buffer growth; a nonparticipating client is
+explicitly refused rather than counted as fragmented qualification. Pumgye's
+existing nonempty single-entity mode remains compatible. Fragmentation is test
+client input, not a change to receipt wire format or operating dispatch.

@@ -14,7 +14,9 @@ def main():
     parser.add_argument('--sumunjang', required=True, type=Path)
     parser.add_argument('--grpc-decisions', action='store_true')
     parser.add_argument('--nonempty-entity', action='store_true', help='bind an owned nonempty entity instead of an empty request body')
+    parser.add_argument('--fragmented-entity', action='store_true', help='require a client that qualifies and reports two prepared entity frames')
     args = parser.parse_args()
+    if args.fragmented_entity and not args.nonempty_entity:parser.error('--fragmented-entity requires --nonempty-entity')
     os.umask(0o077)
     def port():
         with socket.socket() as sock:
@@ -35,6 +37,7 @@ def main():
         env=dict(os.environ,OWNED_RECEIPT_SEED=base64.b64encode(seed[-32:]).decode(),OWNED_RECEIPT_CALLER=secrets.token_hex(24),OWNED_RECEIPT_CREDENTIAL=secrets.token_hex(24),OWNED_RECEIPT_DELEGATION=secrets.token_hex(24))
         portal,gateway,grpc,admin=[port() for _ in range(4)]
         guard_http,guard_native,guard_grpc,pum_http,pum_grpc=[port() for _ in range(5)]
+        env['OWNED_RECEIPT_FRAGMENTED_ENTITY']='1' if args.fragmented_entity else '0'
         env.update(HANGANG_GUARD_ADMIN_TOKEN=secrets.token_hex(24),HANGANG_GUARD_COLLECTOR_TOKEN=secrets.token_hex(24),PUMGYE_ADMIN_TOKEN=secrets.token_hex(24),PUMGYE_DECISION_TOKEN=secrets.token_hex(24))
         profile={'authority_id':'owned','profiles':[{'service_id':'orders','host':'orders.example.test','ports':[443],'realm':'owned','api_keys':[{'token_env':'OWNED_RECEIPT_CREDENTIAL','subject':'worker'}],'networks':['203.0.113.0/24']}]}
         pin=base64.b64encode(public[-32:]).decode()
@@ -116,6 +119,7 @@ def main():
                     line=client.stdout.readline();assert line, 'owned client refused expected result'
                     return json.loads(line)
                 allowed=command('allow');assert allowed['allowed'] is True and allowed['revision']==1
+                if args.fragmented_entity:assert allowed.get('entity_frames')==2, 'selected client did not qualify fragmented entity preparation'
                 guard('POST','/v1/blocks',{'network':'203.0.113.9/32','expires_at':int(time.time())+600,'reason':'owned combined qualification'})
                 assert command('deny-network')['allowed'] is False
                 guard('DELETE','/v1/blocks',{'network':'203.0.113.9/32'})
