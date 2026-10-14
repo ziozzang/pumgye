@@ -109,3 +109,24 @@ fence가 없으므로 진단 후보를 운영 API에 자동 게시하지 않습�
 
 격리 HTTPS fixture의 --mapping 옵션은 후보 생성과 원천 삭제 후 배정 제거,
 오류 복구·인증 파일 교체를 같이 검증합니다.
+
+## 실제 API 검증
+
+검증된 typed RBAC collection 내부 항목에서 kind/apiVersion이 생략되면 해당
+collection의 알려진 종류/API를 보완합니다. 명시적으로 모순된 종류/버전은 거절하며
+오프라인 혼합 List 검사를 완화하지 않습니다. 실제 typed list는 항목 TypeMeta를
+생략할 수 있고 kubectl은 합친 출력에 이를 채웁니다. 소유 v1.37.0 API에서 이 차이를
+발견하고 검증했습니다.
+
+```sh
+python3 tools/kubernetes_real_cluster.py --binary target/debug/pumgye \
+  --state-dir /private/owned-kind-qualification
+```
+
+고정된 소유 kind 클러스터·비공개 kubeconfig에 제한하며 고유 namespace와 읽기 전용
+계정을 사용합니다. namespace Role/Binding과 cluster Role/Binding 조회 권한을
+분리합니다. 실제 조회/후보 매핑·Binding 삭제 후 배정 제거·동명 재생성 UID 거절·
+인증 실패/복구·정책 DB 미생성을 검증하고 fixture RBAC/namespace를 제거합니다.
+Python PyYAML·클러스터 내 kubectl이 필요합니다. native subject는 명시적 가상 참조이며
+호패 워크로드 연관·자동 권위 게시·운영 활성화를 주장하지 않습니다. v1.37.0을
+검증했고 다른 버전·확장 watch는 별도 단계입니다.

@@ -137,3 +137,27 @@ identities and UIDs and must not be used as operational assignments.
 
 The owned HTTPS fixture also supports `--mapping`; it checks mapped candidates and
 withdrawal after source deletion alongside failure recovery and credential rotation.
+
+## Actual API qualification
+
+The collector accepts missing item kind/apiVersion only inside a validated typed
+RBAC collection, supplying its known API/type. Explicit conflicting item types or
+versions fail the collection; this does not relax offline mixed-List inspection.
+Real Kubernetes typed lists may omit item TypeMeta, while kubectl supplies it in
+combined output. The owned v1.37.0 API fixture found and verifies this distinction.
+
+```sh
+python3 tools/kubernetes_real_cluster.py --binary target/debug/pumgye \
+  --state-dir /private/owned-kind-qualification
+```
+
+The fixture is restricted to the named owned kind cluster and private kubeconfig,
+using unique namespaces and read-only source identities. Namespace Role/Binding
+reads and cluster Role/Binding reads have separate RBAC grants. It verifies actual
+collection/candidate mapping, Binding deletion withdrawal, recreated Binding UID
+refusal, credential failure/recovery and no policy DB creation. Fixture RBAC and
+namespaces are removed. Python PyYAML and the cluster's bundled kubectl are required.
+Native subject is an explicit fictional reference: this fixture does not claim
+Hopae workload association, automatic authoritative publication or production
+activation. v1.37.0 is qualified here; other versions and scalable watches remain
+separate gates.

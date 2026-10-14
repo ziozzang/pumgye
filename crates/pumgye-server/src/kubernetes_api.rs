@@ -227,10 +227,29 @@ impl Pages {
             .as_array()
             .ok_or_else(|| anyhow::anyhow!("missing source items"))?;
         ensure!(
-            items.len() + page.len() <= 4096 && page.iter().all(|item| item["kind"] == self.kind),
-            "source object capacity or kind mismatch"
+            items.len() + page.len() <= 4096,
+            "source object capacity exceeded"
         );
-        items.extend(page.iter().cloned());
+        for item in page {
+            let object = item
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("invalid source object"))?;
+            ensure!(
+                object.get("kind").is_none_or(|kind| kind == self.kind)
+                    && object
+                        .get("apiVersion")
+                        .is_none_or(|api| api == "rbac.authorization.k8s.io/v1"),
+                "source item type contradicts collection"
+            );
+            let mut object = object.clone();
+            object
+                .entry("kind")
+                .or_insert_with(|| Value::String(self.kind.to_owned()));
+            object
+                .entry("apiVersion")
+                .or_insert_with(|| Value::String("rbac.authorization.k8s.io/v1".to_owned()));
+            items.push(Value::Object(object));
+        }
         let next = match v["metadata"].get("continue") {
             None => "",
             Some(value) => value
@@ -258,6 +277,27 @@ mod tests {
     use super::*;
     fn page(rv: &str, next: &str) -> Value {
         serde_json::json!({"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleList","metadata":{"resourceVersion":rv,"continue":next},"items":[{"kind":"Role"}]})
+    }
+    #[test]
+    fn typed_collection_supplies_omitted_item_type_but_never_overrides_conflicts() {
+        let mut value = page("opaque:a", "");
+        value["items"] = serde_json::json!([{"metadata":{"name":"reader"}}]);
+        let mut objects = Vec::new();
+        assert!(Pages::new("Role").accept(&value, &mut objects).unwrap());
+        assert_eq!(objects[0]["kind"], "Role");
+        assert_eq!(objects[0]["apiVersion"], "rbac.authorization.k8s.io/v1");
+        for (field, bad) in [
+            ("kind", "ClusterRole"),
+            ("apiVersion", "attacker.example/v1"),
+        ] {
+            let mut invalid = value.clone();
+            invalid["items"][0][field] = bad.into();
+            assert!(
+                Pages::new("Role")
+                    .accept(&invalid, &mut Vec::new())
+                    .is_err()
+            );
+        }
     }
     #[test]
     fn pagination_preserves_opaque_version_and_refuses_changed_or_cyclic_pages() {
