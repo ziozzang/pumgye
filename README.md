@@ -230,3 +230,11 @@ qualification, source regression/Clippy and release boundary checks passed.
 All downloaded assets matched originals; pinned signatures, version/target/URL
 bindings and static ELF were independently verified. Internal adoption and
 Kubernetes combined-endpoint qualification remain subsequent gates.
+
+### 0.1.5 Internal adoption — 2026-10-15
+
+Internal deployment passed signed-artifact verification, isolated operating DB
+clone preflight, private consistent backup, exact policy preservation, actual
+mTLS management/PPG1 refusal and two restarts. Native receipt/live resources
+remain unconfigured in this existing deployment; the new endpoint fails closed.
+
