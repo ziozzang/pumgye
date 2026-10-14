@@ -1,10 +1,12 @@
 //! Native bounded PPG1 client. Endpoint configuration is trusted; errors never grant access.
+mod endpoint;
+pub use endpoint::Endpoint;
+
 use anyhow::{Result, ensure};
 use pumgye_protocol::{MAX_QUERY, Query, REPLY_SIZE, Reply};
 use rustls::{ClientConfig, RootCertStore, pki_types::ServerName};
 use std::{
     io::Read,
-    net::SocketAddr,
     path::Path,
     sync::{
         Arc,
@@ -67,7 +69,7 @@ impl Tls {
     }
 }
 pub struct Client {
-    address: SocketAddr,
+    address: Endpoint,
     tls: Option<Tls>,
     credential: String,
     capacity: Semaphore,
@@ -78,15 +80,17 @@ pub struct Client {
 }
 impl Client {
     pub fn new(
-        address: SocketAddr,
+        address: impl Into<Endpoint>,
         tls: Option<Tls>,
         credential: String,
         pool_size: usize,
         deadline: Duration,
         minimum_revision: u64,
     ) -> Result<Self> {
+        let address = address.into();
+        address.validate()?;
         ensure!(
-            address.ip().is_loopback() || tls.is_some(),
+            address.is_loopback() || tls.is_some(),
             "remote PPG1 clients require mTLS"
         );
         ensure!(
@@ -130,7 +134,7 @@ impl Client {
                 return Ok(conn);
             }
         }
-        let socket = TcpStream::connect(self.address).await?;
+        let socket = TcpStream::connect(self.address.as_str()).await?;
         socket.set_nodelay(true)?;
         let mut stream: Box<dyn Io> = if let Some(tls) = &self.tls {
             let stream = TlsConnector::from(tls.config.clone())
@@ -246,9 +250,22 @@ mod tests {
     #[test]
     fn remote_plaintext_and_invalid_limits_are_rejected() {
         let token = "fixture-credential-only".to_string();
+        for name in ["localhost:9085", "pumgye.world.svc:9085"] {
+            assert!(
+                Client::new(
+                    name.parse::<Endpoint>().unwrap(),
+                    None,
+                    token.clone(),
+                    64,
+                    Duration::from_millis(100),
+                    1
+                )
+                .is_err()
+            );
+        }
         assert!(
             Client::new(
-                "192.0.2.1:9085".parse().unwrap(),
+                "192.0.2.1:9085".parse::<Endpoint>().unwrap(),
                 None,
                 token.clone(),
                 64,
@@ -259,7 +276,7 @@ mod tests {
         );
         assert!(
             Client::new(
-                "127.0.0.1:9085".parse().unwrap(),
+                "127.0.0.1:9085".parse::<Endpoint>().unwrap(),
                 None,
                 token.clone(),
                 0,
@@ -270,7 +287,7 @@ mod tests {
         );
         assert!(
             Client::new(
-                "127.0.0.1:9085".parse().unwrap(),
+                "127.0.0.1:9085".parse::<Endpoint>().unwrap(),
                 None,
                 token,
                 64,

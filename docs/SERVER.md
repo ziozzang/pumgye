@@ -76,3 +76,10 @@ Replica publication, authority incarnation pinning, credential rotation/reload,
 individual delegated admin actors and fleet revocation leases are additional
 integration gates. A revision floor alone is not quorum consistency. Native client
 and server tests do not establish whole-stack 100k HTTP requests per second.
+
+Native client endpoints accept bounded `host:port` Service DNS names and literal
+IPv4/IPv6 socket addresses. DNS names always require mTLS, even `localhost`; DNS
+discovery does not establish peer identity. The client resolves on each new pooled
+connection under the existing decision deadline and validates the configured TLS
+server name/CA and client credential. Existing pooled connections keep their normal
+retirement bounds; this is not replica membership or source-revision coherence.

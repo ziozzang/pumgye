@@ -94,7 +94,7 @@ with tempfile.TemporaryDirectory(prefix='pumgye-owned-') as tmp:
         except (OSError,AssertionError) as e:
             if str(e)=='admin token admitted on decision channel':raise
         if args.client:
-            subprocess.run([str(args.client.resolve()),'--address',f'127.0.0.1:{native_port}','--ca',str(root/'ca.pem'),'--cert',str(root/'client.pem'),'--key',str(root/'client.key'),'--requests','512','--concurrency','8'],env=env,check=True,capture_output=True)
+            subprocess.run([str(args.client.resolve()),'--address',f'localhost:{native_port}','--ca',str(root/'ca.pem'),'--cert',str(root/'client.pem'),'--key',str(root/'client.key'),'--requests','512','--concurrency','8'],env=env,check=True,capture_output=True)
         if args.client and args.benchmark:
             assert 1000<=args.benchmark<=10000000
             assert 1<=args.benchmark_batch<=64 and 1<=args.benchmark_concurrency<=256 and 1<=args.benchmark_seconds<=60

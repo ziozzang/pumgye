@@ -1,10 +1,9 @@
 //! Owned deterministic allow fixture; results describe this transport, not the full gateway.
 use anyhow::{Result, ensure};
 use clap::Parser;
-use pumgye_client::{Client, Tls};
+use pumgye_client::{Client, Endpoint, Tls};
 use pumgye_protocol::{Decision, GuardEvidence, Query};
 use std::{
-    net::SocketAddr,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -12,7 +11,7 @@ use std::{
 #[derive(Parser)]
 struct Args {
     #[arg(long)]
-    address: SocketAddr,
+    address: Endpoint,
     #[arg(long)]
     ca: Option<PathBuf>,
     #[arg(long)]
