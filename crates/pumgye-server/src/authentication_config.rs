@@ -191,7 +191,7 @@ mod tests {
         let context = receipt_binding::Context {
             issuer_ref: "hopae",
             key_epoch: 1,
-            identity_authority_epoch: "epoch1:service:3",
+            identity_authority_epoch: "epoch1:service:3:app:1",
             identity: receipt_binding::Identity {
                 subject_ref: "s_0123456789abcdef0123456789abcdef0123456789abcdef",
                 kind: PrincipalKind::Service,

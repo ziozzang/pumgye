@@ -28,6 +28,7 @@ pub struct Configuration {
 /// and a native resource Allow before permission signing or secret projection.
 pub struct CheckedService<'a> {
     context: receipt_binding::Context<'a>,
+    application_generation: u64,
     verified_ms: u64,
     expires_ms: u64,
     receipt_sha256: [u8; 32],
@@ -41,6 +42,9 @@ impl CheckedService<'_> {
     }
     pub fn subject(&self) -> &str {
         self.context.identity.subject_ref
+    }
+    pub fn application_generation(&self) -> u64 {
+        self.application_generation
     }
     pub fn revision(&self) -> u64 {
         self.context.identity.revision
@@ -106,16 +110,10 @@ impl ServiceTrust {
         now_ms: u64,
     ) -> Result<CheckedService<'a>, Refused> {
         let identity = &context.identity;
-        let epoch_revision = context
-            .identity_authority_epoch
-            .strip_prefix(&self.identity_epoch)
-            .and_then(|v| v.strip_prefix(":service:"));
-        let epoch_matches = epoch_revision.is_some_and(|v| {
-            !v.starts_with('0')
-                && v.len() <= 16
-                && v.bytes().all(|b| b.is_ascii_digit())
-                && v.parse::<u64>().ok() == Some(identity.revision)
-        });
+        let epoch = hopae_grpc::service_epoch::decode(context.identity_authority_epoch)
+            .map_err(|_| Refused)?;
+        let epoch_matches =
+            epoch.authority == self.identity_epoch && epoch.profile_revision == identity.revision;
         if context.issuer_ref != self.issuer
             || context.key_epoch != self.key_epoch
             || !epoch_matches
@@ -144,6 +142,7 @@ impl ServiceTrust {
         )
         .map_err(|_| Refused)?;
         Ok(CheckedService {
+            application_generation: epoch.application_generation,
             verified_ms: now_ms,
             context: receipt_binding::Context {
                 issuer_ref: context.issuer_ref,
@@ -174,7 +173,7 @@ mod tests {
         receipt_binding::Context {
             issuer_ref: "hopae",
             key_epoch: 1,
-            identity_authority_epoch: "epoch1:service:3",
+            identity_authority_epoch: "epoch1:service:3:app:1",
             identity: receipt_binding::Identity {
                 subject_ref: "s_0123456789abcdef0123456789abcdef0123456789abcdef",
                 kind: PrincipalKind::Service,
@@ -226,6 +225,7 @@ mod tests {
         assert_eq!(checked.subject(), input.identity.subject_ref);
         assert_eq!(checked.revision(), 3);
         assert_eq!(checked.aal(), 0);
+        assert_eq!(checked.application_generation(), 1);
         assert_eq!(checked.expires_ms(), 1800);
         assert_eq!(
             checked.receipt_sha256(),
@@ -251,6 +251,9 @@ mod tests {
             "identity-epoch",
             "epoch-revision",
             "epoch-format",
+            "legacy-epoch",
+            "app-zero",
+            "app-format",
             "service",
             "audience",
             "request",
@@ -263,9 +266,12 @@ mod tests {
             match case {
                 "issuer" => input.issuer_ref = "other",
                 "epoch" => input.key_epoch = 2,
-                "identity-epoch" => input.identity_authority_epoch = "other:service:3",
-                "epoch-revision" => input.identity_authority_epoch = "epoch1:service:2",
-                "epoch-format" => input.identity_authority_epoch = "epoch1:service:03",
+                "identity-epoch" => input.identity_authority_epoch = "other:service:3:app:1",
+                "epoch-revision" => input.identity_authority_epoch = "epoch1:service:2:app:1",
+                "epoch-format" => input.identity_authority_epoch = "epoch1:service:03:app:1",
+                "legacy-epoch" => input.identity_authority_epoch = "epoch1:service:3",
+                "app-zero" => input.identity_authority_epoch = "epoch1:service:3:app:0",
+                "app-format" => input.identity_authority_epoch = "epoch1:service:3:app:01",
                 "service" => input.service = "billing",
                 "audience" => input.audience = "billing-api",
                 "request" => input.request_sha256 = [6; 32],
@@ -278,7 +284,7 @@ mod tests {
                 "floor" => {
                     input.identity.revision = 2;
                     input.identity.credential_generation = 2;
-                    input.identity_authority_epoch = "epoch1:service:2";
+                    input.identity_authority_epoch = "epoch1:service:2:app:1";
                 }
                 _ => unreachable!(),
             }

@@ -143,3 +143,13 @@ regression covers this case. The new scope-floor test passed in both runs.
 After the ownership fix, all 55 workspace tests passed in normal parallel execution
 and strict all-target Clippy passed. The child regression closes unrelated inherited
 descriptors so it cannot prolong concurrent tests’ listeners.
+
+## Signed application generation (unreleased)
+
+ServiceTrust now requires the canonical `<base>:service:<profile>:app:<generation>`
+epoch. Legacy profile-only receipts, zero/noncanonical app generations, wrong
+base or profile revision are refused even when signed. `CheckedService` exposes
+the authenticated application generation for subsequent native owner validation.
+The actual Hopae captured-proof issuer adopts the same contract. Generation
+parsing is not a live freshness check; owner revalidation remains required before
+permit dispatch, and operating releases are unchanged by this source increment.

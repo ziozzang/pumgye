@@ -192,7 +192,7 @@ mod tests {
         receipt_binding::Context {
             issuer_ref: "hopae",
             key_epoch: 1,
-            identity_authority_epoch: "epoch1:service:3",
+            identity_authority_epoch: "epoch1:service:3:app:1",
             identity: receipt_binding::Identity {
                 subject_ref: SUBJECT,
                 kind: PrincipalKind::Service,

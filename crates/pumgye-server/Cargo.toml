@@ -10,7 +10,7 @@ name = "pumgye"
 path = "src/main.rs"
 
 [dependencies]
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "4aaf1a218fc10add5212fbf763ac5877d4abd27a" }
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "370626be1f6f36faf8cd2ac2669f923ef66ccac4" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.3"
 base64 = "0.22"
