@@ -1,0 +1,4 @@
+Reserved synthetic identity, no credentials or operating data. Shape derived from actual public Kubernetes authorization/v1 SubjectAccessReview Go types and JSON tags at upstream source98e9da3000734733127c8ac3bdb77b42ad61c31b (locally available mirror); ObjectMeta zero creationTimestamp:null and status allowed:false included. This is a schema-derived generated-object SHAPE fixture, not an API-server capture or evidence of executing the Go serializer. Standard v1 group is groups (plural), not old webhook-doc singular group sample. Future actual API-server compatibility gate remains required.
+
+https://github.com/kubernetes/kubernetes/blob/98e9da3000734733127c8ac3bdb77b42ad61c31b/staging/src/k8s.io/api/authorization/v1/types.go
+https://kubernetes.io/docs/reference/kubernetes-api/definitions/subject-access-review-v1-authorization/

@@ -156,6 +156,9 @@ struct Document {
 }
 #[cfg(feature = "observed-authentication")]
 mod observed_native;
+// Staged private wire prerequisite; no listener or runtime activation yet.
+#[allow(dead_code)]
+mod sar_wire;
 mod source_lifetime;
 struct View {
     document: Document,
