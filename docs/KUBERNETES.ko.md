@@ -404,3 +404,7 @@ AAL1 이상을 요구하면 거절합니다. 기존 리소스/서비스 경로�
 교체된 이전 View 캡처는 살아나지 않습니다. 실제 TokenReview→receipt→Pum permit→
 paired 호패 projection→한강 dispatch는 후속 통합 게이트이며, 이 단계의 테스트가
 전체 체인 활성화를 의미하지는 않습니다.
+
+[명시적 Kubernetes API context core 선행 단계](KUBERNETES_API_CONTEXT.ko.md)는
+추후 SAR adapter용 opt-in 정책 문맥이다. 역방향 webhook 활성화나 RBAC 원천 소유권
+변경은 포함하지 않는다.

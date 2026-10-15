@@ -475,3 +475,7 @@ content and revision later match. Typed Workload grant removal changes that same
 native policy revision. Actual TokenReview → receipt → Pum permit → paired Hopae
 projection → Hangang dispatch remains a separate integration gate; these policy
 and mapping tests do not claim that chain is enabled.
+
+The [explicit Kubernetes API context core prerequisite](KUBERNETES_API_CONTEXT.md)
+provides a separate opt-in native policy applicability boundary for a future SAR
+adapter. It does not activate an inbound webhook or alter RBAC source ownership.

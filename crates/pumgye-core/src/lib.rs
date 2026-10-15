@@ -20,6 +20,9 @@ pub struct Policy {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Service {
+    /// Explicit opt-in for API-server authorization without client network evidence.
+    #[serde(default, skip_serializing_if = "AuthorizationContext::is_default")]
+    pub authorization_context: AuthorizationContext,
     pub permissions: Vec<String>,
     pub roles: BTreeMap<String, Role>,
     pub users: BTreeMap<String, Vec<String>>,
@@ -29,6 +32,42 @@ pub struct Service {
     pub networks: Vec<Network>,
     #[serde(default = "yes")]
     pub require_guard: bool,
+}
+/// Native policy applicability, never selected by request headers or claims.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationContext {
+    #[default]
+    NetworkAndGuard,
+    KubernetesApi,
+}
+impl AuthorizationContext {
+    fn is_default(&self) -> bool {
+        *self == Self::NetworkAndGuard
+    }
+}
+/// Metadata label selected by a server-owned Kubernetes API identity mapping.
+/// Parsing validates its namespace only: this is NOT authenticated identity,
+/// a Hopae principal, a receipt, an assurance claim or an authorization capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KubernetesApiSubject<'a>(&'a str);
+impl<'a> KubernetesApiSubject<'a> {
+    pub fn parse(subject: &'a str) -> Result<Self> {
+        ensure!(
+            kubernetes_api_subject(subject),
+            "invalid Kubernetes API subject"
+        );
+        Ok(Self(subject))
+    }
+    pub fn as_str(self) -> &'a str {
+        self.0
+    }
+}
+fn kubernetes_api_subject(subject: &str) -> bool {
+    name(subject)
+        && subject
+            .strip_prefix("k8sapi:")
+            .is_some_and(|suffix| !suffix.is_empty())
 }
 /// Native resource metadata: request callers select an action, never its class.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -117,6 +156,7 @@ struct CompiledService {
     networks: PrefixTrie<Rights>,
     hosts: HashMap<IpAddr, Rights>,
     require_guard: bool,
+    authorization_context: AuthorizationContext,
 }
 /// Canonical public identity encoding, not authentication evidence.
 pub fn workload_subject(s: &str) -> bool {
@@ -239,6 +279,21 @@ impl Policy {
                 name(id) && service.roles.len() <= 64,
                 "invalid service or role count"
             );
+            if service.authorization_context == AuthorizationContext::KubernetesApi {
+                ensure!(
+                    !service.require_guard
+                        && service.networks.is_empty()
+                        && service.workload_users.is_empty(),
+                    "Kubernetes API context forbids network/guard requirements and Workload assignments"
+                );
+                ensure!(
+                    service
+                        .users
+                        .keys()
+                        .all(|subject| kubernetes_api_subject(subject)),
+                    "Kubernetes API context requires namespaced API subjects"
+                );
+            }
             total_users += service.users.len() + service.workload_users.len();
             total_networks += service.networks.len();
             ensure!(
@@ -293,6 +348,7 @@ impl Policy {
                     networks,
                     hosts,
                     require_guard: service.require_guard,
+                    authorization_context: service.authorization_context,
                 },
             );
         }
@@ -355,6 +411,9 @@ fn evaluate_rights(
     assurance: (u8, u8),
     guard: GuardEvidence,
 ) -> Decision {
+    if service.authorization_context != AuthorizationContext::NetworkAndGuard {
+        return Decision::PermissionDenied;
+    }
     if guard == GuardEvidence::Deny {
         return Decision::GuardDenied;
     }
@@ -374,24 +433,82 @@ fn evaluate_rights(
     else {
         return Decision::NetworkGuest;
     };
+    evaluate_entitlements(
+        user.permissions & network.permissions,
+        user.classes & network.classes,
+        user.aal.max(network.aal),
+        permission,
+        class,
+        assurance,
+    )
+}
+fn evaluate_entitlements(
+    permissions: u64,
+    classes: u64,
+    minimum_aal: u8,
+    permission: impl FnOnce() -> Option<u64>,
+    class: impl FnOnce() -> Option<u64>,
+    assurance: (u8, u8),
+) -> Decision {
     let Some(permission) = permission() else {
         return Decision::PermissionDenied;
     };
-    if user.permissions & network.permissions & permission == 0 {
+    if permissions & permission == 0 {
         return Decision::PermissionDenied;
     }
     let Some(class) = class() else {
         return Decision::ClassDenied;
     };
-    if user.classes & network.classes & class == 0 {
+    if classes & class == 0 {
         return Decision::ClassDenied;
     }
-    if assurance.0 > 3 || assurance.0 < user.aal.max(network.aal).max(assurance.1) {
+    if assurance.0 > 3 || assurance.0 < minimum_aal.max(assurance.1) {
         return Decision::AssuranceDenied;
     }
     Decision::Allow
 }
 impl CompiledPolicy {
+    /// Evaluate an explicitly network-free Kubernetes API catalog context at AAL0.
+    /// The caller must authenticate the API server, resolve an exact server-owned
+    /// identity/resource mapping, and fence the current policy/source publication.
+    /// This pure compiler method establishes none of those facts. Ordinary services
+    /// never enter this path, and it creates no receipt or permission capability.
+    pub fn evaluate_kubernetes_api_resource(
+        &self,
+        service: &str,
+        resource: &str,
+        action: &str,
+        subject: KubernetesApiSubject<'_>,
+    ) -> ResourceDecision {
+        let Some(resource) = self.resources.get(resource) else {
+            return ResourceDecision::UnknownResource;
+        };
+        if resource.metadata.service != service {
+            return ResourceDecision::Decided(Decision::UnknownService);
+        }
+        let service = &self.services[&resource.metadata.service];
+        if service.authorization_context != AuthorizationContext::KubernetesApi {
+            return ResourceDecision::Decided(Decision::PermissionDenied);
+        }
+        let Some(permission) = resource.actions.get(action) else {
+            return ResourceDecision::UnknownAction;
+        };
+        let Some(user) = service
+            .users
+            .get(subject.as_str())
+            .filter(|user| user.permissions != 0)
+        else {
+            return ResourceDecision::Decided(Decision::Guest);
+        };
+        ResourceDecision::Decided(evaluate_entitlements(
+            user.permissions,
+            user.classes,
+            user.aal,
+            || Some(*permission),
+            || Some(resource.class),
+            (0, resource.metadata.minimum_aal),
+        ))
+    }
     pub fn resource_metadata(&self, resource: &str) -> Option<&Resource> {
         self.resources.get(resource).map(|r| &r.metadata)
     }

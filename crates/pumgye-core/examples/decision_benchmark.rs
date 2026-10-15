@@ -40,6 +40,7 @@ fn main() -> anyhow::Result<()> {
         .map(|i| IpAddr::V4(Ipv4Addr::from(0xc6120000 + i as u32)))
         .collect();
     let service = Service {
+        authorization_context: Default::default(),
         workload_users: Default::default(),
         permissions: vec!["read".into()],
         roles: BTreeMap::from([(
