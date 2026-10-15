@@ -679,14 +679,16 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hopae-grpc"
 version = "0.0.3"
-source = "git+https://github.com/ziozzang/hopae?rev=96c9af6bc0af1a81cdb42eea3da05f14c763a647#96c9af6bc0af1a81cdb42eea3da05f14c763a647"
+source = "git+https://github.com/ziozzang/hopae?rev=c7ddcf2bb0d12adff7db06e7df178b88b9c5062f#c7ddcf2bb0d12adff7db06e7df178b88b9c5062f"
 dependencies = [
  "ed25519-dalek",
+ "hangang-runtime",
  "prost",
  "serde",
  "serde_json",
  "sha2",
  "subtle",
+ "tokio",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

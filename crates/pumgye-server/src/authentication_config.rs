@@ -40,6 +40,67 @@ pub struct Trust {
     entries: usize,
 }
 impl Trust {
+    /// Compile the observed SDK policy from this immutable native trust snapshot.
+    /// The additional floors are native startup policy, never request fields.
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn observed_policy(
+        &self,
+        issuer_ref: &str,
+        minimum_application_generation: u64,
+        minimum_key_registry_revision: u64,
+    ) -> Result<hopae_grpc::observed_client::ServiceTrustPolicy, Refused> {
+        use hopae_grpc::observed_client::{ServiceScope, ServiceTrustPolicy};
+        let issuer = self.issuers.get(issuer_ref).ok_or(Refused)?;
+        let floors: Vec<_> = self
+            .floors
+            .iter()
+            .filter(|f| f.issuer == issuer_ref)
+            .collect();
+        Ok(ServiceTrustPolicy {
+            issuer_ref: issuer_ref.to_owned(),
+            key_epoch: issuer.key_epoch,
+            verifying_key: ed25519_dalek::VerifyingKey::from_bytes(&issuer.public)
+                .map_err(|_| Refused)?,
+            identity_authority: issuer.identity_epoch.clone(),
+            scopes: floors
+                .iter()
+                .map(|f| ServiceScope {
+                    service: f.service.clone(),
+                    audience: f.audience.clone(),
+                })
+                .collect(),
+            minimum_profile_revision: floors
+                .iter()
+                .map(|f| f.minimum_revision)
+                .min()
+                .ok_or(Refused)?,
+            minimum_application_generation,
+            minimum_key_registry_revision,
+        })
+    }
+
+    /// Native scope-specific floor, in addition to SDK signature/time checks.
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn observed_scope(
+        &self,
+        c: &hopae_grpc::v1::AuthenticationReceiptContext,
+    ) -> Result<(), Refused> {
+        let issuer = self.issuers.get(&c.issuer_ref).ok_or(Refused)?;
+        let identity = c.identity.as_ref().ok_or(Refused)?;
+        let epoch = hopae_grpc::service_epoch::decode_clock(&c.identity_authority_epoch)
+            .map_err(|_| Refused)?;
+        if issuer.key_epoch != c.key_epoch
+            || epoch.epoch.authority != issuer.identity_epoch
+            || issuer
+                .scopes
+                .get(&c.service)
+                .and_then(|audiences| audiences.get(&c.audience))
+                .is_none_or(|scope| identity.revision < scope.minimum_revision())
+        {
+            return Err(Refused);
+        }
+        Ok(())
+    }
     pub fn compile(document: Document) -> Result<Self, Refused> {
         if document.entries.is_empty() || document.entries.len() > 128 {
             return Err(Refused);

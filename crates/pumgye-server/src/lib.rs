@@ -24,3 +24,7 @@ pub mod plan_live;
 
 /// Canonical permission proof checking before live owner validation.
 pub mod permit_wire;
+
+/// Opt-in evidence foundation; deliberately disconnected from permit issuance.
+#[cfg(feature = "observed-authentication")]
+pub mod authentication_observed;

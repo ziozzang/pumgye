@@ -9,10 +9,15 @@ description = "Standalone Pumgye policy authority and decision server"
 name = "pumgye"
 path = "src/main.rs"
 
+[features]
+default = []
+# Foundation only: no endpoint or permit signing is enabled by this feature.
+observed-authentication = ["hopae-grpc/native-client"]
+
 [dependencies]
 hangang-route-grpc = { git = "https://github.com/ziozzang/hangang", rev = "dfc099ea763650f98b31110f0720cf3d9042f3ec" }
 guard-grpc = { git = "https://github.com/ziozzang/sumunjang", rev = "1f70428e9481654845a696cf30cdb917a6aef009" }
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "96c9af6bc0af1a81cdb42eea3da05f14c763a647" }
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "c7ddcf2bb0d12adff7db06e7df178b88b9c5062f" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.3"
 base64 = "0.22"

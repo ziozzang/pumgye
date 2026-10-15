@@ -427,3 +427,47 @@ client input, not a change to receipt wire format or operating dispatch.
 Version 0.1.6 is prepared for the typed authenticated gRPC authority increment.
 Workspace, strict Clippy and release-boundary gates pass. Static candidate,
 signed publication and operating adoption must be qualified separately.
+
+## Observed authentication foundation (opt-in, not active)
+
+The `observed-authentication` feature adds a separate
+`authentication_observed::CheckedObservedService` evidence boundary. The native
+`AuthenticationOwnerGeneration` compiles its SDK stable service policy from the
+same immutable `authentication_config::Trust`; it owns one fixed mTLS client,
+explicit application/key-registry floors, and receiver BOOTTIME rate policy.
+Dynamic signed service subjects, profile generations and source process domains
+do not create new clients. Per-scope native profile floors remain mandatory.
+
+`OwnerSlot` captures an immutable generation at ingress and serializes replacement:
+retire the old SDK client before publishing its replacement. Hot-path generation
+checks use borrowed ArcSwap snapshots; only replacement takes a writer mutex.
+A retired candidate is rejected before changing the current generation. Observe, consuming
+refresh and local check independently fence that captured generation, the current
+authenticated enforcement caller, and the current native policy view around async
+work. The view callback must check the existing view Arc identity, health and
+Kubernetes source deadline; the caller callback must check current caller trust.
+No slot writer mutex or snapshot guard spans callbacks; the final admission time sample follows
+all callbacks and is followed only by a pure native generation check. A callback
+that replaces configuration or runs past the original deadline therefore refuses.
+The SDK authenticates the signature once and the observed owner report; Pumgye
+does not run the strict signature/time verifier again. Its input is the caller's
+authenticated final digest plus receipt context and raw receipt. No HTTP fields
+or UTC sample are fabricated. Local admission uses SDK BOOTTIME checks and
+refresh consumes the previous evidence, preserving its shortest original budget.
+
+This feature does not register an endpoint, replace strict `CheckedService`, or
+enable observed permit signing. The existing strict endpoints remain unchanged.
+Before activation, Pumgye still needs its own permit clock/domain and observed
+RPC contract, all prerequisite budgets converted into that receiver domain,
+route/plan/caller/publication fences at signing and output, and the paired
+projection replay/output contracts. An observation is point-in-time evidence,
+not a remote revocation lease or durable replay record.
+
+`tests/authentication_observed.rs` uses a generated CA and real mutually
+authenticated tonic transport. It checks digest-only input, dynamic identities,
+trust/scope/per-scope floors, tamper refusal before RPC, consuming refresh,
+BOOTTIME expiry, caller/view/configuration changes during observe and refresh,
+reentrant configuration replacement and a callback that blocks past admission,
+and missing observed RPC refusal without a legacy fallback. Fixture owner times
+are independent of receiver UTC; host clock mutation and the complete production
+permit/projection chain are not qualified by these tests.

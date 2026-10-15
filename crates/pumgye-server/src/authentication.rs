@@ -70,6 +70,10 @@ fn revision(value: u64) -> bool {
     (1..=9_007_199_254_740_991).contains(&value)
 }
 impl ServiceTrust {
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn minimum_revision(&self) -> u64 {
+        self.minimum_revision
+    }
     /// Configuration must come from the owning server, never from the request.
     pub fn new(config: Configuration) -> Result<Self, Refused> {
         if [
