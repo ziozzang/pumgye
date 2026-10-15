@@ -409,6 +409,44 @@ impl pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPerm
             .map(Response::new)
     }
 }
+#[cfg(feature = "observed-authentication")]
+#[tonic::async_trait]
+impl pumgye_grpc::v1::workload_observed_projection_permits_server::WorkloadObservedProjectionPermits
+    for Service
+{
+    async fn issue(
+        &self,
+        request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ObservedProjectionPermitReply>, Status> {
+        let _admission = self.admission(request.metadata())?;
+        let owner = self
+            .0
+            .workload_observed_permits
+            .get()
+            .ok_or_else(|| Status::unavailable("observed permit owner not configured"))?;
+        let (metadata, _, input) = request.into_parts();
+        owner
+            .issue(input, &|| self.caller(&metadata).is_ok())
+            .await
+            .map(Response::new)
+    }
+    async fn observe(
+        &self,
+        request: Request<pumgye_grpc::v1::PermitValidationRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ObservedPermitTimeReply>, Status> {
+        let _admission = self.admission(request.metadata())?;
+        let owner = self
+            .0
+            .workload_observed_permits
+            .get()
+            .ok_or_else(|| Status::unavailable("observed permit owner not configured"))?;
+        let (metadata, _, input) = request.into_parts();
+        owner
+            .observe(input, &|| self.caller(&metadata).is_ok())
+            .await
+            .map(Response::new)
+    }
+}
 pub async fn serve(
     listener: TcpListener,
     tls: ServerTlsConfig,
@@ -437,6 +475,10 @@ pub async fn serve(
     #[cfg(feature = "observed-authentication")]
     let server = server.add_service(authenticate_transport(UnaryIngress::new(
         pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072),
+        ingress.clone(), 8192), authority.clone()));
+    #[cfg(feature = "observed-authentication")]
+    let server = server.add_service(authenticate_transport(UnaryIngress::new(
+        pumgye_grpc::v1::workload_observed_projection_permits_server::WorkloadObservedProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072),
         ingress, 8192), authority));
     server
         .serve_with_incoming_shutdown(incoming, shutdown)
@@ -1161,7 +1203,7 @@ mod tests {
         http::Response<Body>,
         std::convert::Infallible,
     > {
-        let limit = [2048, 2048, 4096, 8192, 8192][kind];
+        let limit = [2048, 2048, 4096, 8192, 8192, 8192][kind];
         macro_rules! wrap {
             ($server:expr) => {
                 tower::util::BoxCloneService::new(
@@ -1182,6 +1224,8 @@ mod tests {
                 3 => wrap!(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048)),
                 #[cfg(feature = "observed-authentication")]
                 4 => wrap!(pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072)),
+                #[cfg(feature = "observed-authentication")]
+                5 => wrap!(pumgye_grpc::v1::workload_observed_projection_permits_server::WorkloadObservedProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072)),
                 _ => panic!("unknown test service"),
             }
     }
@@ -1205,6 +1249,18 @@ mod tests {
         (
             4,
             "/hangang.pumgye.v1.ObservedProjectionPermits/Observe",
+            8192,
+        ),
+        #[cfg(feature = "observed-authentication")]
+        (
+            5,
+            "/hangang.pumgye.v1.WorkloadObservedProjectionPermits/Issue",
+            8192,
+        ),
+        #[cfg(feature = "observed-authentication")]
+        (
+            5,
+            "/hangang.pumgye.v1.WorkloadObservedProjectionPermits/Observe",
             8192,
         ),
     ];

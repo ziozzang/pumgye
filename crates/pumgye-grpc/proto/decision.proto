@@ -83,3 +83,12 @@ message ObservedPermitTimeReply {
   uint64 plan_revision = 10;
   uint32 cache_ttl_ms = 11; // Always zero; point-in-time owner evidence.
 }
+
+// Workload-only native entrypoint. Requires authenticated kind3/AAL0 evidence
+// and the shared compiled policy's workload_users grants. No Service fallback.
+// The signed permit is independently checked permission, not authentication.
+// Existing envelopes and replay key/purpose/nonce identity remain unchanged.
+service WorkloadObservedProjectionPermits {
+  rpc Issue(AuthenticatedResourceRequest) returns (ObservedProjectionPermitReply);
+  rpc Observe(PermitValidationRequest) returns (ObservedPermitTimeReply);
+}

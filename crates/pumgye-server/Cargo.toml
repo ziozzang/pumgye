@@ -17,7 +17,7 @@ observed-authentication = ["hopae-grpc/native-client"]
 [dependencies]
 hangang-route-grpc = { git = "https://github.com/ziozzang/hangang", rev = "dfc099ea763650f98b31110f0720cf3d9042f3ec" }
 guard-grpc = { git = "https://github.com/ziozzang/sumunjang", rev = "1f70428e9481654845a696cf30cdb917a6aef009" }
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "e01c67ed63203931aba0f45fbc8c10e42ed4a66f" }
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "4ea3e1473de61d6b46f5420efe481c126790d800" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.3"
 base64 = "0.22"

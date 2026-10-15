@@ -29,6 +29,7 @@ use std::{
 #[derive(Parser)]
 #[command(name = "pumgye", version)]
 #[command(group(clap::ArgGroup::new("kubernetes_source").args(["inspect_kubernetes_rbac", "observe_kubernetes_rbac", "authorize_kubernetes_rbac"])))]
+#[cfg_attr(feature = "observed-authentication", command(group(clap::ArgGroup::new("plan_authentication").args(["authentication_live", "workload_observed_permits"]).multiple(true))))]
 struct Args {
     /// Continuously collect read-only Kubernetes RBAC observations over verified HTTPS.
     #[arg(long, requires_all = ["kubernetes_cluster", "kubernetes_api", "kubernetes_ca", "kubernetes_token"], conflicts_with = "inspect_kubernetes_rbac")]
@@ -87,6 +88,14 @@ struct Args {
     #[cfg(feature = "observed-authentication")]
     #[arg(long, requires_all = ["grpc_listen", "authentication_live", "permit_key", "network_live", "route_live", "projection_live"])]
     observed_permits: bool,
+    /// Enable Workload-only observed permits; requires its separate live owner.
+    #[cfg(feature = "observed-authentication")]
+    #[arg(long, requires_all = ["grpc_listen", "workload_authentication_live", "authentication_trust", "permit_key", "network_live", "route_live", "projection_live"])]
+    workload_observed_permits: bool,
+    /// Workload-specific authenticated Hopae endpoint resource configuration.
+    #[cfg(feature = "observed-authentication")]
+    #[arg(long)]
+    workload_authentication_live: Option<PathBuf>,
     /// Stable observed source authority base (1..64 ASCII identifier bytes).
     #[cfg(feature = "observed-authentication")]
     #[arg(long, default_value = "pumgye")]
@@ -98,12 +107,44 @@ struct Args {
     #[arg(long)]
     route_live: Option<PathBuf>,
     /// Require native Hopae projection plans for authenticated resource decisions.
-    #[arg(long, requires = "authentication_live", conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
+    #[arg(long, conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
+    #[cfg_attr(
+        feature = "observed-authentication",
+        arg(requires = "plan_authentication")
+    )]
+    #[cfg_attr(
+        not(feature = "observed-authentication"),
+        arg(requires = "authentication_live")
+    )]
     projection_live: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
     #[arg(long, default_value = "PUMGYE_DECISION_TOKEN")]
     decision_token_env: String,
+}
+impl Args {
+    fn validate_native_owners(&self) -> anyhow::Result<()> {
+        let has_authentication = self.authentication_live.is_some();
+        #[cfg(feature = "observed-authentication")]
+        let has_authentication = has_authentication
+            || (self.workload_observed_permits && self.workload_authentication_live.is_some());
+        anyhow::ensure!(
+            self.projection_live.is_none() || has_authentication,
+            "projection owner requires native authentication owner"
+        );
+        #[cfg(feature = "observed-authentication")]
+        {
+            anyhow::ensure!(
+                !self.observed_permits || self.authentication_live.is_some(),
+                "Service observed authentication owner required"
+            );
+            anyhow::ensure!(
+                !self.workload_observed_permits || self.workload_authentication_live.is_some(),
+                "Workload observed authentication owner required"
+            );
+        }
+        Ok(())
+    }
 }
 #[derive(Clone)]
 struct PeerIdentity(String);
@@ -126,6 +167,9 @@ struct Authority {
     source_ticks_floor: AtomicU64,
     #[cfg(feature = "observed-authentication")]
     observed_permits: std::sync::OnceLock<Arc<pumgye_server::observed_permit::Service>>,
+    #[cfg(feature = "observed-authentication")]
+    workload_observed_permits:
+        std::sync::OnceLock<Arc<pumgye_server::workload_observed_permit::Service>>,
     authority_epoch: String,
     projection_live: Option<Arc<pumgye_server::plan_live::Client>>,
     route_live: Option<Arc<pumgye_server::route_live::Client>>,
@@ -634,6 +678,7 @@ fn resource_route() -> axum::routing::MethodRouter<Arc<Authority>> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    args.validate_native_owners()?;
     let mapping = if let Some(path) = &args.kubernetes_mapping {
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -828,6 +873,24 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    #[cfg(feature = "observed-authentication")]
+    let workload_observed_auth = if args.workload_observed_permits {
+        Some(
+            pumgye_server::authentication_live_config::load_workload_observed(
+                args.workload_authentication_live
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("observed endpoint required"))?,
+                authentication_trust
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("observed trust required"))?
+                    .clone(),
+                &|name| std::env::var(name).ok(),
+            )
+            .map_err(|_| anyhow::anyhow!("observed authentication owner unavailable"))?,
+        )
+    } else {
+        None
+    };
     let mut receipt_keys = authentication_trust
         .as_ref()
         .map_or_else(Vec::new, |trust| trust.receipt_keys());
@@ -859,6 +922,8 @@ async fn main() -> anyhow::Result<()> {
         source_ticks_floor: AtomicU64::new(0),
         #[cfg(feature = "observed-authentication")]
         observed_permits: std::sync::OnceLock::new(),
+        #[cfg(feature = "observed-authentication")]
+        workload_observed_permits: std::sync::OnceLock::new(),
         authority_epoch,
         network_live,
         authentication_live,
@@ -905,6 +970,47 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("observed permit source unavailable"))?;
         authority
             .observed_permits
+            .set(owner)
+            .map_err(|_| anyhow::anyhow!("observed owner already installed"))?;
+    }
+    #[cfg(feature = "observed-authentication")]
+    if args.workload_observed_permits {
+        let auth = workload_observed_auth
+            .ok_or_else(|| anyhow::anyhow!("observed authentication owner unavailable"))?;
+        let slot = Arc::new(pumgye_server::authentication_workload_observed::OwnerSlot::default());
+        slot.replace(Some(auth.owner))
+            .map_err(|_| anyhow::anyhow!("observed authentication publication refused"))?;
+        let owner = pumgye_server::workload_observed_permit::Service::from_native(
+            pumgye_server::workload_observed_permit::Owners {
+                authentication: slot,
+                network: authority
+                    .network_live
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("workload network owner required"))?
+                    .clone(),
+                route: authority
+                    .route_live
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("workload route owner required"))?
+                    .clone(),
+                plan: authority
+                    .projection_live
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("workload plan owner required"))?
+                    .clone(),
+            },
+            authority
+                .permit_signer
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("workload signer required"))?
+                .clone(),
+            Arc::new(observed_native::Source(Arc::downgrade(&authority))),
+            &args.observed_authority,
+            auth.rates,
+        )
+        .map_err(|_| anyhow::anyhow!("observed permit source unavailable"))?;
+        authority
+            .workload_observed_permits
             .set(owner)
             .map_err(|_| anyhow::anyhow!("observed owner already installed"))?;
     }
@@ -1386,6 +1492,8 @@ mod tests {
             source_ticks_floor: AtomicU64::new(0),
             #[cfg(feature = "observed-authentication")]
             observed_permits: std::sync::OnceLock::new(),
+            #[cfg(feature = "observed-authentication")]
+            workload_observed_permits: std::sync::OnceLock::new(),
             authority_epoch: "owned-fixture-epoch".into(),
             permit_signer: None,
             authentication_trust: None,
@@ -1506,5 +1614,76 @@ mod tests {
         let (_, recovered) =
             store::Store::open(&root.path().join("authority.sqlite3"), None).unwrap();
         assert_eq!(recovered.revision, 2);
+    }
+}
+
+#[cfg(all(test, feature = "observed-authentication"))]
+mod workload_cli_tests {
+    use super::*;
+    fn parse(extra: &[&str]) -> Result<Args, clap::Error> {
+        Args::try_parse_from(std::iter::once("pumgye").chain(extra.iter().copied()))
+    }
+    #[test]
+    fn plan_owner_requires_complete_explicit_typed_activation() {
+        assert!(parse(&["--projection-live", "plan.json"]).is_err());
+        let service = parse(&[
+            "--projection-live",
+            "plan.json",
+            "--authentication-live",
+            "service.json",
+            "--authentication-trust",
+            "trust.json",
+        ])
+        .unwrap();
+        assert!(service.validate_native_owners().is_ok());
+        let complete = [
+            "--workload-observed-permits",
+            "--workload-authentication-live",
+            "workload.json",
+            "--authentication-trust",
+            "trust.json",
+            "--grpc-listen",
+            "127.0.0.1:7443",
+            "--permit-key",
+            "permit.json",
+            "--network-live",
+            "network.json",
+            "--route-live",
+            "route.json",
+            "--projection-live",
+            "plan.json",
+            "--tls-cert",
+            "server.pem",
+            "--tls-key",
+            "server.key",
+            "--client-ca",
+            "ca.pem",
+        ];
+        assert!(parse(&complete).unwrap().validate_native_owners().is_ok());
+        for missing in [
+            "--workload-authentication-live",
+            "--authentication-trust",
+            "--grpc-listen",
+            "--permit-key",
+            "--network-live",
+            "--route-live",
+            "--projection-live",
+        ] {
+            let mut incomplete = complete.to_vec();
+            let at = incomplete.iter().position(|v| *v == missing).unwrap();
+            incomplete.drain(at..at + 2);
+            assert!(parse(&incomplete).is_err(), "missing {missing}");
+        }
+        let mut both = complete.to_vec();
+        both.push("--observed-permits");
+        assert!(parse(&both).is_err());
+        both.extend(["--authentication-live", "service.json"]);
+        assert!(parse(&both).unwrap().validate_native_owners().is_ok());
+        let mut args = parse(&both).unwrap();
+        args.workload_authentication_live = None;
+        assert!(args.validate_native_owners().is_err());
+        args.workload_authentication_live = Some("workload.json".into());
+        args.authentication_live = None;
+        assert!(args.validate_native_owners().is_err());
     }
 }

@@ -101,6 +101,65 @@ impl Trust {
         }
         Ok(())
     }
+    /// Separate typed Workload trust compiled from the same native pins/scopes.
+    /// No Service decoder or caller-selected class participates in this path.
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn workload_observed_policy(
+        &self,
+        issuer_ref: &str,
+        minimum_application_generation: u64,
+        minimum_key_registry_revision: u64,
+    ) -> Result<hopae_grpc::workload_observed_client::WorkloadTrustPolicy, Refused> {
+        let policy = self.observed_policy(
+            issuer_ref,
+            minimum_application_generation,
+            minimum_key_registry_revision,
+        )?;
+        Ok(hopae_grpc::workload_observed_client::WorkloadTrustPolicy {
+            issuer_ref: policy.issuer_ref,
+            key_epoch: policy.key_epoch,
+            verifying_key: policy.verifying_key,
+            identity_authority: policy.identity_authority,
+            scopes: policy
+                .scopes
+                .into_iter()
+                .map(
+                    |scope| hopae_grpc::workload_observed_client::WorkloadScope {
+                        service: scope.service,
+                        audience: scope.audience,
+                    },
+                )
+                .collect(),
+            minimum_profile_revision: policy.minimum_profile_revision,
+            minimum_application_generation: policy.minimum_application_generation,
+            minimum_key_registry_revision: policy.minimum_key_registry_revision,
+        })
+    }
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn workload_observed_scope(
+        &self,
+        c: &hopae_grpc::v1::AuthenticationReceiptContext,
+    ) -> Result<(), Refused> {
+        let issuer = self.issuers.get(&c.issuer_ref).ok_or(Refused)?;
+        let identity = c.identity.as_ref().ok_or(Refused)?;
+        let epoch =
+            hopae_grpc::workload_epoch::decode(&c.identity_authority_epoch).map_err(|_| Refused)?;
+        if identity.kind != 3
+            || identity.aal != 0
+            || issuer.key_epoch != c.key_epoch
+            || epoch.authority != issuer.identity_epoch
+            || identity.revision != epoch.profile_revision
+            || identity.credential_generation != epoch.profile_revision
+            || issuer
+                .scopes
+                .get(&c.service)
+                .and_then(|audiences| audiences.get(&c.audience))
+                .is_none_or(|scope| identity.revision < scope.minimum_revision())
+        {
+            return Err(Refused);
+        }
+        Ok(())
+    }
     pub fn compile(document: Document) -> Result<Self, Refused> {
         if document.entries.is_empty() || document.entries.len() > 128 {
             return Err(Refused);

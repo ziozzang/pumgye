@@ -167,6 +167,79 @@ pub fn load_observed(
     })
 }
 
+/// Separate Workload client publication; Service activation is unchanged.
+#[cfg(feature = "observed-authentication")]
+pub struct ConfiguredWorkloadObserved {
+    pub owner:
+        std::sync::Arc<crate::authentication_workload_observed::AuthenticationOwnerGeneration>,
+    pub rates: hopae_grpc::receipt_time::ClockRates,
+}
+/// Additive observed native owner, using the same fixed endpoint resources.
+/// Strict Configured/ValidateService behavior remains unchanged.
+#[cfg(feature = "observed-authentication")]
+pub fn load_workload_observed(
+    path: &Path,
+    trust: std::sync::Arc<crate::authentication_config::Trust>,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Result<ConfiguredWorkloadObserved, crate::authentication::Refused> {
+    use crate::{
+        authentication::Refused,
+        authentication_workload_observed::{
+            AuthenticationOwnerGeneration, Configuration as ObservedConfiguration,
+        },
+    };
+    let bytes = read(path, 16 * 1024).map_err(|_| Refused)?;
+    let config: Configuration = serde_json::from_slice(&bytes).map_err(|_| Refused)?;
+    let bounds = config.observed_clock_rates.as_ref().ok_or(Refused)?;
+    let rates = || {
+        hopae_grpc::receipt_time::ClockRates::new(bounds.source_ppm, bounds.receiver_ppm)
+            .map_err(|_| Refused)
+    };
+    let native_rates = rates()?;
+    if !trust.has_issuer(&config.issuer_ref)
+        || config.token_env.is_empty()
+        || config.token_env.len() > 128
+        || !config
+            .token_env
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(Refused);
+    }
+    let token = Zeroizing::new(resolve(&config.token_env).ok_or(Refused)?);
+    let ca = read(&config.ca, 128 * 1024).map_err(|_| Refused)?;
+    let cert = read(&config.certificate, 128 * 1024).map_err(|_| Refused)?;
+    let key = read(&config.key, 128 * 1024).map_err(|_| Refused)?;
+    let mut nonce = [0; 16];
+    getrandom::fill(&mut nonce).map_err(|_| Refused)?;
+    let owner = AuthenticationOwnerGeneration::new(
+        trust,
+        ObservedConfiguration {
+            issuer_ref: &config.issuer_ref,
+            endpoint: hopae_grpc::observed_client::EndpointConfig {
+                address: &config.address,
+                server_name: &config.server_name,
+                ca: &ca,
+                certificate: &cert,
+                private_key: &key,
+                caller_key: &token,
+            },
+            minimum_application_generation: 1,
+            minimum_key_registry_revision: 1,
+        },
+        std::sync::Arc::new(hangang_runtime::time::ReceiverClock::new(nonce).map_err(|_| Refused)?),
+        rates()?,
+        hopae_grpc::observed_client::Limits {
+            concurrent: 128,
+            timeout: std::time::Duration::from_secs(1),
+        },
+    )?;
+    Ok(ConfiguredWorkloadObserved {
+        owner,
+        rates: native_rates,
+    })
+}
+
 #[cfg(all(test, feature = "observed-authentication"))]
 mod observed_tests {
     use super::*;

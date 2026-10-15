@@ -89,17 +89,61 @@ impl Signer {
         issued_ms: u64,
         expires_ms: u64,
     ) -> Result<pumgye_grpc::v1::ProjectionPermitReply, Refused> {
+        self.sign_observed_kind(
+            input,
+            binding,
+            issued_ms,
+            expires_ms,
+            hopae_grpc::PrincipalKind::Service,
+        )
+    }
+    /// Private Workload owner only; never selected from caller identity fields.
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn sign_observed_workload(
+        &self,
+        input: &pumgye_grpc::v1::AuthenticatedResourceRequest,
+        binding: pumgye_grpc::v1::PermitBinding,
+        issued_ms: u64,
+        expires_ms: u64,
+    ) -> Result<pumgye_grpc::v1::ProjectionPermitReply, Refused> {
+        self.sign_observed_kind(
+            input,
+            binding,
+            issued_ms,
+            expires_ms,
+            hopae_grpc::PrincipalKind::Workload,
+        )
+    }
+    #[cfg(feature = "observed-authentication")]
+    fn sign_observed_kind(
+        &self,
+        input: &pumgye_grpc::v1::AuthenticatedResourceRequest,
+        binding: pumgye_grpc::v1::PermitBinding,
+        issued_ms: u64,
+        expires_ms: u64,
+        kind: hopae_grpc::PrincipalKind,
+    ) -> Result<pumgye_grpc::v1::ProjectionPermitReply, Refused> {
         let mut context = input.context.clone().ok_or(Refused::InvalidBinding)?;
         context.issuer_ref = self.issuer.clone();
         context.key_epoch = self.key_epoch;
         let identity = context.identity.as_ref().ok_or(Refused::InvalidBinding)?;
+        if identity.kind
+            != match kind {
+                hopae_grpc::PrincipalKind::Service => 2,
+                hopae_grpc::PrincipalKind::Workload => 3,
+                _ => return Err(Refused::InvalidBinding),
+            }
+            || identity.aal != 0
+        {
+            return Err(Refused::InvalidBinding);
+        }
         let canonical = receipt_binding::Context {
             issuer_ref: &context.issuer_ref,
             key_epoch: context.key_epoch,
             identity_authority_epoch: &context.identity_authority_epoch,
             identity: receipt_binding::Identity {
                 subject_ref: &identity.subject_ref,
-                kind: hopae_grpc::PrincipalKind::Service,
+                kind,
                 aal: 0,
                 revision: identity.revision,
                 credential_generation: identity.credential_generation,

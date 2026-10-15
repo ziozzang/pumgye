@@ -41,7 +41,15 @@ pub fn verify(
     wire: &ProjectionPermitReply,
     now: u64,
 ) -> Result<Checked, Refused> {
-    verify_inner(signer, authority_epoch, input, wire, now, true)
+    verify_inner(
+        signer,
+        authority_epoch,
+        input,
+        wire,
+        now,
+        true,
+        hopae_grpc::PrincipalKind::Service,
+    )
 }
 /// Only the native observed permit owner uses this with its own process ticks.
 #[cfg(feature = "observed-authentication")]
@@ -52,8 +60,36 @@ pub(crate) fn verify_observed(
     wire: &ProjectionPermitReply,
     now: u64,
 ) -> Result<Checked, Refused> {
-    verify_inner(signer, authority_epoch, input, wire, now, false)
+    verify_inner(
+        signer,
+        authority_epoch,
+        input,
+        wire,
+        now,
+        false,
+        hopae_grpc::PrincipalKind::Service,
+    )
 }
+/// Workload observed owner only; source ticks never enter strict UTC validation.
+#[cfg(feature = "observed-authentication")]
+pub(crate) fn verify_observed_workload(
+    signer: &Signer,
+    authority_epoch: &str,
+    input: &AuthenticatedResourceRequest,
+    wire: &ProjectionPermitReply,
+    now: u64,
+) -> Result<Checked, Refused> {
+    verify_inner(
+        signer,
+        authority_epoch,
+        input,
+        wire,
+        now,
+        false,
+        hopae_grpc::PrincipalKind::Workload,
+    )
+}
+#[allow(clippy::too_many_arguments)]
 fn verify_inner(
     signer: &Signer,
     authority_epoch: &str,
@@ -61,6 +97,7 @@ fn verify_inner(
     wire: &ProjectionPermitReply,
     now: u64,
     strict_auth_expiry: bool,
+    kind: hopae_grpc::PrincipalKind,
 ) -> Result<Checked, Refused> {
     let key = signer.receipt_key();
     let mut expected_context = input.context.clone().ok_or(Refused)?;
@@ -76,7 +113,12 @@ fn verify_inner(
         || input.request_sha256.len() != 32
         || context != &expected_context
         || context.request_sha256 != input.request_sha256
-        || identity.kind != 2
+        || identity.kind
+            != match kind {
+                hopae_grpc::PrincipalKind::Service => 2,
+                hopae_grpc::PrincipalKind::Workload => 3,
+                _ => return Err(Refused),
+            }
         || identity.aal != 0
         || permit.resource != input.resource
         || permit.action != input.action
@@ -94,7 +136,7 @@ fn verify_inner(
         identity_authority_epoch: &context.identity_authority_epoch,
         identity: receipt_binding::Identity {
             subject_ref: &identity.subject_ref,
-            kind: hopae_grpc::PrincipalKind::Service,
+            kind,
             aal: 0,
             revision: identity.revision,
             credential_generation: identity.credential_generation,
@@ -300,5 +342,59 @@ mod tests {
                 "case {case}"
             );
         }
+    }
+    #[cfg(feature = "observed-authentication")]
+    #[test]
+    fn typed_observed_signing_and_verification_never_cross_principal_classes() {
+        let (signer, mut input, template) = fixture();
+        let binding = template.binding.unwrap();
+        for wire_kind in [1, 2, 3, 4, 0, u32::MAX] {
+            input
+                .context
+                .as_mut()
+                .unwrap()
+                .identity
+                .as_mut()
+                .unwrap()
+                .kind = wire_kind;
+            let service = signer.sign_observed(&input, binding.clone(), 100, 700);
+            let workload = signer.sign_observed_workload(&input, binding.clone(), 100, 700);
+            assert_eq!(service.is_ok(), wire_kind == 2);
+            assert_eq!(workload.is_ok(), wire_kind == 3);
+            if let Ok(wire) = service {
+                assert!(verify_observed(&signer, "owned-process", &input, &wire, 101).is_ok());
+                assert!(
+                    verify_observed_workload(&signer, "owned-process", &input, &wire, 101).is_err()
+                );
+            }
+            if let Ok(wire) = workload {
+                assert!(
+                    verify_observed_workload(&signer, "owned-process", &input, &wire, 101).is_ok()
+                );
+                assert!(verify_observed(&signer, "owned-process", &input, &wire, 101).is_err());
+                assert!(verify(&signer, "owned-process", &input, &wire, 101).is_err());
+            }
+        }
+        input
+            .context
+            .as_mut()
+            .unwrap()
+            .identity
+            .as_mut()
+            .unwrap()
+            .kind = 3;
+        input
+            .context
+            .as_mut()
+            .unwrap()
+            .identity
+            .as_mut()
+            .unwrap()
+            .aal = 1;
+        assert!(
+            signer
+                .sign_observed_workload(&input, binding, 100, 700)
+                .is_err()
+        );
     }
 }

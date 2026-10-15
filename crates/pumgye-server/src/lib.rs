@@ -32,3 +32,8 @@ pub mod authentication_observed;
 /// Opt-in native observed permit owner and generated RPC adapter.
 #[cfg(feature = "observed-authentication")]
 pub mod observed_permit;
+
+#[cfg(feature = "observed-authentication")]
+pub mod authentication_workload_observed;
+#[cfg(feature = "observed-authentication")]
+pub mod workload_observed_permit;

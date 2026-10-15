@@ -679,7 +679,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hopae-grpc"
 version = "0.0.3"
-source = "git+https://github.com/ziozzang/hopae?rev=e01c67ed63203931aba0f45fbc8c10e42ed4a66f#e01c67ed63203931aba0f45fbc8c10e42ed4a66f"
+source = "git+https://github.com/ziozzang/hopae?rev=4ea3e1473de61d6b46f5420efe481c126790d800#4ea3e1473de61d6b46f5420efe481c126790d800"
 dependencies = [
  "ed25519-dalek",
  "hangang-runtime",

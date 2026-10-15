@@ -351,3 +351,5 @@ pins/owner trust refusal, restoration, durable withdrawal and authority outages.
 No-permit compatibility passes separately. Receiver paired replay/projection,
 fleet/restore retirement, static release, Kubernetes and operating adoption and
 throughput are still open.
+
+Workload-only native observed permits are additive and opt-in; see [the contract and qualification limits](docs/WORKLOAD_OBSERVED_PERMITS.md). Service/default APIs are preserved.
