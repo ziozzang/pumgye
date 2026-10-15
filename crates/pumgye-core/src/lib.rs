@@ -1,4 +1,5 @@
 //! Deterministic authorization. Callers must authenticate identity and network evidence.
+pub mod kubernetes_authorization;
 use anyhow::{Result, ensure};
 use guard_core::prefix::PrefixTrie;
 use ipnet::IpNet;
@@ -12,6 +13,8 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Policy {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kubernetes_authorization: Option<kubernetes_authorization::KubernetesAuthorization>,
     pub information_classes: Vec<String>,
     pub services: BTreeMap<String, Service>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -145,6 +148,7 @@ impl Rights {
     }
 }
 pub struct CompiledPolicy {
+    kubernetes_authorization: kubernetes_authorization::CompiledMapping,
     services: HashMap<String, CompiledService>,
     classes: HashMap<String, u64>,
     resources: HashMap<String, CompiledResource>,
@@ -391,11 +395,16 @@ impl Policy {
                 },
             );
         }
-        Ok(CompiledPolicy {
+        let mut compiled = CompiledPolicy {
             services,
             classes,
             resources,
-        })
+            kubernetes_authorization: Default::default(),
+        };
+        if let Some(mapping) = &self.kubernetes_authorization {
+            compiled.kubernetes_authorization = mapping.compile(&compiled)?;
+        }
+        Ok(compiled)
     }
 }
 enum Principal<'a> {

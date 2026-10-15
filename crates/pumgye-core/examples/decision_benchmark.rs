@@ -66,6 +66,7 @@ fn main() -> anyhow::Result<()> {
         require_guard: true,
     };
     let compiled = Policy {
+        kubernetes_authorization: None,
         version: 1,
         resources: BTreeMap::new(),
         information_classes: vec!["public".into()],
