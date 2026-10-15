@@ -20,6 +20,31 @@ def verify(root):
         for line in (root/'SHA256SUMS').read_text().splitlines():
             digest,name=line.split('  ')
             if Path(name).name!=name or hashlib.sha256((root/name).read_bytes()).hexdigest()!=digest:raise ValueError('asset checksum mismatch')
+# Deliberate allowlist: never recursively include local credentials or evidence.
+LEGACY_DOCS=('SERVER.md','SERVER.ko.md','GRPC.md','GRPC.ko.md','KUBERNETES.md','KUBERNETES.ko.md','AUTHENTICATION_RECEIPTS.md','AUTHENTICATION_RECEIPTS.ko.md','OBSERVED_PERMITS.md','OBSERVED_PERMITS.ko.md','WORKLOAD_OBSERVED_PERMITS.md','WORKLOAD_OBSERVED_PERMITS.ko.md')
+SAR_DOCS=tuple(stem+suffix for stem in ('KUBERNETES_API_CONTEXT','KUBERNETES_AUTHORIZATION_MAPPING','KUBERNETES_SAR_WIRE','KUBERNETES_SAR_SERVER','RELEASE_0_1_9') for suffix in ('.md','.ko.md'))
+def package_sources(binary):
+    sources={'pumgye':binary,'LICENSE':ROOT/'LICENSE','README.md':ROOT/'README.md','README.ko.md':ROOT/'README.ko.md','release-public-key.txt':ROOT/'release-public-key.txt'}
+    for name in LEGACY_DOCS+SAR_DOCS:
+        p=ROOT/'docs'/name
+        if p.is_file():sources['docs/'+name]=p
+        elif name in SAR_DOCS:raise ValueError('required SAR release documentation missing')
+    return sources
+
+def write_package(binary,destination,target,version):
+    """Write an unsigned reviewable archive; target/version are trusted repo metadata.
+
+    The signed preparation path uses this exact helper, so qualification does not
+    need release keys or fake signatures. The caller owns an empty output path.
+    """
+    sources=package_sources(binary)
+    folder=f'pumgye-v{version}-linux-musl-{TARGETS[target]}'
+    with destination.open('xb') as raw,gzip.GzipFile(fileobj=raw,mode='wb',filename='',mtime=0) as gz,tarfile.open(fileobj=gz,mode='w') as tar:
+        for name,p in sources.items():
+            info=tarfile.TarInfo(folder+'/'+name);info.size=p.stat().st_size;info.mode=0o755 if name=='pumgye' else 0o644;info.mtime=0
+            with p.open('rb') as source:tar.addfile(info,source)
+    return sources
+
 def prepare(target,output,signer,seed):
     version=tomllib.loads((ROOT/'Cargo.toml').read_text())['workspace']['package']['version']
     binary=ROOT/'target'/target/'release/pumgye'
@@ -30,15 +55,7 @@ def prepare(target,output,signer,seed):
     if seed.resolve()==output.resolve() or output.resolve() in seed.resolve().parents or seed.resolve() in output.resolve().parents:raise ValueError('output must be separate from seed')
     output.mkdir(parents=True,exist_ok=True)
     artifact=output/('pumgye-'+target);artifact.write_bytes(binary.read_bytes());artifact.chmod(0o755)
-    folder=f'pumgye-v{version}-linux-musl-{TARGETS[target]}'
-    sources={'pumgye':binary,'LICENSE':ROOT/'LICENSE','README.md':ROOT/'README.md','README.ko.md':ROOT/'README.ko.md','release-public-key.txt':ROOT/'release-public-key.txt'}
-    for name in ['SERVER.md','SERVER.ko.md','GRPC.md','GRPC.ko.md','KUBERNETES.md','KUBERNETES.ko.md','AUTHENTICATION_RECEIPTS.md','AUTHENTICATION_RECEIPTS.ko.md','OBSERVED_PERMITS.md','OBSERVED_PERMITS.ko.md','WORKLOAD_OBSERVED_PERMITS.md','WORKLOAD_OBSERVED_PERMITS.ko.md']:
-        p=ROOT/'docs'/name
-        if p.is_file():sources['docs/'+name]=p
-    with (output/(folder+'.tar.gz')).open('wb') as raw,gzip.GzipFile(fileobj=raw,mode='wb',filename='',mtime=0) as gz,tarfile.open(fileobj=gz,mode='w') as tar:
-        for name,p in sources.items():
-            info=tarfile.TarInfo(folder+'/'+name);info.size=p.stat().st_size;info.mode=0o755 if name=='pumgye' else 0o644;info.mtime=0
-            with p.open('rb') as source:tar.addfile(info,source)
+    write_package(binary,output/f'pumgye-v{version}-linux-musl-{TARGETS[target]}.tar.gz',target,version)
     payload={'version':version,'target':target,'artifact_url':f'https://github.com/ziozzang/pumgye/releases/download/v{version}/{artifact.name}','sha256':hashlib.sha256(artifact.read_bytes()).hexdigest(),'size':artifact.stat().st_size}
     with tempfile.TemporaryDirectory(prefix='pumgye-payload-') as td:
         p=Path(td)/'payload.json';p.write_text(json.dumps(payload,separators=(',',':')))
