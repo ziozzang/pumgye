@@ -255,3 +255,25 @@ network refusal/restoration, identity withdrawal/restoration and outage. Its
 route/projection owners are local synthetic fixture state. This is not a permit
 RPC, distributed owner discovery, downstream replay consumption or production
 activation. The low-level `issue` API still requires native caller-owned facts.
+
+### Native gateway route observations (source integration)
+
+`--route-live` loads reference-only native route resources using the same fields
+as network authority configuration: address, server_name, ca, certificate, key
+and token_env. Only a fixed HTTPS authority is accepted, with no userinfo, path
+or query. Construction validates TLS lazily to avoid a gateway/authority startup
+cycle; actual queries still require a verified mTLS exchange within one second.
+
+When configured, authenticated resource decisions require a 32-byte native route
+reference and destination digest. Owner-derived scope/IP must match the checked
+receipt and requested resource/action. The server queries the actual owner both
+before and after identity/network/policy evaluation; missing configuration or
+references, mismatches, expiry and failure refuse without fallback. The reply's
+`route_observed` marker distinguishes this path from legacy zero-TTL observations.
+These observations are not signed permission or distributed leases.
+
+The client has private observation constructors, bounded admission/decoding,
+correlation and scope checks, monotonic exchange-time accounting and configured
+client identity binding. Source workspace tests and strict Clippy pass. Actual
+gateway reference delivery, end-to-end route qualification, release and operating
+adoption remain the next integration gate. Existing deployments are unchanged.

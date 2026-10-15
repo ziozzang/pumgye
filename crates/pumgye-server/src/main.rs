@@ -86,6 +86,9 @@ struct Args {
     /// Native Sumunjang mTLS observation resources.
     #[arg(long, conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
     network_live: Option<PathBuf>,
+    /// Require live native gateway route ownership for authenticated resource decisions.
+    #[arg(long)]
+    route_live: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
     #[arg(long, default_value = "PUMGYE_DECISION_TOKEN")]
@@ -105,6 +108,7 @@ struct View {
     source_expires: Option<std::time::Instant>,
 }
 struct Authority {
+    route_live: Option<pumgye_server::route_live::Client>,
     network_live: Option<pumgye_server::network_live::Client>,
     authentication_live: Option<pumgye_server::authentication_live_config::Configured>,
     permit_signer: Option<pumgye_server::permit::Signer>,
@@ -509,6 +513,7 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "policy_source":if a.kubernetes_owned {"kubernetes"} else {"native"},
         "source_state":source_state,
         "permit_key_configured":a.permit_signer.is_some(),
+        "route_live_configured":a.route_live.is_some(),
         "authentication_live_configured":a.authentication_live.is_some(),
         "network_live_configured":a.network_live.is_some(),
         "authentication_trust_entries":a.authentication_trust.as_ref().map_or(0, |trust| trust.entries()),
@@ -743,6 +748,14 @@ async fn main() -> anyhow::Result<()> {
     } else {
         (None, None)
     };
+    let route_live = args
+        .route_live
+        .as_deref()
+        .map(|path| {
+            pumgye_server::route_live_config::load(path, &|name| std::env::var(name).ok())
+                .map_err(|_| anyhow::anyhow!("native route ownership resources unavailable"))
+        })
+        .transpose()?;
     let permit_signer = args
         .permit_key
         .as_deref()
@@ -803,6 +816,7 @@ async fn main() -> anyhow::Result<()> {
         network_live,
         authentication_live,
         permit_signer,
+        route_live,
         authentication_trust,
         view: ArcSwap::from_pointee(View {
             document,
@@ -1292,6 +1306,7 @@ mod tests {
             authentication_trust: None,
             authentication_live: None,
             network_live: None,
+            route_live: None,
             view: ArcSwap::from_pointee(View {
                 document,
                 compiled,

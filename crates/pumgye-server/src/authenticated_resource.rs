@@ -47,7 +47,15 @@ impl ReceiptContext {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct RouteReference {
+    pub(crate) reference: Vec<u8>,
+    pub(crate) destination_sha256: Vec<u8>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Query {
+    #[serde(default)]
+    pub(crate) route: Option<RouteReference>,
     pub(crate) request_id: u64,
     pub(crate) minimum_revision: u64,
     pub(crate) resource: String,
@@ -59,6 +67,7 @@ pub(crate) struct Query {
 }
 #[derive(Serialize)]
 pub(crate) struct Outcome {
+    pub(crate) route_observed: bool,
     version: u8,
     pub(crate) request_id: u64,
     pub(crate) revision: u64,
@@ -146,6 +155,40 @@ pub(crate) async fn evaluate(
     let checked = trust
         .verify(&context, &q.receipt, &expected, now())
         .map_err(|_| StatusCode::FORBIDDEN)?;
+    let route_expected = q
+        .route
+        .as_ref()
+        .map(|route| -> Result<_, StatusCode> {
+            Ok(pumgye_server::route_live::Expected {
+                reference: route
+                    .reference
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| StatusCode::BAD_REQUEST)?,
+                request_sha256: &expected,
+                destination_sha256: route
+                    .destination_sha256
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| StatusCode::BAD_REQUEST)?,
+                service: context.service,
+                audience: context.audience,
+                resource: &q.resource,
+                action: &q.action,
+                ip: q.ip,
+            })
+        })
+        .transpose()?;
+    let route_observation = match (&a.route_live, route_expected) {
+        (Some(client), Some(expected)) => Some(
+            client
+                .observe(expected, &now)
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+        ),
+        (None, None) => None,
+        _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
     let view = a.view.load_full();
     let current = || {
         a.healthy.load(Ordering::Acquire)
@@ -191,6 +234,23 @@ pub(crate) async fn evaluate(
         Err(pumgye_server::authorization::Refused::Denied(_)) => false,
         Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
     };
+    // Requery the actual owner after native identity/network/policy evaluation.
+    // A first observation is not a distributed lease or a substitute for this.
+    if let Some(prior) = route_observation.as_ref() {
+        let client = a
+            .route_live
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let expected = route_expected.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let final_route = client
+            .observe(expected, &now)
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if !prior.valid_at(now()) || !final_route.valid_at(now()) || !prior.same_owner(&final_route)
+        {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    }
     if !current()
         || !observation.valid_for(&checked, now())
         || !network.valid_at(q.ip, now())
@@ -199,6 +259,7 @@ pub(crate) async fn evaluate(
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     Ok(Outcome {
+        route_observed: route_observation.is_some(),
         version: 1,
         request_id: q.request_id,
         revision: view.document.revision,

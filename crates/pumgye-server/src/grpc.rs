@@ -69,6 +69,12 @@ impl
         )
         .map_err(|_| Status::invalid_argument("invalid service context"))?;
         let query = crate::authenticated_resource::Query {
+            route: input
+                .route
+                .map(|route| crate::authenticated_resource::RouteReference {
+                    reference: route.reference,
+                    destination_sha256: route.destination_sha256,
+                }),
             request_id: input.request_id,
             minimum_revision: input.minimum_revision,
             ip,
@@ -104,6 +110,7 @@ impl
                 _ => Status::unavailable("native authority unavailable"),
             })?;
         Ok(Response::new(pumgye_grpc::v1::AuthenticatedResourceReply {
+            route_observed: result.route_observed,
             request_id: input.request_id,
             revision: result.revision,
             network_revision: result.network_revision,
@@ -282,6 +289,7 @@ mod tests {
         let owner = crate::tests::authority(root.path());
         let service = Service(owner.clone());
         let message = pumgye_grpc::v1::AuthenticatedResourceRequest {
+            route: None,
             request_id: 1,
             minimum_revision: 1,
             ip: vec![192, 0, 2, 1],
@@ -462,6 +470,7 @@ mod tests {
         let mut authenticated = pumgye_grpc::v1::authenticated_resource_authorization_client::AuthenticatedResourceAuthorizationClient::new(channel.clone());
         let authenticated_request = |token: &str| {
             let mut request = Request::new(pumgye_grpc::v1::AuthenticatedResourceRequest {
+                route: None,
                 request_id: 43,
                 minimum_revision: 1,
                 ip: vec![192, 0, 2, 9],

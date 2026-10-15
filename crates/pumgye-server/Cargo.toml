@@ -10,6 +10,7 @@ name = "pumgye"
 path = "src/main.rs"
 
 [dependencies]
+hangang-route-grpc = { git = "https://github.com/ziozzang/hangang", rev = "dfc099ea763650f98b31110f0720cf3d9042f3ec" }
 guard-grpc = { git = "https://github.com/ziozzang/sumunjang", rev = "1f70428e9481654845a696cf30cdb917a6aef009" }
 hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "73796eea0466636acfd771964ac40f02328b22af" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }

@@ -6,14 +6,14 @@ use tonic::{
 };
 #[derive(Debug)]
 pub(crate) struct Refused;
-pub(crate) async fn connect(
+fn endpoint(
     address: &str,
     server_name: &str,
     ca: &[u8],
     certificate: &[u8],
     key: &[u8],
     token: &str,
-) -> Result<(Channel, MetadataValue<tonic::metadata::Ascii>), Refused> {
+) -> Result<(Endpoint, MetadataValue<tonic::metadata::Ascii>), Refused> {
     if !address.starts_with("https://")
         || address.len() > 256
         || server_name.is_empty()
@@ -29,9 +29,11 @@ pub(crate) async fn connect(
     {
         return Err(crate::authority_transport::Refused);
     }
-    let credential = format!("Bearer {token}")
-        .parse()
-        .map_err(|_| crate::authority_transport::Refused)?;
+    let mut credential: MetadataValue<tonic::metadata::Ascii> =
+        format!("Bearer {token}")
+            .parse()
+            .map_err(|_| crate::authority_transport::Refused)?;
+    credential.set_sensitive(true);
     let tls = ClientTlsConfig::new()
         .domain_name(server_name)
         .ca_certificate(Certificate::from_pem(ca))
@@ -43,6 +45,28 @@ pub(crate) async fn connect(
         .tcp_nodelay(true)
         .tls_config(tls)
         .map_err(|_| crate::authority_transport::Refused)?;
+    Ok((endpoint, credential))
+}
+pub(crate) fn lazy(
+    address: &str,
+    server_name: &str,
+    ca: &[u8],
+    certificate: &[u8],
+    key: &[u8],
+    token: &str,
+) -> Result<(Channel, MetadataValue<tonic::metadata::Ascii>), Refused> {
+    let (endpoint, credential) = endpoint(address, server_name, ca, certificate, key, token)?;
+    Ok((endpoint.connect_lazy(), credential))
+}
+pub(crate) async fn connect(
+    address: &str,
+    server_name: &str,
+    ca: &[u8],
+    certificate: &[u8],
+    key: &[u8],
+    token: &str,
+) -> Result<(Channel, MetadataValue<tonic::metadata::Ascii>), Refused> {
+    let (endpoint, credential) = endpoint(address, server_name, ca, certificate, key, token)?;
     let channel = tokio::time::timeout(Duration::from_secs(1), endpoint.connect())
         .await
         .map_err(|_| crate::authority_transport::Refused)?

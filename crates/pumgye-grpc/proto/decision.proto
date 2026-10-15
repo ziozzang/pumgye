@@ -43,5 +43,8 @@ message ResourceDecisionReply { uint64 request_id = 1; uint64 revision = 2; Verd
 
 // The canonical Hopae generated context is shared without copying or JSON parsing.
 service AuthenticatedResourceAuthorization { rpc Decide(AuthenticatedResourceRequest) returns (AuthenticatedResourceReply); }
-message AuthenticatedResourceRequest { uint64 request_id = 1; uint64 minimum_revision = 2; bytes ip = 3; string resource = 4; string action = 5; hangang.hopae.v1.AuthenticationReceiptContext context = 6; bytes receipt = 7; bytes request_sha256 = 8; }
-message AuthenticatedResourceReply { uint64 request_id = 1; uint64 revision = 2; uint64 network_revision = 3; Verdict verdict = 4; uint32 cache_ttl_ms = 5; }
+message AuthenticatedResourceRequest { uint64 request_id = 1; uint64 minimum_revision = 2; bytes ip = 3; string resource = 4; string action = 5; hangang.hopae.v1.AuthenticationReceiptContext context = 6; bytes receipt = 7; bytes request_sha256 = 8; NativeRouteReference route = 9; }
+message AuthenticatedResourceReply { uint64 request_id = 1; uint64 revision = 2; uint64 network_revision = 3; Verdict verdict = 4; uint32 cache_ttl_ms = 5; bool route_observed = 6; }
+
+// Opaque native reference; destination is a digest, never a caller-selected URL.
+message NativeRouteReference { bytes reference = 1; bytes destination_sha256 = 2; }

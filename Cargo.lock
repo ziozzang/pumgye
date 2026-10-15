@@ -609,6 +609,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hangang-route-grpc"
+version = "0.1.0"
+source = "git+https://github.com/ziozzang/hangang?rev=dfc099ea763650f98b31110f0720cf3d9042f3ec#dfc099ea763650f98b31110f0720cf3d9042f3ec"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "hangang-runtime"
 version = "0.1.2"
 source = "git+https://github.com/ziozzang/hangang-runtime?rev=819177c631acb43dcdac8662403e80a13bb6c636#819177c631acb43dcdac8662403e80a13bb6c636"
@@ -1293,6 +1304,7 @@ dependencies = [
  "fs2",
  "getrandom 0.3.4",
  "guard-grpc",
+ "hangang-route-grpc",
  "hangang-runtime",
  "hopae-grpc",
  "hyper-util",

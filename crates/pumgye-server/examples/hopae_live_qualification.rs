@@ -99,6 +99,7 @@ async fn endpoint(
             std::net::IpAddr::V6(ip) => ip.octets().to_vec(),
         };
         let mut request = tonic::Request::new(pumgye_grpc::v1::AuthenticatedResourceRequest {
+            route: None,
             request_id: 1,
             minimum_revision: 1,
             ip: packed,
