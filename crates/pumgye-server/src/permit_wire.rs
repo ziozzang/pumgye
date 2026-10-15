@@ -41,6 +41,27 @@ pub fn verify(
     wire: &ProjectionPermitReply,
     now: u64,
 ) -> Result<Checked, Refused> {
+    verify_inner(signer, authority_epoch, input, wire, now, true)
+}
+/// Only the native observed permit owner uses this with its own process ticks.
+#[cfg(feature = "observed-authentication")]
+pub(crate) fn verify_observed(
+    signer: &Signer,
+    authority_epoch: &str,
+    input: &AuthenticatedResourceRequest,
+    wire: &ProjectionPermitReply,
+    now: u64,
+) -> Result<Checked, Refused> {
+    verify_inner(signer, authority_epoch, input, wire, now, false)
+}
+fn verify_inner(
+    signer: &Signer,
+    authority_epoch: &str,
+    input: &AuthenticatedResourceRequest,
+    wire: &ProjectionPermitReply,
+    now: u64,
+    strict_auth_expiry: bool,
+) -> Result<Checked, Refused> {
     let key = signer.receipt_key();
     let mut expected_context = input.context.clone().ok_or(Refused)?;
     expected_context.issuer_ref = key.issuer_ref.clone();
@@ -108,7 +129,9 @@ pub fn verify(
         .map_err(|_| Refused)?;
     let expires_ms = checked.claims().expires_ms;
     // Authentication is independently verified by the following native evaluation.
-    if expires_ms > u64::from_be_bytes(input.receipt[10..18].try_into().map_err(|_| Refused)?) {
+    if strict_auth_expiry
+        && expires_ms > u64::from_be_bytes(input.receipt[10..18].try_into().map_err(|_| Refused)?)
+    {
         return Err(Refused);
     }
     Ok(Checked {

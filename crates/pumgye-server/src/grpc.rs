@@ -380,6 +380,42 @@ impl Authorization for Service {
         }))
     }
 }
+#[cfg(feature = "observed-authentication")]
+#[tonic::async_trait]
+impl pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPermits for Service {
+    async fn issue(
+        &self,
+        request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ObservedProjectionPermitReply>, Status> {
+        let _admission = self.admission(request.metadata())?;
+        let owner = self
+            .0
+            .observed_permits
+            .get()
+            .ok_or_else(|| Status::unavailable("observed permit owner not configured"))?;
+        let (metadata, _, input) = request.into_parts();
+        owner
+            .issue(input, &|| self.caller(&metadata).is_ok())
+            .await
+            .map(Response::new)
+    }
+    async fn observe(
+        &self,
+        request: Request<pumgye_grpc::v1::PermitValidationRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ObservedPermitTimeReply>, Status> {
+        let _admission = self.admission(request.metadata())?;
+        let owner = self
+            .0
+            .observed_permits
+            .get()
+            .ok_or_else(|| Status::unavailable("observed permit owner not configured"))?;
+        let (metadata, _, input) = request.into_parts();
+        owner
+            .observe(input, &|| self.caller(&metadata).is_ok())
+            .await
+            .map(Response::new)
+    }
+}
 pub async fn serve(
     listener: TcpListener,
     tls: ServerTlsConfig,
@@ -388,7 +424,7 @@ pub async fn serve(
 ) -> Result<()> {
     let incoming = hangang_runtime::incoming(listener);
     let ingress = Arc::new(tokio::sync::Semaphore::new(UNARY_INGRESS_SLOTS));
-    hangang_runtime::server(tls)?
+    let server = hangang_runtime::server(tls)?
         .add_service(authenticate_transport(
             UnaryIngress::new(AuthorizationServer::new(Service(authority.clone()))
                 .max_decoding_message_size(2048)
@@ -404,7 +440,12 @@ pub async fn serve(
             authority.clone(),
         ))
         .add_service(authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128), ingress.clone(), 4096), authority.clone()))
-        .add_service(authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048), ingress, 8192), authority))
+        .add_service(authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048), ingress.clone(), 8192), authority.clone()));
+    #[cfg(feature = "observed-authentication")]
+    let server = server.add_service(authenticate_transport(UnaryIngress::new(
+        pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072),
+        ingress, 8192), authority));
+    server
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
     Ok(())
@@ -591,6 +632,8 @@ mod tests {
                 ..document
             },
             source_expires: None,
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -772,6 +815,8 @@ mod tests {
             compiled: document.policy.compile().unwrap(),
             document,
             source_expires: None,
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         let reply = client
             .decide(request(&owner.decision))
@@ -822,6 +867,8 @@ mod tests {
                 ..document
             },
             source_expires: None,
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         let service = Service(owner.clone());
         let request = |token: &str| {
@@ -1006,6 +1053,8 @@ mod tests {
             compiled: document.policy.compile().unwrap(),
             document,
             source_expires: Some(std::time::Instant::now()),
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         let reply = Service(a)
             .decide(request("fixture-decision-credential"))
@@ -1127,7 +1176,7 @@ mod tests {
         http::Response<Body>,
         std::convert::Infallible,
     > {
-        let limit = [2048, 2048, 4096, 8192][kind];
+        let limit = [2048, 2048, 4096, 8192, 8192][kind];
         macro_rules! wrap {
             ($server:expr) => {
                 tower::util::BoxCloneService::new(
@@ -1146,6 +1195,8 @@ mod tests {
                 1 => wrap!(pumgye_grpc::v1::resource_authorization_server::ResourceAuthorizationServer::new(Service(owner.clone())).max_decoding_message_size(2048).max_encoding_message_size(1024)),
                 2 => wrap!(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(owner.clone())).max_decoding_message_size(4096).max_encoding_message_size(128)),
                 3 => wrap!(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048)),
+                #[cfg(feature = "observed-authentication")]
+                4 => wrap!(pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072)),
                 _ => panic!("unknown test service"),
             }
     }
@@ -1159,6 +1210,18 @@ mod tests {
         ),
         (3, "/hangang.pumgye.v1.ProjectionPermits/Issue", 8192),
         (3, "/hangang.pumgye.v1.ProjectionPermits/Validate", 8192),
+        #[cfg(feature = "observed-authentication")]
+        (
+            4,
+            "/hangang.pumgye.v1.ObservedProjectionPermits/Issue",
+            8192,
+        ),
+        #[cfg(feature = "observed-authentication")]
+        (
+            4,
+            "/hangang.pumgye.v1.ObservedProjectionPermits/Observe",
+            8192,
+        ),
     ];
     #[tokio::test]
     async fn unary_ingress_refuses_two_frames_without_handler_execution() {

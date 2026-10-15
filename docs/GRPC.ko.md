@@ -90,3 +90,6 @@ Allow만 비공개 콜백을 호출하고 불변 소유자 자원 메타데이�
 후보 생성 중 같은 리비전 스냅샷 교체와 건강 상태 회수를 검사합니다. 품계 서명
 경계의 준비이며 호패 receipt 검증과 서명 permit 발급은 아직 없습니다. 자원
 HTTP의 네이티브 서비스 문법도 gRPC와 같은 기준으로 검증합니다.
+
+
+[네이티브 observed permit](OBSERVED_PERMITS.ko.md)에서 opt-in BOOTTIME permit RPC를 설명한다.

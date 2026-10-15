@@ -101,3 +101,6 @@ revision floors and same-revision snapshot replacement or health retirement duri
 candidate production. This prepares the Pumgye signer boundary; it does not verify
 Hopae receipts or issue a signed permit yet. Resource HTTP now also validates native
 service syntax consistently with gRPC.
+
+
+[Native observed permits](OBSERVED_PERMITS.md) documents the opt-in BOOTTIME permit RPC protocol.

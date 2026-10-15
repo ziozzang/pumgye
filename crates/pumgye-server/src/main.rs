@@ -83,6 +83,14 @@ struct Args {
     /// Native mTLS live-validation resources for one pinned Hopae issuer.
     #[arg(long, requires = "authentication_trust", conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
     authentication_live: Option<PathBuf>,
+    /// Enable separate observed permit RPCs on the existing mTLS gRPC listener.
+    #[cfg(feature = "observed-authentication")]
+    #[arg(long, requires_all = ["grpc_listen", "authentication_live", "permit_key", "network_live", "route_live", "projection_live"])]
+    observed_permits: bool,
+    /// Stable observed source authority base (1..64 ASCII identifier bytes).
+    #[cfg(feature = "observed-authentication")]
+    #[arg(long, default_value = "pumgye")]
+    observed_authority: String,
     /// Native Sumunjang mTLS observation resources.
     #[arg(long, conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
     network_live: Option<PathBuf>,
@@ -105,19 +113,27 @@ struct Document {
     revision: u64,
     policy: Policy,
 }
+#[cfg(feature = "observed-authentication")]
+mod observed_native;
 struct View {
     document: Document,
     compiled: CompiledPolicy,
     source_expires: Option<std::time::Instant>,
+    #[cfg(feature = "observed-authentication")]
+    source_observed_deadline: Option<hangang_runtime::time::LocalDeadline>,
 }
 struct Authority {
+    #[cfg(feature = "observed-authentication")]
+    source_clock: hangang_runtime::time::ReceiverClock,
+    #[cfg(feature = "observed-authentication")]
+    observed_permits: std::sync::OnceLock<Arc<pumgye_server::observed_permit::Service>>,
     authority_epoch: String,
-    projection_live: Option<pumgye_server::plan_live::Client>,
-    route_live: Option<pumgye_server::route_live::Client>,
-    network_live: Option<pumgye_server::network_live::Client>,
+    projection_live: Option<Arc<pumgye_server::plan_live::Client>>,
+    route_live: Option<Arc<pumgye_server::route_live::Client>>,
+    network_live: Option<Arc<pumgye_server::network_live::Client>>,
     authentication_live: Option<pumgye_server::authentication_live_config::Configured>,
-    permit_signer: Option<pumgye_server::permit::Signer>,
-    authentication_trust: Option<pumgye_server::authentication_config::Trust>,
+    permit_signer: Option<Arc<pumgye_server::permit::Signer>>,
+    authentication_trust: Option<Arc<pumgye_server::authentication_config::Trust>>,
     view: ArcSwap<View>,
     store: std::sync::Mutex<store::Store>,
     admin: String,
@@ -436,6 +452,8 @@ async fn publish(
             document: next.clone(),
             compiled,
             source_expires: None,
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         Ok(Json(next))
     })
@@ -762,7 +780,8 @@ async fn main() -> anyhow::Result<()> {
             pumgye_server::route_live_config::load_plan(path, &|name| std::env::var(name).ok())
                 .map_err(|_| anyhow::anyhow!("native projection plan resources unavailable"))
         })
-        .transpose()?;
+        .transpose()?
+        .map(Arc::new);
     let route_live = args
         .route_live
         .as_deref()
@@ -770,7 +789,8 @@ async fn main() -> anyhow::Result<()> {
             pumgye_server::route_live_config::load(path, &|name| std::env::var(name).ok())
                 .map_err(|_| anyhow::anyhow!("native route ownership resources unavailable"))
         })
-        .transpose()?;
+        .transpose()?
+        .map(Arc::new);
     let permit_signer = args
         .permit_key
         .as_deref()
@@ -778,7 +798,8 @@ async fn main() -> anyhow::Result<()> {
             pumgye_server::permit_config::load(path, &|name| std::env::var(name).ok())
                 .map_err(|_| anyhow::anyhow!("native permit signing resources unavailable"))
         })
-        .transpose()?;
+        .transpose()?
+        .map(Arc::new);
     let authentication_trust = args
         .authentication_trust
         .as_deref()
@@ -786,7 +807,8 @@ async fn main() -> anyhow::Result<()> {
             pumgye_server::authentication_config::load(path)
                 .map_err(|_| anyhow::anyhow!("native authentication trust unavailable"))
         })
-        .transpose()?;
+        .transpose()?
+        .map(Arc::new);
     let authentication_live = match args.authentication_live.as_deref() {
         Some(path) => Some(
             pumgye_server::authentication_live_config::load(
@@ -805,9 +827,28 @@ async fn main() -> anyhow::Result<()> {
         Some(path) => Some(
             pumgye_server::network_live_config::load(path, &|name| std::env::var(name).ok())
                 .await
+                .map(Arc::new)
                 .map_err(|_| anyhow::anyhow!("native network resources unavailable"))?,
         ),
         None => None,
+    };
+    #[cfg(feature = "observed-authentication")]
+    let observed_auth = if args.observed_permits {
+        Some(
+            pumgye_server::authentication_live_config::load_observed(
+                args.authentication_live
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("observed endpoint required"))?,
+                authentication_trust
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("observed trust required"))?
+                    .clone(),
+                &|name| std::env::var(name).ok(),
+            )
+            .map_err(|_| anyhow::anyhow!("observed authentication owner unavailable"))?,
+        )
+    } else {
+        None
     };
     let mut receipt_keys = authentication_trust
         .as_ref()
@@ -832,6 +873,10 @@ async fn main() -> anyhow::Result<()> {
     let authority_epoch =
         base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, epoch);
     let authority = Arc::new(Authority {
+        #[cfg(feature = "observed-authentication")]
+        source_clock: fresh_source_clock()?,
+        #[cfg(feature = "observed-authentication")]
+        observed_permits: std::sync::OnceLock::new(),
         authority_epoch,
         network_live,
         authentication_live,
@@ -843,6 +888,8 @@ async fn main() -> anyhow::Result<()> {
             document,
             compiled,
             source_expires: None,
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }),
         store: std::sync::Mutex::new(store),
         admin,
@@ -856,6 +903,31 @@ async fn main() -> anyhow::Result<()> {
         requests: Arc::new(tokio::sync::Semaphore::new(4096)),
         management: Arc::new(tokio::sync::Semaphore::new(4)),
     });
+    #[cfg(feature = "observed-authentication")]
+    if args.observed_permits {
+        let auth = observed_auth
+            .ok_or_else(|| anyhow::anyhow!("observed authentication owner unavailable"))?;
+        let slot = Arc::new(pumgye_server::authentication_observed::OwnerSlot::default());
+        slot.replace(Some(auth.owner))
+            .map_err(|_| anyhow::anyhow!("observed authentication publication refused"))?;
+        let owner = pumgye_server::observed_permit::Service::from_native(
+            pumgye_server::observed_permit::Owners {
+                authentication: slot,
+                network: authority.network_live.as_ref().unwrap().clone(),
+                route: authority.route_live.as_ref().unwrap().clone(),
+                plan: authority.projection_live.as_ref().unwrap().clone(),
+            },
+            authority.permit_signer.as_ref().unwrap().clone(),
+            Arc::new(observed_native::Source(Arc::downgrade(&authority))),
+            &args.observed_authority,
+            auth.rates,
+        )
+        .map_err(|_| anyhow::anyhow!("observed permit source unavailable"))?;
+        authority
+            .observed_permits
+            .set(owner)
+            .map_err(|_| anyhow::anyhow!("observed owner already installed"))?;
+    }
     if args.authorize_kubernetes_rbac {
         let collector = kubernetes_api::Collector::new(
             args.kubernetes_api.as_deref().unwrap(),
@@ -1019,6 +1091,14 @@ async fn termination_signal() -> std::io::Result<()> {
     }
 }
 
+#[cfg(feature = "observed-authentication")]
+fn fresh_source_clock() -> anyhow::Result<hangang_runtime::time::ReceiverClock> {
+    let mut nonce = [0; 16];
+    getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("source process nonce unavailable"))?;
+    hangang_runtime::time::ReceiverClock::new(nonce)
+        .map_err(|_| anyhow::anyhow!("suspend-inclusive source clock unavailable"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1085,6 +1165,8 @@ mod tests {
                 ..document
             },
             source_expires: None,
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         let router = Router::new()
             .route("/v1/resource/decision", resource_route())
@@ -1187,6 +1269,8 @@ mod tests {
             compiled: document.policy.compile().unwrap(),
             document: document.clone(),
             source_expires: None,
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         let mut query = ResourceEvaluation {
             service_id: "orders",
@@ -1253,6 +1337,8 @@ mod tests {
                 compiled: document.policy.compile().unwrap(),
                 document: document.clone(),
                 source_expires: None,
+                #[cfg(feature = "observed-authentication")]
+                source_observed_deadline: None,
             }));
             "private signed candidate"
         });
@@ -1276,6 +1362,8 @@ mod tests {
             },
             compiled: policy.compile().unwrap(),
             source_expires: None,
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         let query = pumgye_protocol::Query {
             request_id: 42,
@@ -1301,6 +1389,8 @@ mod tests {
                     },
                     compiled: policy.compile().unwrap(),
                     source_expires: None,
+                    #[cfg(feature = "observed-authentication")]
+                    source_observed_deadline: None,
                 }));
                 "private permit candidate"
             })
@@ -1323,6 +1413,10 @@ mod tests {
             store::Store::open(&root.join("authority.sqlite3"), Some(&initial)).unwrap();
         let compiled = document.policy.compile().unwrap();
         Arc::new(Authority {
+            #[cfg(feature = "observed-authentication")]
+            source_clock: fresh_source_clock().unwrap(),
+            #[cfg(feature = "observed-authentication")]
+            observed_permits: std::sync::OnceLock::new(),
             authority_epoch: "owned-fixture-epoch".into(),
             permit_signer: None,
             authentication_trust: None,
@@ -1334,6 +1428,8 @@ mod tests {
                 document,
                 compiled,
                 source_expires: None,
+                #[cfg(feature = "observed-authentication")]
+                source_observed_deadline: None,
             }),
             store: std::sync::Mutex::new(store),
             admin: "fixture-admin-credential".into(),

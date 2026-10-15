@@ -48,6 +48,14 @@ impl Observation<'_> {
     pub fn configuration_revision(&self) -> u64 {
         self.revision
     }
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn observed_bound(
+        &self,
+        rates: &hopae_grpc::receipt_time::ClockRates,
+        now: u64,
+    ) -> Result<u64, tonic::Status> {
+        crate::observed_permit::prerequisite_bound(self.before_ms, self.expires_ms, now, rates)
+    }
     pub fn expires_ms(&self) -> u64 {
         self.expires_ms
     }

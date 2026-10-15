@@ -7,7 +7,42 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(any(test, not(feature = "observed-authentication")))]
 fn install(a: &Authority, policy: pumgye_core::Policy, expires: Instant) -> Result<()> {
+    #[cfg(feature = "observed-authentication")]
+    let observed = {
+        let start = a
+            .source_clock
+            .begin_exchange()
+            .map_err(|_| anyhow::anyhow!("source clock unavailable"))?;
+        let remaining = expires.saturating_duration_since(Instant::now());
+        let sample = a
+            .source_clock
+            .finish_exchange(start)
+            .map_err(|_| anyhow::anyhow!("source clock unavailable"))?;
+        let bound = sample
+            .before_ticks()
+            .checked_add(u64::try_from(remaining.as_millis())?)
+            .ok_or_else(|| anyhow::anyhow!("source deadline overflow"))?;
+        sample
+            .bind_bounds(bound, bound)
+            .map_err(|_| anyhow::anyhow!("source deadline expired"))?
+            .0
+    };
+    install_inner(
+        a,
+        policy,
+        expires,
+        #[cfg(feature = "observed-authentication")]
+        observed,
+    )
+}
+fn install_inner(
+    a: &Authority,
+    policy: pumgye_core::Policy,
+    expires: Instant,
+    #[cfg(feature = "observed-authentication")] observed: hangang_runtime::time::LocalDeadline,
+) -> Result<()> {
     a.source_ready.store(false, Ordering::Release);
     ensure!(
         a.kubernetes_owned && a.healthy.load(Ordering::Acquire),
@@ -45,6 +80,8 @@ fn install(a: &Authority, policy: pumgye_core::Policy, expires: Instant) -> Resu
         document,
         compiled,
         source_expires: Some(expires),
+        #[cfg(feature = "observed-authentication")]
+        source_observed_deadline: Some(observed),
     }));
     a.source_ready
         .store(Instant::now() < expires, Ordering::Release);
@@ -58,27 +95,77 @@ pub async fn run(
     ca: PathBuf,
     token: PathBuf,
 ) {
+    #[cfg(not(feature = "observed-authentication"))]
     let epoch = Instant::now();
     loop {
         // Withdraw before collection; errors never retain a prior permissive view.
         a.source_ready.store(false, Ordering::Release);
         a.source_phase.store(1, Ordering::Release);
+        #[cfg(not(feature = "observed-authentication"))]
         let now = u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+        #[cfg(feature = "observed-authentication")]
+        let now = source_ticks(&a).unwrap_or(u64::MAX);
         let phase = if collector.refresh(&ca, &token, now).await.is_err() {
             // Do not expose transport errors, URLs, credential paths or provider bodies.
             3
         } else {
+            #[cfg(not(feature = "observed-authentication"))]
             let now = u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
+            #[cfg(feature = "observed-authentication")]
+            let now = source_ticks(&a).unwrap_or(u64::MAX);
             let candidate = collector.fresh(now).and_then(|observation| {
                 let policy = mapping.candidate(&observation.inventory).ok()?.policy;
+                #[cfg(not(feature = "observed-authentication"))]
                 let expires =
                     epoch.checked_add(Duration::from_millis(observation.valid_until_ms))?;
-                Some((policy, expires))
+                #[cfg(feature = "observed-authentication")]
+                let expires = Instant::now().checked_add(Duration::from_millis(
+                    observation.valid_until_ms.checked_sub(now)?,
+                ))?;
+                #[cfg(feature = "observed-authentication")]
+                let deadline = {
+                    let bound = observation.valid_until_ms;
+                    let result = a
+                        .source_clock
+                        .begin_exchange()
+                        .and_then(|start| a.source_clock.finish_exchange(start))
+                        .and_then(|sample| sample.bind_bounds(bound, bound));
+                    match result {
+                        Ok((deadline, _)) => deadline,
+                        Err(error) => {
+                            if matches!(
+                                error,
+                                hangang_runtime::time::TimeError::ClockRead
+                                    | hangang_runtime::time::TimeError::UnsupportedClock
+                                    | hangang_runtime::time::TimeError::Overflow
+                            ) {
+                                a.source_clock.retire();
+                                a.source_ready.store(false, Ordering::Release);
+                            }
+                            return None;
+                        }
+                    }
+                };
+                #[cfg(not(feature = "observed-authentication"))]
+                let deadline = expires;
+                Some((policy, expires, deadline))
             });
-            if let Some((policy, expires)) = candidate {
+            if let Some((policy, expires, deadline)) = candidate {
                 let active = a.clone();
                 // Durable writes and compilation stay off the decision executor.
-                match tokio::task::spawn_blocking(move || install(&active, policy, expires)).await {
+                match tokio::task::spawn_blocking(move || {
+                    #[cfg(feature = "observed-authentication")]
+                    {
+                        install_inner(&active, policy, expires, deadline)
+                    }
+                    #[cfg(not(feature = "observed-authentication"))]
+                    {
+                        let _ = deadline;
+                        install(&active, policy, expires)
+                    }
+                })
+                .await
+                {
                     Ok(Ok(())) => 2,
                     _ => 4,
                 }
@@ -89,6 +176,20 @@ pub async fn run(
         a.source_phase.store(phase, Ordering::Release);
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+#[cfg(feature = "observed-authentication")]
+fn source_ticks(a: &Authority) -> Result<u64> {
+    let result = a
+        .source_clock
+        .begin_exchange()
+        .and_then(|s| a.source_clock.finish_exchange(s))
+        .map(|s| s.after_ticks());
+    result.map_err(|_| {
+        a.source_clock.retire();
+        a.source_ready.store(false, Ordering::Release);
+        anyhow::anyhow!("source clock unavailable")
+    })
 }
 
 #[cfg(test)]
@@ -145,6 +246,8 @@ mod tests {
             compiled: document.policy.compile().unwrap(),
             document,
             source_expires: Some(Instant::now()),
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         let current = crate::status(crate::State(a.clone())).await.0;
         assert_eq!(
@@ -192,6 +295,8 @@ mod tests {
             compiled: expired.policy.compile().unwrap(),
             document: expired,
             source_expires: Some(Instant::now()),
+            #[cfg(feature = "observed-authentication")]
+            source_observed_deadline: None,
         }));
         assert!(!a.available());
         install(&a, policy.clone(), Instant::now() + Duration::from_secs(1)).unwrap();

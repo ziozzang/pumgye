@@ -11,18 +11,18 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Foundation only: no endpoint or permit signing is enabled by this feature.
+# Additive native evidence and permit RPCs; binary activation also requires --observed-permits.
 observed-authentication = ["hopae-grpc/native-client"]
 
 [dependencies]
 hangang-route-grpc = { git = "https://github.com/ziozzang/hangang", rev = "dfc099ea763650f98b31110f0720cf3d9042f3ec" }
 guard-grpc = { git = "https://github.com/ziozzang/sumunjang", rev = "1f70428e9481654845a696cf30cdb917a6aef009" }
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "c7ddcf2bb0d12adff7db06e7df178b88b9c5062f" }
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "e01c67ed63203931aba0f45fbc8c10e42ed4a66f" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.3"
 base64 = "0.22"
 zeroize = "1"
-hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "0cdbd1660cefe46eed8bab3c0deb1b62c560ecf6" }
+hangang-runtime = { git = "https://github.com/ziozzang/hangang-runtime", rev = "bf3ba2c0ccfb8603a34b14a30bc52d5112f0677a" }
 pumgye-grpc = { path = "../pumgye-grpc" }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tokio-stream = { version = "0.1", features = ["net"] }

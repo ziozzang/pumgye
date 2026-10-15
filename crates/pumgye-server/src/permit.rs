@@ -80,6 +80,77 @@ impl Signer {
             key,
         })
     }
+    // Private native observed service signing boundary; no public budget grant.
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn sign_observed(
+        &self,
+        input: &pumgye_grpc::v1::AuthenticatedResourceRequest,
+        binding: pumgye_grpc::v1::PermitBinding,
+        issued_ms: u64,
+        expires_ms: u64,
+    ) -> Result<pumgye_grpc::v1::ProjectionPermitReply, Refused> {
+        let mut context = input.context.clone().ok_or(Refused::InvalidBinding)?;
+        context.issuer_ref = self.issuer.clone();
+        context.key_epoch = self.key_epoch;
+        let identity = context.identity.as_ref().ok_or(Refused::InvalidBinding)?;
+        let canonical = receipt_binding::Context {
+            issuer_ref: &context.issuer_ref,
+            key_epoch: context.key_epoch,
+            identity_authority_epoch: &context.identity_authority_epoch,
+            identity: receipt_binding::Identity {
+                subject_ref: &identity.subject_ref,
+                kind: hopae_grpc::PrincipalKind::Service,
+                aal: 0,
+                revision: identity.revision,
+                credential_generation: identity.credential_generation,
+            },
+            service: &context.service,
+            audience: &context.audience,
+            request_sha256: context
+                .request_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Refused::InvalidBinding)?,
+        };
+        let permit = receipt_binding::Permit {
+            authentication_receipt_sha256: binding
+                .authentication_receipt_sha256
+                .as_slice()
+                .try_into()
+                .map_err(|_| Refused::InvalidBinding)?,
+            decision_ref: &binding.decision_ref,
+            resource: &binding.resource,
+            action: &binding.action,
+            authority_epoch: &binding.authority_epoch,
+            catalog_revision: binding.catalog_revision,
+            policy_revision: binding.policy_revision,
+            network_revision: binding.network_revision,
+            route_revision: binding.route_revision,
+            plan_revision: binding.plan_revision,
+        };
+        let digest = receipt_binding::digest(&canonical, Some(&permit))
+            .map_err(|_| Refused::InvalidBinding)?;
+        let mut nonce = [0; 32];
+        getrandom::fill(&mut nonce).map_err(|_| Refused::Unavailable)?;
+        let bytes = receipt::sign(
+            &self.key,
+            &receipt::Claims {
+                purpose: receipt::Purpose::Permit,
+                issued_ms,
+                expires_ms,
+                binding: digest,
+                nonce,
+            },
+        )
+        .map_err(|_| Refused::InvalidBinding)?;
+        Ok(pumgye_grpc::v1::ProjectionPermitReply {
+            request_id: input.request_id,
+            context: Some(context),
+            binding: Some(binding),
+            receipt: bytes.to_vec(),
+            cache_ttl_ms: 0,
+        })
+    }
     /// Require actual Hopae and Sumunjang observations before signing. This
     /// bounds the candidate by observed network expiry and revision rather than
     /// trusting caller-provided Guard evidence. Observations are not leases:
