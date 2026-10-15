@@ -56,3 +56,30 @@ message ProjectionPermitReply { uint64 request_id = 1; hangang.hopae.v1.Authenti
 
 message PermitValidationRequest { uint64 request_id = 1; AuthenticatedResourceRequest request = 2; ProjectionPermitReply permit = 3; }
 message PermitValidationReply { uint64 request_id = 1; uint64 expires_ms = 2; uint32 cache_ttl_ms = 3; }
+
+// Distinct BOOTTIME source protocol. Never interpret these permit ticks as UTC.
+service ObservedProjectionPermits {
+  rpc Issue(AuthenticatedResourceRequest) returns (ObservedProjectionPermitReply);
+  rpc Observe(PermitValidationRequest) returns (ObservedPermitTimeReply);
+}
+message ObservedProjectionPermitReply {
+  ProjectionPermitReply permit = 1;
+  ObservedPermitTimeReply observation = 2;
+}
+message ObservedPermitTimeReply {
+  uint64 request_id = 1;
+  bytes receipt_sha256 = 2;
+  string clock_domain = 3;
+  uint64 owner_now_ms = 4;
+  // Full signed proof lifetime remaining at owner_now_ms. Upper retention
+  // evidence only; never an admission grant or a prerequisite renewal.
+  uint32 proof_remaining_ms = 5;
+  // Lower admission budget at owner_now_ms, shortened by every prerequisite.
+  // Both budgets bind this exact receipt hash and signed pobs1 clock_domain.
+  uint32 remaining_ms = 6;
+  uint64 policy_revision = 7;
+  uint64 network_revision = 8;
+  uint64 route_revision = 9;
+  uint64 plan_revision = 10;
+  uint32 cache_ttl_ms = 11; // Always zero; point-in-time owner evidence.
+}
