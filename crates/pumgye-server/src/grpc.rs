@@ -308,6 +308,79 @@ impl pumgye_grpc::v1::resource_authorization_server::ResourceAuthorization for S
     }
 }
 #[tonic::async_trait]
+impl pumgye_grpc::v1::workload_resource_authorization_server::WorkloadResourceAuthorization
+    for Service
+{
+    async fn decide(
+        &self,
+        request: Request<pumgye_grpc::v1::ResourceDecisionRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ResourceDecisionReply>, Status> {
+        let _permit = self.admission(request.metadata())?;
+        let input = request.into_inner();
+        let ip = match input.ip.as_slice() {
+            bytes if bytes.len() == 4 => {
+                IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(bytes).unwrap()))
+            }
+            bytes if bytes.len() == 16 => {
+                IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).unwrap()))
+            }
+            _ => return Err(Status::invalid_argument("verified address required")),
+        };
+        let guard = match input.guard {
+            1 => pumgye_core::GuardEvidence::EnforcedAllow,
+            2 => pumgye_core::GuardEvidence::Deny,
+            3 => pumgye_core::GuardEvidence::Observe,
+            4 => pumgye_core::GuardEvidence::Unavailable,
+            _ => return Err(Status::invalid_argument("guard evidence required")),
+        };
+        let aal =
+            u8::try_from(input.aal).map_err(|_| Status::invalid_argument("invalid assurance"))?;
+        let query = crate::ResourceEvaluation {
+            service_id: &input.service_id,
+            resource: &input.resource,
+            action: &input.action,
+            subject: &input.subject,
+            ip,
+            aal,
+            guard,
+            minimum_revision: input.minimum_revision,
+        };
+        if !query.valid() {
+            return Err(Status::invalid_argument("invalid resource scope"));
+        }
+        if aal != 0 {
+            return Err(Status::invalid_argument("Workload requires AAL0"));
+        }
+        let result = self.0.workload_resource_decision(&query);
+        let (revision, verdict, reason) = match result {
+            Some((
+                revision,
+                pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::Allow),
+            )) => (revision, 1, "Allow".into()),
+            Some((
+                revision,
+                pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::GuardUnavailable),
+            )) => (revision, 3, "GuardUnavailable".into()),
+            Some((revision, pumgye_core::ResourceDecision::Decided(decision))) => {
+                (revision, 2, format!("{decision:?}"))
+            }
+            Some((revision, other)) => (revision, 2, format!("{other:?}")),
+            None => (
+                self.0.view.load().document.revision,
+                3,
+                "Unavailable".into(),
+            ),
+        };
+        Ok(Response::new(pumgye_grpc::v1::ResourceDecisionReply {
+            request_id: input.request_id,
+            revision,
+            verdict,
+            reason,
+            cache_ttl_ms: 0,
+        }))
+    }
+}
+#[tonic::async_trait]
 impl Authorization for Service {
     async fn decide(
         &self,
@@ -470,6 +543,7 @@ pub async fn serve(
             .max_encoding_message_size(1024), ingress.clone(), 2048),
             authority.clone(),
         ))
+        .add_service(authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::workload_resource_authorization_server::WorkloadResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(2048).max_encoding_message_size(1024), ingress.clone(), 2048), authority.clone()))
         .add_service(authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128), ingress.clone(), 4096), authority.clone()))
         .add_service(authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048), ingress.clone(), 8192), authority.clone()));
     #[cfg(feature = "observed-authentication")]
@@ -801,6 +875,7 @@ mod tests {
                 .code(),
             tonic::Code::InvalidArgument
         );
+        let mut workload = pumgye_grpc::v1::workload_resource_authorization_client::WorkloadResourceAuthorizationClient::new(channel.clone());
         let mut client = ResourceAuthorizationClient::new(channel);
         let request = |token: &str| {
             let mut request = Request::new(ResourceDecisionRequest {
@@ -862,6 +937,136 @@ mod tests {
         assert_eq!(
             client.decide(stronger).await.unwrap().into_inner().verdict,
             1
+        );
+        // Same actual mTLS listener and exact Authority/View, separate typed map.
+        let subject = format!("s_{}", "a".repeat(48));
+        let policy = |variant| {
+            let mut value = serde_json::json!({"version":1,"information_classes":["internal"],"services":{"orders":{"permissions":["read"],"require_guard":true,"roles":{"reader":{"permissions":["read"],"information_classes":["internal"],"minimum_aal":0},"blocked":{"permissions":[],"information_classes":["internal"],"minimum_aal":0}},"users":{},"workload_users":{},"networks":[{"cidr":"192.0.2.0/24","roles":["reader"]}]}},"resources":{"db:orders":{"service":"orders","information_class":"internal","actions":{"select":"read"}}}});
+            value["services"]["orders"]["users"][&subject] = serde_json::json!(["blocked"]);
+            value["services"]["orders"]["workload_users"][&subject] = serde_json::json!(["reader"]);
+            if variant == 1 {
+                value["services"]["orders"]["users"][&subject] = serde_json::json!(["reader"]);
+                value["services"]["orders"]["workload_users"] = serde_json::json!({});
+            }
+            if variant == 2 {
+                value["resources"]["db:orders"]["minimum_aal"] = serde_json::json!(1);
+            }
+            serde_json::from_value::<pumgye_core::Policy>(value).unwrap()
+        };
+        let typed_request = |token: &str| {
+            let mut r = request(token);
+            r.get_mut().aal = 0;
+            r.get_mut().subject = subject.clone();
+            r
+        };
+        for variant in 0..=2 {
+            let policy = policy(variant);
+            owner.view.store(Arc::new(crate::View {
+                compiled: policy.compile().unwrap(),
+                document: crate::Document {
+                    revision: 3 + variant,
+                    policy,
+                },
+                source_lifetime: None,
+            }));
+            let reply = workload
+                .decide(typed_request(&owner.decision))
+                .await
+                .unwrap()
+                .into_inner();
+            assert_eq!(reply.verdict, if variant == 0 { 1 } else { 2 });
+            assert_eq!(reply.revision, 3 + variant);
+            assert_eq!(reply.cache_ttl_ms, 0);
+            if variant == 0 {
+                assert_eq!(
+                    client
+                        .decide(typed_request(&owner.decision))
+                        .await
+                        .unwrap()
+                        .into_inner()
+                        .verdict,
+                    2
+                );
+            }
+            if variant == 1 {
+                assert_eq!(
+                    client
+                        .decide(typed_request(&owner.decision))
+                        .await
+                        .unwrap()
+                        .into_inner()
+                        .verdict,
+                    1
+                );
+            }
+        }
+        let policy = policy(0);
+        owner.view.store(Arc::new(crate::View {
+            compiled: policy.compile().unwrap(),
+            document: crate::Document {
+                revision: 6,
+                policy,
+            },
+            source_lifetime: None,
+        }));
+        assert_eq!(
+            workload
+                .decide(typed_request(&owner.admin))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        let mut weak = typed_request(&owner.decision);
+        weak.get_mut().aal = 1;
+        assert_eq!(
+            workload.decide(weak).await.unwrap_err().code(),
+            tonic::Code::InvalidArgument
+        );
+        for field in 0..5 {
+            let mut bad = typed_request(&owner.decision);
+            match field {
+                0 => bad.get_mut().service_id = "billing".into(),
+                1 => bad.get_mut().resource = "db:missing".into(),
+                2 => bad.get_mut().ip = vec![198, 51, 100, 1],
+                3 => bad.get_mut().guard = 3,
+                _ => bad.get_mut().minimum_revision = 99,
+            }
+            assert_ne!(workload.decide(bad).await.unwrap().into_inner().verdict, 1);
+        }
+        owner.healthy.store(false, Ordering::Release);
+        assert_eq!(
+            workload
+                .decide(typed_request(&owner.decision))
+                .await
+                .unwrap()
+                .into_inner()
+                .verdict,
+            3
+        );
+        owner.healthy.store(true, Ordering::Release);
+        let query = crate::ResourceEvaluation {
+            service_id: "orders",
+            resource: "db:orders",
+            action: "select",
+            subject: &subject,
+            ip: "192.0.2.9".parse().unwrap(),
+            aal: 0,
+            guard: pumgye_core::GuardEvidence::EnforcedAllow,
+            minimum_revision: 6,
+        };
+        assert!(
+            owner
+                .resource_authorize_typed_then(&query, true, |_, _| {
+                    let document = owner.view.load().document.clone();
+                    owner.view.store(Arc::new(crate::View {
+                        compiled: document.policy.compile().unwrap(),
+                        document,
+                        source_lifetime: None,
+                    }));
+                })
+                .is_err(),
+            "same-number exact View replacement must retire metadata result"
         );
         let tls = ClientTlsConfig::new()
             .domain_name("pumgye.example.test")
@@ -1203,7 +1408,7 @@ mod tests {
         http::Response<Body>,
         std::convert::Infallible,
     > {
-        let limit = [2048, 2048, 4096, 8192, 8192, 8192][kind];
+        let limit = [2048, 2048, 4096, 8192, 8192, 8192, 2048][kind];
         macro_rules! wrap {
             ($server:expr) => {
                 tower::util::BoxCloneService::new(
@@ -1226,6 +1431,7 @@ mod tests {
                 4 => wrap!(pumgye_grpc::v1::observed_projection_permits_server::ObservedProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072)),
                 #[cfg(feature = "observed-authentication")]
                 5 => wrap!(pumgye_grpc::v1::workload_observed_projection_permits_server::WorkloadObservedProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072)),
+                6 => wrap!(pumgye_grpc::v1::workload_resource_authorization_server::WorkloadResourceAuthorizationServer::new(Service(owner.clone())).max_decoding_message_size(2048).max_encoding_message_size(1024)),
                 _ => panic!("unknown test service"),
             }
     }
@@ -1262,6 +1468,11 @@ mod tests {
             5,
             "/hangang.pumgye.v1.WorkloadObservedProjectionPermits/Observe",
             8192,
+        ),
+        (
+            6,
+            "/hangang.pumgye.v1.WorkloadResourceAuthorization/Decide",
+            2048,
         ),
     ];
     #[tokio::test]

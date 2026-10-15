@@ -275,6 +275,19 @@ impl Authority {
         .map(Some)
         .unwrap_or_else(|refusal| refusal)
     }
+    fn workload_resource_decision(
+        &self,
+        q: &ResourceEvaluation<'_>,
+    ) -> Option<(u64, pumgye_core::ResourceDecision)> {
+        self.resource_authorize_typed_then(q, true, |revision, _| {
+            (
+                revision,
+                pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::Allow),
+            )
+        })
+        .map(Some)
+        .unwrap_or_else(|refusal| refusal)
+    }
     /// Signer output remains private until the exact allowing catalog is still
     /// current. The callback receives owner metadata, never caller classification.
     fn resource_authorize_then<T>(
@@ -282,7 +295,15 @@ impl Authority {
         q: &ResourceEvaluation<'_>,
         operation: impl FnOnce(u64, &pumgye_core::Resource) -> T,
     ) -> Result<T, Option<(u64, pumgye_core::ResourceDecision)>> {
-        if !q.valid() {
+        self.resource_authorize_typed_then(q, false, operation)
+    }
+    fn resource_authorize_typed_then<T>(
+        &self,
+        q: &ResourceEvaluation<'_>,
+        workload: bool,
+        operation: impl FnOnce(u64, &pumgye_core::Resource) -> T,
+    ) -> Result<T, Option<(u64, pumgye_core::ResourceDecision)>> {
+        if !q.valid() || (workload && q.aal != 0) {
             return Err(None);
         }
         let view = self.view.load();
@@ -291,15 +312,26 @@ impl Authority {
         if !active() || view.document.revision < q.minimum_revision {
             return Err(None);
         }
-        let decision = view.compiled.evaluate_scoped_resource(
-            q.service_id,
-            q.resource,
-            q.action,
-            q.subject,
-            q.ip,
-            q.aal,
-            q.guard,
-        );
+        let decision = if workload {
+            view.compiled.evaluate_scoped_workload_resource(
+                q.service_id,
+                q.resource,
+                q.action,
+                q.subject,
+                q.ip,
+                q.guard,
+            )
+        } else {
+            view.compiled.evaluate_scoped_resource(
+                q.service_id,
+                q.resource,
+                q.action,
+                q.subject,
+                q.ip,
+                q.aal,
+                q.guard,
+            )
+        };
         self.queries.fetch_add(1, Ordering::Relaxed);
         if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
             return Err(None);

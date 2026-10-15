@@ -92,3 +92,9 @@ service WorkloadObservedProjectionPermits {
   rpc Issue(AuthenticatedResourceRequest) returns (ObservedProjectionPermitReply);
   rpc Observe(PermitValidationRequest) returns (ObservedPermitTimeReply);
 }
+
+// Authenticated enforcement-caller metadata query, not authentication evidence,
+// a signed permit or a freshness lease. Fixed Workload grants and AAL0 only.
+service WorkloadResourceAuthorization {
+  rpc Decide(ResourceDecisionRequest) returns (ResourceDecisionReply);
+}
