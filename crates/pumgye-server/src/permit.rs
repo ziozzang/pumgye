@@ -115,6 +115,22 @@ impl Signer {
         )
     }
     #[cfg(feature = "observed-authentication")]
+    pub(crate) fn sign_observed_human(
+        &self,
+        input: &pumgye_grpc::v1::AuthenticatedResourceRequest,
+        binding: pumgye_grpc::v1::PermitBinding,
+        issued_ms: u64,
+        expires_ms: u64,
+    ) -> Result<pumgye_grpc::v1::ProjectionPermitReply, Refused> {
+        self.sign_observed_kind(
+            input,
+            binding,
+            issued_ms,
+            expires_ms,
+            hopae_grpc::PrincipalKind::Human,
+        )
+    }
+    #[cfg(feature = "observed-authentication")]
     fn sign_observed_kind(
         &self,
         input: &pumgye_grpc::v1::AuthenticatedResourceRequest,
@@ -131,9 +147,20 @@ impl Signer {
             != match kind {
                 hopae_grpc::PrincipalKind::Service => 2,
                 hopae_grpc::PrincipalKind::Workload => 3,
+                hopae_grpc::PrincipalKind::Human => 1,
                 _ => return Err(Refused::InvalidBinding),
             }
-            || identity.aal != 0
+            || if kind == hopae_grpc::PrincipalKind::Human {
+                !matches!(identity.aal, 1 | 2)
+            } else {
+                identity.aal != 0
+            }
+        {
+            return Err(Refused::InvalidBinding);
+        }
+        if kind == hopae_grpc::PrincipalKind::Human
+            && (pumgye_core::HumanSubject::parse(&identity.subject_ref).is_err()
+                || hopae_grpc::human_epoch::decode(&context.identity_authority_epoch).is_err())
         {
             return Err(Refused::InvalidBinding);
         }
@@ -144,7 +171,10 @@ impl Signer {
             identity: receipt_binding::Identity {
                 subject_ref: &identity.subject_ref,
                 kind,
-                aal: 0,
+                aal: identity
+                    .aal
+                    .try_into()
+                    .map_err(|_| Refused::InvalidBinding)?,
                 revision: identity.revision,
                 credential_generation: identity.credential_generation,
             },

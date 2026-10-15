@@ -380,6 +380,78 @@ impl pumgye_grpc::v1::workload_resource_authorization_server::WorkloadResourceAu
         }))
     }
 }
+#[cfg(feature = "observed-authentication")]
+#[tonic::async_trait]
+impl pumgye_grpc::v1::human_resource_authorization_server::HumanResourceAuthorization for Service {
+    async fn decide(
+        &self,
+        request: Request<pumgye_grpc::v1::ResourceDecisionRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ResourceDecisionReply>, Status> {
+        let _permit = self.admission(request.metadata())?;
+        let input = request.into_inner();
+        let ip = match input.ip.as_slice() {
+            bytes if bytes.len() == 4 => {
+                IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(bytes).unwrap()))
+            }
+            bytes if bytes.len() == 16 => {
+                IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(bytes).unwrap()))
+            }
+            _ => return Err(Status::invalid_argument("verified address required")),
+        };
+        let guard = match input.guard {
+            1 => pumgye_core::GuardEvidence::EnforcedAllow,
+            2 => pumgye_core::GuardEvidence::Deny,
+            3 => pumgye_core::GuardEvidence::Observe,
+            4 => pumgye_core::GuardEvidence::Unavailable,
+            _ => return Err(Status::invalid_argument("guard evidence required")),
+        };
+        let aal =
+            u8::try_from(input.aal).map_err(|_| Status::invalid_argument("invalid assurance"))?;
+        let query = crate::ResourceEvaluation {
+            service_id: &input.service_id,
+            resource: &input.resource,
+            action: &input.action,
+            subject: &input.subject,
+            ip,
+            aal,
+            guard,
+            minimum_revision: input.minimum_revision,
+        };
+        if !query.valid() {
+            return Err(Status::invalid_argument("invalid resource scope"));
+        }
+        if !matches!(aal, 1 | 2) {
+            return Err(Status::invalid_argument("Human requires AAL1 or AAL2"));
+        }
+        let result = self.0.human_resource_decision(&query);
+        let (revision, verdict, reason) = match result {
+            Some((
+                revision,
+                pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::Allow),
+            )) => (revision, 1, "Allow".into()),
+            Some((
+                revision,
+                pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::GuardUnavailable),
+            )) => (revision, 3, "GuardUnavailable".into()),
+            Some((revision, pumgye_core::ResourceDecision::Decided(decision))) => {
+                (revision, 2, format!("{decision:?}"))
+            }
+            Some((revision, other)) => (revision, 2, format!("{other:?}")),
+            None => (
+                self.0.view.load().document.revision,
+                3,
+                "Unavailable".into(),
+            ),
+        };
+        Ok(Response::new(pumgye_grpc::v1::ResourceDecisionReply {
+            request_id: input.request_id,
+            revision,
+            verdict,
+            reason,
+            cache_ttl_ms: 0,
+        }))
+    }
+}
 #[tonic::async_trait]
 impl Authorization for Service {
     async fn decide(
@@ -520,6 +592,54 @@ impl pumgye_grpc::v1::workload_observed_projection_permits_server::WorkloadObser
             .map(Response::new)
     }
 }
+#[cfg(feature = "observed-authentication")]
+#[tonic::async_trait]
+impl pumgye_grpc::v1::human_observed_projection_permits_server::HumanObservedProjectionPermits
+    for Service
+{
+    async fn issue(
+        &self,
+        request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ObservedProjectionPermitReply>, Status> {
+        let ingress = request
+            .extensions()
+            .get::<pumgye_server::human_observed_permit::Ingress>()
+            .cloned()
+            .ok_or_else(|| Status::failed_precondition("original Human admission required"))?;
+        let _admission = self.admission(request.metadata())?;
+        let owner = self
+            .0
+            .human_observed_permits
+            .get()
+            .ok_or_else(|| Status::unavailable("observed permit owner not configured"))?;
+        let (metadata, _, input) = request.into_parts();
+        owner
+            .issue_admitted(input, ingress, &|| self.caller(&metadata).is_ok())
+            .await
+            .map(Response::new)
+    }
+    async fn observe(
+        &self,
+        request: Request<pumgye_grpc::v1::PermitValidationRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ObservedPermitTimeReply>, Status> {
+        let ingress = request
+            .extensions()
+            .get::<pumgye_server::human_observed_permit::Ingress>()
+            .cloned()
+            .ok_or_else(|| Status::failed_precondition("original Human admission required"))?;
+        let _admission = self.admission(request.metadata())?;
+        let owner = self
+            .0
+            .human_observed_permits
+            .get()
+            .ok_or_else(|| Status::unavailable("observed permit owner not configured"))?;
+        let (metadata, _, input) = request.into_parts();
+        owner
+            .observe_admitted(input, ingress, &|| self.caller(&metadata).is_ok())
+            .await
+            .map(Response::new)
+    }
+}
 pub async fn serve(
     listener: TcpListener,
     tls: ServerTlsConfig,
@@ -553,7 +673,24 @@ pub async fn serve(
     #[cfg(feature = "observed-authentication")]
     let server = server.add_service(authenticate_transport(UnaryIngress::new(
         pumgye_grpc::v1::workload_observed_projection_permits_server::WorkloadObservedProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072),
-        ingress, 8192), authority));
+        ingress.clone(), 8192), authority.clone()));
+    #[cfg(feature = "observed-authentication")]
+    let server=server.add_optional_service(authority.human_observed_permits.get().map(|_|authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::human_resource_authorization_server::HumanResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(2048).max_encoding_message_size(1024),ingress.clone(),2048),authority.clone())));
+    #[cfg(feature = "observed-authentication")]
+    let server=server.add_optional_service(authority.human_observed_permits.get().map(|_|{
+        let caller=Service(authority.clone());
+        tonic::service::interceptor::InterceptedService::new(
+            UnaryIngress::new(pumgye_grpc::v1::human_observed_projection_permits_server::HumanObservedProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072),ingress,8192),
+            move |mut request:Request<()>|{
+                // Native original clock anchor precedes caller callbacks/decode.
+                let owner=caller.0.human_observed_permits.get().ok_or_else(||Status::unavailable("Human owner unavailable"))?;
+                let original=owner.begin_ingress()?;
+                caller.caller(request.metadata())?;
+                request.extensions_mut().insert(original);
+                Ok(request)
+            }
+        )
+    }));
     server
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
@@ -1408,7 +1545,7 @@ mod tests {
         http::Response<Body>,
         std::convert::Infallible,
     > {
-        let limit = [2048, 2048, 4096, 8192, 8192, 8192, 2048][kind];
+        let limit = [2048, 2048, 4096, 8192, 8192, 8192, 2048, 2048, 8192][kind];
         macro_rules! wrap {
             ($server:expr) => {
                 tower::util::BoxCloneService::new(
@@ -1432,6 +1569,14 @@ mod tests {
                 #[cfg(feature = "observed-authentication")]
                 5 => wrap!(pumgye_grpc::v1::workload_observed_projection_permits_server::WorkloadObservedProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072)),
                 6 => wrap!(pumgye_grpc::v1::workload_resource_authorization_server::WorkloadResourceAuthorizationServer::new(Service(owner.clone())).max_decoding_message_size(2048).max_encoding_message_size(1024)),
+                #[cfg(feature = "observed-authentication")]
+                7 => wrap!(pumgye_grpc::v1::human_resource_authorization_server::HumanResourceAuthorizationServer::new(Service(owner.clone())).max_decoding_message_size(2048).max_encoding_message_size(1024)),
+                // These hostile requests stop before handler dispatch; this tests
+                // the exact generated Human decoder and shared auth/unary layers.
+                // The configured native original-admission interceptor is also
+                // exercised by the actual-binary hostile transport fixture.
+                #[cfg(feature = "observed-authentication")]
+                8 => wrap!(pumgye_grpc::v1::human_observed_projection_permits_server::HumanObservedProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(3072)),
                 _ => panic!("unknown test service"),
             }
     }
@@ -1473,6 +1618,24 @@ mod tests {
             6,
             "/hangang.pumgye.v1.WorkloadResourceAuthorization/Decide",
             2048,
+        ),
+        #[cfg(feature = "observed-authentication")]
+        (
+            7,
+            "/hangang.pumgye.v1.HumanResourceAuthorization/Decide",
+            2048,
+        ),
+        #[cfg(feature = "observed-authentication")]
+        (
+            8,
+            "/hangang.pumgye.v1.HumanObservedProjectionPermits/Issue",
+            8192,
+        ),
+        #[cfg(feature = "observed-authentication")]
+        (
+            8,
+            "/hangang.pumgye.v1.HumanObservedProjectionPermits/Observe",
+            8192,
         ),
     ];
     #[tokio::test]
@@ -1641,4 +1804,28 @@ mod tests {
             assert_eq!(owner.requests.available_permits(), 4096);
         }
     }
+}
+
+#[cfg(all(test, feature = "observed-authentication"))]
+#[tokio::test]
+async fn human_rpc_cannot_create_admission_from_wire_headers_or_context() {
+    use pumgye_grpc::v1::human_observed_projection_permits_server::HumanObservedProjectionPermits;
+    let root = tempfile::tempdir().unwrap();
+    let owner = crate::tests::authority(root.path());
+    let service = Service(owner.clone());
+    let mut request = Request::new(pumgye_grpc::v1::AuthenticatedResourceRequest::default());
+    request.metadata_mut().insert(
+        "authorization",
+        format!("Bearer {}", owner.decision).parse().unwrap(),
+    );
+    request
+        .metadata_mut()
+        .insert("x-human-admission", "true".parse().unwrap());
+    let slots = owner.requests.available_permits();
+    let error = HumanObservedProjectionPermits::issue(&service, request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(owner.requests.available_permits(), slots);
+    assert!(owner.human_observed_permits.get().is_none());
 }

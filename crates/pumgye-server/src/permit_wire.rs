@@ -89,6 +89,24 @@ pub(crate) fn verify_observed_workload(
         hopae_grpc::PrincipalKind::Workload,
     )
 }
+#[cfg(feature = "observed-authentication")]
+pub(crate) fn verify_observed_human(
+    signer: &Signer,
+    authority_epoch: &str,
+    input: &AuthenticatedResourceRequest,
+    wire: &ProjectionPermitReply,
+    now: u64,
+) -> Result<Checked, Refused> {
+    verify_inner(
+        signer,
+        authority_epoch,
+        input,
+        wire,
+        now,
+        false,
+        hopae_grpc::PrincipalKind::Human,
+    )
+}
 #[allow(clippy::too_many_arguments)]
 fn verify_inner(
     signer: &Signer,
@@ -117,9 +135,14 @@ fn verify_inner(
             != match kind {
                 hopae_grpc::PrincipalKind::Service => 2,
                 hopae_grpc::PrincipalKind::Workload => 3,
+                hopae_grpc::PrincipalKind::Human => 1,
                 _ => return Err(Refused),
             }
-        || identity.aal != 0
+        || if kind == hopae_grpc::PrincipalKind::Human {
+            !matches!(identity.aal, 1 | 2)
+        } else {
+            identity.aal != 0
+        }
         || permit.resource != input.resource
         || permit.action != input.action
         || permit.authority_epoch != authority_epoch
@@ -130,6 +153,12 @@ fn verify_inner(
     {
         return Err(Refused);
     }
+    if kind == hopae_grpc::PrincipalKind::Human
+        && (pumgye_core::HumanSubject::parse(&identity.subject_ref).is_err()
+            || hopae_grpc::human_epoch::decode(&context.identity_authority_epoch).is_err())
+    {
+        return Err(Refused);
+    }
     let context = receipt_binding::Context {
         issuer_ref: &context.issuer_ref,
         key_epoch: context.key_epoch,
@@ -137,7 +166,7 @@ fn verify_inner(
         identity: receipt_binding::Identity {
             subject_ref: &identity.subject_ref,
             kind,
-            aal: 0,
+            aal: identity.aal.try_into().map_err(|_| Refused)?,
             revision: identity.revision,
             credential_generation: identity.credential_generation,
         },
@@ -395,6 +424,65 @@ mod tests {
             signer
                 .sign_observed_workload(&input, binding, 100, 700)
                 .is_err()
+        );
+    }
+
+    // Pure private wire/signature tests; not evidence of native Human authentication.
+    #[cfg(feature = "observed-authentication")]
+    #[test]
+    fn human_typed_wire_keeps_assurance_and_rejects_crossclass_reinterpretation() {
+        let (signer, mut input, previous) = fixture();
+        let context = input.context.as_mut().unwrap();
+        context.identity_authority_epoch =
+            hopae_grpc::human_epoch::encode("owned", 7, 1, "123456789abcdef0123456789abcdef0")
+                .unwrap();
+        let identity = context.identity.as_mut().unwrap();
+        identity.kind = 1;
+        identity.aal = 2;
+        identity.subject_ref = format!("human1:{}", "a".repeat(64));
+        identity.revision = 3;
+        identity.credential_generation = 9;
+        let binding = previous.binding.unwrap();
+        let wire = signer
+            .sign_observed_human(&input, binding.clone(), 100, 800)
+            .unwrap();
+        assert!(
+            verify_observed_human(&signer, &binding.authority_epoch, &input, &wire, 200).is_ok()
+        );
+        assert!(
+            verify_observed_workload(&signer, &binding.authority_epoch, &input, &wire, 200)
+                .is_err()
+        );
+        assert!(verify_observed(&signer, &binding.authority_epoch, &input, &wire, 200).is_err());
+        for aal in [0, 3, u32::MAX] {
+            let mut bad = input.clone();
+            bad.context.as_mut().unwrap().identity.as_mut().unwrap().aal = aal;
+            assert!(
+                signer
+                    .sign_observed_human(&bad, binding.clone(), 100, 800)
+                    .is_err()
+            );
+            assert!(
+                verify_observed_human(&signer, &binding.authority_epoch, &bad, &wire, 200).is_err()
+            );
+        }
+        let mut bad = input.clone();
+        bad.context
+            .as_mut()
+            .unwrap()
+            .identity
+            .as_mut()
+            .unwrap()
+            .subject_ref = "s_other".into();
+        assert!(
+            signer
+                .sign_observed_human(&bad, binding.clone(), 100, 800)
+                .is_err()
+        );
+        let mut bad = wire.clone();
+        bad.binding.as_mut().unwrap().authentication_receipt_sha256[0] ^= 1;
+        assert!(
+            verify_observed_human(&signer, &binding.authority_epoch, &input, &bad, 200).is_err()
         );
     }
 }

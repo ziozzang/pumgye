@@ -45,6 +45,10 @@ pub struct Observation<'a> {
     begun: Instant,
 }
 impl Observation<'_> {
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn route_id(&self) -> &str {
+        &self.route_id
+    }
     pub fn configuration_revision(&self) -> u64 {
         self.revision
     }

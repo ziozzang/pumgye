@@ -98,3 +98,14 @@ service WorkloadObservedProjectionPermits {
 service WorkloadResourceAuthorization {
   rpc Decide(ResourceDecisionRequest) returns (ResourceDecisionReply);
 }
+
+// Human-only; only independent native Hop ObserveTime evidence can qualify.
+service HumanObservedProjectionPermits {
+  rpc Issue(AuthenticatedResourceRequest) returns (ObservedProjectionPermitReply);
+  rpc Observe(PermitValidationRequest) returns (ObservedPermitTimeReply);
+}
+
+// Fixed-PEP preliminary Human metadata only, TTL0, never a grant.
+service HumanResourceAuthorization {
+  rpc Decide(ResourceDecisionRequest) returns (ResourceDecisionReply);
+}

@@ -79,6 +79,65 @@ impl Trust {
         })
     }
 
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn human_observed_policy(
+        &self,
+        issuer_ref: &str,
+        scopes: Vec<hopae_grpc::human_observed_client::HumanScope>,
+        minimum_source_revision: u64,
+        minimum_application_generation: u64,
+        minimum_key_registry_revision: u64,
+    ) -> Result<hopae_grpc::human_observed_client::HumanTrustPolicy, Refused> {
+        let issuer = self.issuers.get(issuer_ref).ok_or(Refused)?;
+        if scopes.is_empty()
+            || scopes.len() > 128
+            || scopes.iter().any(|scope| {
+                issuer
+                    .scopes
+                    .get(&scope.service)
+                    .and_then(|a| a.get(&scope.audience))
+                    .is_none()
+            })
+        {
+            return Err(Refused);
+        }
+        Ok(hopae_grpc::human_observed_client::HumanTrustPolicy {
+            issuer_ref: issuer_ref.to_owned(),
+            key_epoch: issuer.key_epoch,
+            verifying_key: ed25519_dalek::VerifyingKey::from_bytes(&issuer.public)
+                .map_err(|_| Refused)?,
+            identity_authority: issuer.identity_epoch.clone(),
+            scopes,
+            minimum_source_revision,
+            minimum_application_generation,
+            minimum_key_registry_revision,
+        })
+    }
+    #[cfg(feature = "observed-authentication")]
+    pub(crate) fn human_observed_scope(
+        &self,
+        c: &hopae_grpc::v1::AuthenticationReceiptContext,
+    ) -> Result<(), Refused> {
+        let issuer = self.issuers.get(&c.issuer_ref).ok_or(Refused)?;
+        let identity = c.identity.as_ref().ok_or(Refused)?;
+        let epoch =
+            hopae_grpc::human_epoch::decode(&c.identity_authority_epoch).map_err(|_| Refused)?;
+        let scope = issuer
+            .scopes
+            .get(&c.service)
+            .and_then(|a| a.get(&c.audience))
+            .ok_or(Refused)?;
+        if identity.kind != 1
+            || !matches!(identity.aal, 1 | 2)
+            || issuer.key_epoch != c.key_epoch
+            || epoch.authority != issuer.identity_epoch
+            || epoch.source_scope_revision < scope.minimum_revision()
+        {
+            return Err(Refused);
+        }
+        Ok(())
+    }
+
     /// Native scope-specific floor, in addition to SDK signature/time checks.
     #[cfg(feature = "observed-authentication")]
     pub(crate) fn observed_scope(
@@ -417,5 +476,101 @@ mod tests {
         assert!(load(&file).is_err());
         std::fs::write(&file, vec![b' '; 64 * 1024 + 1]).unwrap();
         assert!(load(&file).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "observed-authentication"))]
+mod human_tests {
+    use super::*;
+    fn trust() -> Trust {
+        Trust::compile(Document {
+            entries: vec![Entry {
+                issuer_ref: "human-hop".into(),
+                key_epoch: 1,
+                identity_epoch: "owned".into(),
+                service: "orders".into(),
+                audience: "orders-api".into(),
+                minimum_revision: 7,
+                public_key: STANDARD.encode(
+                    ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+                        .verifying_key()
+                        .as_bytes(),
+                ),
+            }],
+        })
+        .unwrap()
+    }
+    fn context() -> hopae_grpc::v1::AuthenticationReceiptContext {
+        hopae_grpc::v1::AuthenticationReceiptContext {
+            issuer_ref: "human-hop".into(),
+            key_epoch: 1,
+            identity_authority_epoch: hopae_grpc::human_epoch::encode(
+                "owned",
+                7,
+                1,
+                "123456789abcdef0123456789abcdef0",
+            )
+            .unwrap(),
+            identity: Some(hopae_grpc::v1::ReceiptIdentity {
+                subject_ref: format!("human1:{}", "a".repeat(64)),
+                kind: 1,
+                aal: 1,
+                revision: 1,
+                credential_generation: 2,
+            }),
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            request_sha256: vec![1; 32],
+        }
+    }
+    #[test]
+    fn human_source_floor_is_not_a_user_revision_floor_and_class_is_fixed() {
+        let trust = trust();
+        let base = context();
+        trust.human_observed_scope(&base).unwrap();
+        let mut other = base.clone();
+        other.identity.as_mut().unwrap().revision = 999;
+        other.identity.as_mut().unwrap().credential_generation = 1000;
+        trust.human_observed_scope(&other).unwrap();
+        for kind in [0, 2, 3, 4, u32::MAX] {
+            let mut bad = base.clone();
+            bad.identity.as_mut().unwrap().kind = kind;
+            assert!(trust.human_observed_scope(&bad).is_err());
+        }
+        for aal in [0, 3, u32::MAX] {
+            let mut bad = base.clone();
+            bad.identity.as_mut().unwrap().aal = aal;
+            assert!(trust.human_observed_scope(&bad).is_err());
+        }
+        let mut bad = base;
+        bad.identity_authority_epoch =
+            hopae_grpc::human_epoch::encode("owned", 6, 1, "123456789abcdef0123456789abcdef0")
+                .unwrap();
+        assert!(trust.human_observed_scope(&bad).is_err());
+    }
+    #[test]
+    fn human_policy_cannot_promote_an_unknown_configured_service() {
+        let trust = trust();
+        assert!(
+            trust
+                .human_observed_policy("human-hop", vec![], 7, 1, 1)
+                .is_err()
+        );
+        let scope = hopae_grpc::human_observed_client::HumanScope {
+            service: "wrong".into(),
+            audience: "orders-api".into(),
+            app_id: "app".into(),
+            route_id: "route".into(),
+            route_revision: 1,
+            destination_sha256: [1; 32],
+            header_policy_revision: 1,
+            header_names: vec![],
+            reserved_names: vec![],
+        };
+        assert!(
+            trust
+                .human_observed_policy("human-hop", vec![scope], 7, 1, 1)
+                .is_err()
+        );
     }
 }

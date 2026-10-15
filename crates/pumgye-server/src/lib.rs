@@ -37,3 +37,8 @@ pub mod observed_permit;
 pub mod authentication_workload_observed;
 #[cfg(feature = "observed-authentication")]
 pub mod workload_observed_permit;
+
+#[cfg(feature = "observed-authentication")]
+pub mod authentication_human_observed;
+#[cfg(feature = "observed-authentication")]
+pub mod human_observed_permit;
