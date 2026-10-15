@@ -177,7 +177,9 @@ impl Mapping {
                 .template
                 .services
                 .values()
-                .all(|s| s.users.is_empty() && s.workload_users.is_empty()),
+                .all(|s| s.users.is_empty()
+                    && s.workload_users.is_empty()
+                    && s.human_users.is_empty()),
             "mapping template cannot contain independent user grants"
         );
         let mut unique = BTreeSet::new();
@@ -514,6 +516,9 @@ mod tests {
             let mut raw = configuration();
             raw["version"] = version.into();
             raw["template"]["services"]["logs"]["workload_users"] = serde_json::json!({"s_529be5b595ab327853eabe2d1adf52256e262af036510607":["reader"]});
+            assert!(Mapping::parse(&serde_json::to_vec(&raw).unwrap()).is_err());
+            raw["template"]["services"]["logs"]["workload_users"] = serde_json::json!({});
+            raw["template"]["services"]["logs"]["human_users"] = serde_json::json!({"human1:1111111111111111111111111111111111111111111111111111111111111111":["reader"]});
             assert!(Mapping::parse(&serde_json::to_vec(&raw).unwrap()).is_err());
         }
         for version in [0, 3] {

@@ -32,6 +32,9 @@ pub struct Service {
     /// Canonical Hopae Workload subjects only; never falls back to `users`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub workload_users: BTreeMap<String, Vec<String>>,
+    /// Canonical Human metadata only; never falls back to other principal maps.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub human_users: BTreeMap<String, Vec<String>>,
     pub networks: Vec<Network>,
     #[serde(default = "yes")]
     pub require_guard: bool,
@@ -157,10 +160,31 @@ struct CompiledService {
     permissions: HashMap<String, u64>,
     users: HashMap<String, Rights>,
     workload_users: HashMap<String, Rights>,
+    human_users: HashMap<String, Rights>,
     networks: PrefixTrie<Rights>,
     hosts: HashMap<IpAddr, Rights>,
     require_guard: bool,
     authorization_context: AuthorizationContext,
+}
+/// Canonical Human subject metadata, never authentication or permission evidence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HumanSubject<'a>(&'a str);
+impl<'a> HumanSubject<'a> {
+    pub fn parse(subject: &'a str) -> Result<Self> {
+        ensure!(
+            subject
+                .strip_prefix("human1:")
+                .is_some_and(|digest| digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
+            "invalid Human subject"
+        );
+        Ok(Self(subject))
+    }
+    pub fn as_str(self) -> &'a str {
+        self.0
+    }
 }
 /// Canonical public identity encoding, not authentication evidence.
 pub fn workload_subject(s: &str) -> bool {
@@ -287,8 +311,9 @@ impl Policy {
                 ensure!(
                     !service.require_guard
                         && service.networks.is_empty()
-                        && service.workload_users.is_empty(),
-                    "Kubernetes API context forbids network/guard requirements and Workload assignments"
+                        && service.workload_users.is_empty()
+                        && service.human_users.is_empty(),
+                    "Kubernetes API context forbids network/guard requirements and typed assignments"
                 );
                 ensure!(
                     service
@@ -298,7 +323,8 @@ impl Policy {
                     "Kubernetes API context requires namespaced API subjects"
                 );
             }
-            total_users += service.users.len() + service.workload_users.len();
+            total_users +=
+                service.users.len() + service.workload_users.len() + service.human_users.len();
             total_networks += service.networks.len();
             ensure!(
                 total_users <= 65536 && total_networks <= 65536,
@@ -328,6 +354,11 @@ impl Policy {
                 ensure!(workload_subject(subject), "invalid workload subject");
                 workload_users.insert(subject.clone(), assignment(ids, &roles)?);
             }
+            let mut human_users = HashMap::new();
+            for (subject, ids) in &service.human_users {
+                HumanSubject::parse(subject)?;
+                human_users.insert(subject.clone(), assignment(ids, &roles)?);
+            }
             let mut networks = PrefixTrie::default();
             let mut hosts = HashMap::new();
             for network in &service.networks {
@@ -349,6 +380,7 @@ impl Policy {
                     permissions,
                     users,
                     workload_users,
+                    human_users,
                     networks,
                     hosts,
                     require_guard: service.require_guard,
@@ -410,6 +442,7 @@ impl Policy {
 enum Principal<'a> {
     Legacy(&'a str),
     Workload(&'a str),
+    Human(&'a str),
 }
 fn evaluate_rights(
     service: &CompiledService,
@@ -578,6 +611,35 @@ impl CompiledPolicy {
         }
         self.evaluate_catalog_entry(resource, action, Principal::Workload(subject), ip, 0, guard)
     }
+    /// Pure scoped Human metadata evaluation; callers own actual authentication.
+    /// Only actual verified AAL1/2 may be supplied at an enforcement boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scoped_human_resource(
+        &self,
+        service: &str,
+        resource: &str,
+        action: &str,
+        subject: &str,
+        ip: IpAddr,
+        aal: u8,
+        guard: GuardEvidence,
+    ) -> ResourceDecision {
+        let Some(resource) = self.resources.get(resource) else {
+            return ResourceDecision::UnknownResource;
+        };
+        if resource.metadata.service != service
+            || self.services[service].authorization_context != AuthorizationContext::NetworkAndGuard
+        {
+            return ResourceDecision::Decided(Decision::UnknownService);
+        }
+        if HumanSubject::parse(subject).is_err() {
+            return ResourceDecision::Decided(Decision::Guest);
+        }
+        if !matches!(aal, 1 | 2) {
+            return ResourceDecision::Decided(Decision::AssuranceDenied);
+        }
+        self.evaluate_catalog_entry(resource, action, Principal::Human(subject), ip, aal, guard)
+    }
     fn evaluate_catalog_entry(
         &self,
         resource: &CompiledResource,
@@ -596,6 +658,7 @@ impl CompiledPolicy {
             match subject {
                 Principal::Legacy(subject) => service.users.get(subject),
                 Principal::Workload(subject) => service.workload_users.get(subject),
+                Principal::Human(subject) => service.human_users.get(subject),
             },
             ip,
             || Some(*permission),

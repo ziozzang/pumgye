@@ -42,6 +42,7 @@ fn main() -> anyhow::Result<()> {
     let service = Service {
         authorization_context: Default::default(),
         workload_users: Default::default(),
+        human_users: Default::default(),
         permissions: vec!["read".into()],
         roles: BTreeMap::from([(
             "reader".into(),
