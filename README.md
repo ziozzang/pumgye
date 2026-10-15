@@ -277,3 +277,12 @@ correlation and scope checks, monotonic exchange-time accounting and configured
 client identity binding. Source workspace tests and strict Clippy pass. Actual
 gateway reference delivery, end-to-end route qualification, release and operating
 adoption remain the next integration gate. Existing deployments are unchanged.
+
+Actual local route-aware integration now passes with the Hangang delivery
+implementation and Hopae fixture 8e1250f: final URI/entity dispatch, wrong
+owner server name/caller refusal, recovery, durable permission/profile withdrawal
+and authority outages. Replacing the owned Pumgye process with signed legacy
+0.1.6 also refuses required route acknowledgement without origin effects.
+The no-owner compatibility mode passes separately. Workspace 69 tests and strict
+Clippy pass. Static release, Kubernetes/operating adoption, signed permissions,
+projection/replay and full objective qualification remain open.
