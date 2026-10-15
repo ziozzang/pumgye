@@ -1,0 +1,53 @@
+{
+  "mapping_sha256": "329df8b6941b2b5f9472ccdf2a4b306aedf6d495d636e99b4ac88209a959ad88",
+  "mappings": [
+    {
+      "active": true,
+      "application_role": "reader",
+      "native_subject": "s_e1cd07a07d0f095f83c9026d5dad0dc4701c7ca3cd8e4ef3",
+      "reason": "matched_explicit_mapping",
+      "service": "logs"
+    }
+  ],
+  "mode": "candidate_only",
+  "policy": {
+    "information_classes": [
+      "public"
+    ],
+    "services": {
+      "logs": {
+        "networks": [
+          {
+            "cidr": "192.0.2.0/24",
+            "roles": [
+              "reader"
+            ]
+          }
+        ],
+        "permissions": [
+          "read"
+        ],
+        "require_guard": true,
+        "roles": {
+          "reader": {
+            "information_classes": [
+              "public"
+            ],
+            "inherits": [],
+            "minimum_aal": 0,
+            "permissions": [
+              "read"
+            ]
+          }
+        },
+        "users": {
+          "s_e1cd07a07d0f095f83c9026d5dad0dc4701c7ca3cd8e4ef3": [
+            "reader"
+          ]
+        }
+      }
+    },
+    "version": 1
+  },
+  "version": 1
+}

@@ -175,6 +175,102 @@ mod tests {
     use super::*;
     use crate::tests::{authority, headers};
     use axum::response::IntoResponse;
+    #[test]
+    fn typed_workload_grants_share_exact_source_view_and_original_retirement() {
+        use pumgye_core::{Decision, GuardEvidence, ResourceDecision};
+        use std::sync::atomic::AtomicU64;
+        let root = tempfile::tempdir().unwrap();
+        let mut owner = authority(root.path());
+        Arc::get_mut(&mut owner).unwrap().kubernetes_owned = true;
+        let mapping = crate::kubernetes_mapping::Mapping::parse(include_bytes!(
+            "../../../examples/kubernetes-workload-mapping-v2.json"
+        ))
+        .unwrap();
+        let inventory = crate::kubernetes::inspect(
+            "example-cluster",
+            include_bytes!("../../../examples/kubernetes-rbac-list.json"),
+        )
+        .unwrap();
+        let policy = mapping.candidate(&inventory).unwrap().policy;
+        let remaining = Arc::new(AtomicU64::new(900));
+        let make_lifetime = || {
+            let read = remaining.clone();
+            crate::source_lifetime::Lifetime::controlled(
+                owner.source_clock.as_ref().unwrap(),
+                Arc::new(move || Some(Duration::from_millis(read.load(Ordering::Acquire)))),
+            )
+        };
+        let lifetime = make_lifetime();
+        install_inner(&owner, policy.clone(), lifetime.clone()).unwrap();
+        let captured = owner.view.load_full();
+        #[cfg(feature = "observed-authentication")]
+        let observed = {
+            use pumgye_server::observed_permit::NativePolicySource;
+            let observed = crate::observed_native::Source(Arc::downgrade(&owner))
+                .capture()
+                .unwrap();
+            assert!(std::ptr::eq(observed.compiled(), &captured.compiled));
+            assert!(observed.current());
+            observed
+        };
+        let subject = "s_e1cd07a07d0f095f83c9026d5dad0dc4701c7ca3cd8e4ef3";
+        assert_eq!(
+            captured.compiled.evaluate_scoped_workload_resource(
+                "logs",
+                "logs:worker",
+                "get",
+                subject,
+                "192.0.2.9".parse().unwrap(),
+                GuardEvidence::EnforcedAllow
+            ),
+            ResourceDecision::Decided(Decision::Allow)
+        );
+        assert!(owner.source_remaining(&captured).is_some());
+        remaining.store(0, Ordering::Release); // A callback expires the ORIGINAL publication.
+        assert!(owner.source_remaining(&captured).is_none());
+        assert!(!owner.available());
+        #[cfg(feature = "observed-authentication")]
+        assert!(!observed.current());
+        remaining.store(900, Ordering::Release);
+        assert!(install_inner(&owner, policy.clone(), lifetime).is_err());
+        assert!(owner.source_remaining(&captured).is_none());
+        install_inner(&owner, policy, make_lifetime()).unwrap();
+        let current = owner.view.load_full();
+        assert!(owner.source_remaining(&current).is_some());
+        assert!(!Arc::ptr_eq(&captured, &current));
+        assert_eq!(captured.document.revision, current.document.revision);
+        #[cfg(feature = "observed-authentication")]
+        assert!(!observed.current()); // Same content revision never revives captured source.
+        // Withdrawing the actual owner fences new and old grants, independent of role lookup.
+        owner.source_ready.store(false, Ordering::Release);
+        assert!(owner.source_remaining(&current).is_none());
+        // Source deletion publishes a new complete native policy, persists its
+        // revision and removes the typed grant from that same compiled View.
+        let mut withdrawn = current.document.policy.clone();
+        withdrawn
+            .services
+            .get_mut("logs")
+            .unwrap()
+            .workload_users
+            .clear();
+        install_inner(&owner, withdrawn, make_lifetime()).unwrap();
+        let withdrawn = owner.view.load_full();
+        assert!(owner.source_remaining(&withdrawn).is_some());
+        assert_eq!(withdrawn.document.revision, current.document.revision + 1);
+        assert_eq!(
+            withdrawn.compiled.evaluate_scoped_workload_resource(
+                "logs",
+                "logs:worker",
+                "get",
+                subject,
+                "192.0.2.9".parse().unwrap(),
+                GuardEvidence::EnforcedAllow
+            ),
+            ResourceDecision::Decided(Decision::Guest)
+        );
+        #[cfg(feature = "observed-authentication")]
+        assert!(!observed.current());
+    }
     #[tokio::test]
     async fn original_publication_budget_fences_generic_resource_readiness_and_repeat_install() {
         use std::sync::atomic::AtomicU64;

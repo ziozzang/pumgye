@@ -23,6 +23,9 @@ pub struct Service {
     pub permissions: Vec<String>,
     pub roles: BTreeMap<String, Role>,
     pub users: BTreeMap<String, Vec<String>>,
+    /// Canonical Hopae Workload subjects only; never falls back to `users`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub workload_users: BTreeMap<String, Vec<String>>,
     pub networks: Vec<Network>,
     #[serde(default = "yes")]
     pub require_guard: bool,
@@ -110,9 +113,19 @@ pub struct CompiledPolicy {
 struct CompiledService {
     permissions: HashMap<String, u64>,
     users: HashMap<String, Rights>,
+    workload_users: HashMap<String, Rights>,
     networks: PrefixTrie<Rights>,
     hosts: HashMap<IpAddr, Rights>,
     require_guard: bool,
+}
+/// Canonical public identity encoding, not authentication evidence.
+pub fn workload_subject(s: &str) -> bool {
+    s.strip_prefix("s_").is_some_and(|digest| {
+        digest.len() == 48
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 fn name(s: &str) -> bool {
     !s.is_empty()
@@ -226,7 +239,7 @@ impl Policy {
                 name(id) && service.roles.len() <= 64,
                 "invalid service or role count"
             );
-            total_users += service.users.len();
+            total_users += service.users.len() + service.workload_users.len();
             total_networks += service.networks.len();
             ensure!(
                 total_users <= 65536 && total_networks <= 65536,
@@ -251,6 +264,11 @@ impl Policy {
                 ensure!(name(subject), "invalid subject");
                 users.insert(subject.clone(), assignment(ids, &roles)?);
             }
+            let mut workload_users = HashMap::new();
+            for (subject, ids) in &service.workload_users {
+                ensure!(workload_subject(subject), "invalid workload subject");
+                workload_users.insert(subject.clone(), assignment(ids, &roles)?);
+            }
             let mut networks = PrefixTrie::default();
             let mut hosts = HashMap::new();
             for network in &service.networks {
@@ -271,6 +289,7 @@ impl Policy {
                 CompiledService {
                     permissions,
                     users,
+                    workload_users,
                     networks,
                     hosts,
                     require_guard: service.require_guard,
@@ -323,9 +342,13 @@ impl Policy {
         })
     }
 }
+enum Principal<'a> {
+    Legacy(&'a str),
+    Workload(&'a str),
+}
 fn evaluate_rights(
     service: &CompiledService,
-    subject: &str,
+    user: Option<&Rights>,
     ip: IpAddr,
     permission: impl FnOnce() -> Option<u64>,
     class: impl FnOnce() -> Option<u64>,
@@ -338,7 +361,7 @@ fn evaluate_rights(
     if service.require_guard && guard != GuardEvidence::EnforcedAllow {
         return Decision::GuardUnavailable;
     }
-    let Some(user) = service.users.get(subject) else {
+    let Some(user) = user else {
         return Decision::Guest;
     };
     if user.permissions == 0 {
@@ -391,7 +414,7 @@ impl CompiledPolicy {
         if resource.metadata.service != service {
             return ResourceDecision::Decided(Decision::UnknownService);
         }
-        self.evaluate_catalog_entry(resource, action, subject, ip, aal, guard)
+        self.evaluate_catalog_entry(resource, action, Principal::Legacy(subject), ip, aal, guard)
     }
     /// Resource class and minimum assurance are owned by the compiled catalog.
     pub fn evaluate_resource(
@@ -406,13 +429,34 @@ impl CompiledPolicy {
         let Some(resource) = self.resources.get(resource) else {
             return ResourceDecision::UnknownResource;
         };
-        self.evaluate_catalog_entry(resource, action, subject, ip, aal, guard)
+        self.evaluate_catalog_entry(resource, action, Principal::Legacy(subject), ip, aal, guard)
+    }
+    /// Native Workload-only resource evaluation. The caller must authenticate the
+    /// Workload and bind service/subject before using this deterministic compiler.
+    /// Workloads have AAL0; client assurance claims cannot elevate this entrypoint.
+    /// Legacy `users` assignments are never consulted.
+    pub fn evaluate_scoped_workload_resource(
+        &self,
+        service: &str,
+        resource: &str,
+        action: &str,
+        subject: &str,
+        ip: IpAddr,
+        guard: GuardEvidence,
+    ) -> ResourceDecision {
+        let Some(resource) = self.resources.get(resource) else {
+            return ResourceDecision::UnknownResource;
+        };
+        if resource.metadata.service != service {
+            return ResourceDecision::Decided(Decision::UnknownService);
+        }
+        self.evaluate_catalog_entry(resource, action, Principal::Workload(subject), ip, 0, guard)
     }
     fn evaluate_catalog_entry(
         &self,
         resource: &CompiledResource,
         action: &str,
-        subject: &str,
+        subject: Principal<'_>,
         ip: IpAddr,
         aal: u8,
         guard: GuardEvidence,
@@ -423,7 +467,10 @@ impl CompiledPolicy {
         let service = &self.services[&resource.metadata.service];
         ResourceDecision::Decided(evaluate_rights(
             service,
-            subject,
+            match subject {
+                Principal::Legacy(subject) => service.users.get(subject),
+                Principal::Workload(subject) => service.workload_users.get(subject),
+            },
             ip,
             || Some(*permission),
             || Some(resource.class),
@@ -449,7 +496,7 @@ impl CompiledPolicy {
         };
         evaluate_rights(
             service,
-            subject,
+            service.users.get(subject),
             ip,
             || service.permissions.get(permission).copied(),
             || self.classes.get(information_class).copied(),

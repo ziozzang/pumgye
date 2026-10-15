@@ -127,6 +127,8 @@ pub struct Candidate {
 pub struct Outcome {
     service: String,
     native_subject: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_class: Option<&'static str>,
     application_role: String,
     active: bool,
     reason: &'static str,
@@ -164,7 +166,9 @@ impl Mapping {
         let mut mapping: Self = serde_json::from_slice(bytes)?;
         mapping.digest = format!("{:x}", Sha256::digest(bytes));
         ensure!(
-            mapping.version == 1 && identifier(&mapping.cluster) && mapping.grants.len() <= 256,
+            (mapping.version == 1 || mapping.version == 2)
+                && identifier(&mapping.cluster)
+                && mapping.grants.len() <= 256,
             "invalid mapping version or capacity"
         );
         mapping.template.compile()?;
@@ -173,7 +177,7 @@ impl Mapping {
                 .template
                 .services
                 .values()
-                .all(|s| s.users.is_empty()),
+                .all(|s| s.users.is_empty() && s.workload_users.is_empty()),
             "mapping template cannot contain independent user grants"
         );
         let mut unique = BTreeSet::new();
@@ -342,13 +346,13 @@ impl Mapping {
             };
             let active = reason == "matched_explicit_mapping";
             if active {
-                let roles = policy
-                    .services
-                    .get_mut(&g.service)
-                    .unwrap()
-                    .users
-                    .entry(g.native_subject.clone())
-                    .or_default();
+                let service = policy.services.get_mut(&g.service).unwrap();
+                let subjects = if self.version == 2 && g.workload.is_some() {
+                    &mut service.workload_users
+                } else {
+                    &mut service.users
+                };
+                let roles = subjects.entry(g.native_subject.clone()).or_default();
                 if !roles.contains(&g.application_role) {
                     roles.push(g.application_role.clone());
                     roles.sort();
@@ -357,6 +361,11 @@ impl Mapping {
             mappings.push(Outcome {
                 service: g.service.clone(),
                 native_subject: g.native_subject.clone(),
+                subject_class: (self.version == 2).then_some(if g.workload.is_some() {
+                    "workload"
+                } else {
+                    "legacy"
+                }),
                 application_role: g.application_role.clone(),
                 active,
                 reason,
@@ -365,7 +374,7 @@ impl Mapping {
         // Recompile the complete resulting policy before returning anything publishable.
         policy.compile()?;
         Ok(Candidate {
-            version: 1,
+            version: self.version,
             mode: "candidate_only",
             mapping_sha256: self.digest.clone(),
             policy,
@@ -395,6 +404,123 @@ mod tests {
                     .unwrap(),
             )
             .unwrap()
+    }
+    #[test]
+    fn version_one_candidate_matches_prechange_release_fixture() {
+        let mapping = Mapping::parse(include_bytes!(
+            "../../../examples/kubernetes-workload-mapping.json"
+        ))
+        .unwrap();
+        let inventory = kubernetes::inspect(
+            "example-cluster",
+            include_bytes!("../../../examples/kubernetes-rbac-list.json"),
+        )
+        .unwrap();
+        let actual = serde_json::to_value(mapping.candidate(&inventory).unwrap()).unwrap();
+        let expected: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/kubernetes-workload-v1-candidate.json"
+        ))
+        .unwrap();
+        assert_eq!(actual, expected);
+    }
+    #[test]
+    fn version_two_workload_mapping_is_typed_and_withdraws_without_legacy_fallback() {
+        use pumgye_core::{Decision, GuardEvidence, ResourceDecision};
+        let bytes = include_bytes!("../../../examples/kubernetes-workload-mapping-v2.json");
+        let mapping = Mapping::parse(bytes).unwrap();
+        let mut raw: Value = serde_json::from_slice(include_bytes!(
+            "../../../examples/kubernetes-rbac-list.json"
+        ))
+        .unwrap();
+        let inventory = |raw: &Value| {
+            kubernetes::inspect("example-cluster", &serde_json::to_vec(raw).unwrap()).unwrap()
+        };
+        let active = mapping.candidate(&inventory(&raw)).unwrap();
+        assert_eq!(active.version, 2);
+        assert_eq!(active.mappings[0].subject_class, Some("workload"));
+        let subject = &active.mappings[0].native_subject;
+        assert_eq!(
+            subject,
+            "s_e1cd07a07d0f095f83c9026d5dad0dc4701c7ca3cd8e4ef3"
+        );
+        assert!(active.policy.services["logs"].users.is_empty());
+        assert_eq!(
+            active.policy.services["logs"].workload_users[subject],
+            vec!["reader"]
+        );
+        let ip = "192.0.2.9".parse().unwrap();
+        let p = active.policy.compile().unwrap();
+        assert_eq!(
+            p.evaluate_scoped_workload_resource(
+                "logs",
+                "logs:worker",
+                "get",
+                subject,
+                ip,
+                GuardEvidence::EnforcedAllow
+            ),
+            ResourceDecision::Decided(Decision::Allow)
+        );
+        assert_eq!(
+            p.evaluate_scoped_resource(
+                "logs",
+                "logs:worker",
+                "get",
+                subject,
+                ip,
+                0,
+                GuardEvidence::EnforcedAllow
+            ),
+            ResourceDecision::Decided(Decision::Guest)
+        );
+        // Recreating a matching binding under a different UID cannot retain either grant map.
+        let binding = raw["items"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|item| item["kind"] == "RoleBinding")
+            .unwrap();
+        binding["metadata"]["uid"] = "replacement-binding".into();
+        let withdrawn = mapping.candidate(&inventory(&raw)).unwrap();
+        assert!(!withdrawn.mappings[0].active);
+        assert!(withdrawn.policy.services["logs"].workload_users.is_empty());
+        assert!(withdrawn.policy.services["logs"].users.is_empty());
+        assert_eq!(
+            withdrawn
+                .policy
+                .compile()
+                .unwrap()
+                .evaluate_scoped_workload_resource(
+                    "logs",
+                    "logs:worker",
+                    "get",
+                    subject,
+                    ip,
+                    GuardEvidence::EnforcedAllow
+                ),
+            ResourceDecision::Decided(Decision::Guest)
+        );
+        // Version2 legacy native_subject grants retain their previous class; no automatic promotion.
+        let mut legacy = configuration();
+        legacy["version"] = 2.into();
+        let native = candidate(&legacy, &source());
+        assert_eq!(native.mappings[0].subject_class, Some("legacy"));
+        assert!(!native.policy.services["logs"].users.is_empty());
+        assert!(native.policy.services["logs"].workload_users.is_empty());
+    }
+    #[test]
+    fn either_mapping_version_rejects_independent_typed_template_grants() {
+        for version in [1, 2] {
+            let mut raw = configuration();
+            raw["version"] = version.into();
+            raw["template"]["services"]["logs"]["workload_users"] = serde_json::json!({"s_529be5b595ab327853eabe2d1adf52256e262af036510607":["reader"]});
+            assert!(Mapping::parse(&serde_json::to_vec(&raw).unwrap()).is_err());
+        }
+        for version in [0, 3] {
+            let mut raw = configuration();
+            raw["version"] = version.into();
+            assert!(Mapping::parse(&serde_json::to_vec(&raw).unwrap()).is_err());
+        }
     }
     #[test]
     fn workload_binding_is_domain_separated_uid_scoped_and_unambiguous() {

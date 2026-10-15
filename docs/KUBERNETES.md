@@ -435,3 +435,43 @@ in `finally`; Retain-policy PVs and backing data remain under the cluster's exis
 retention policy and are reported separately. This fixture does not delete retained
 storage. Kubernetes-source freshness and the full four-component package are separate
 gates; this test uses native policy authority and synthetic trusted caller evidence.
+
+## Typed native Workload policy (compiler stage)
+
+The native policy's optional `services.<service>.workload_users` maps canonical
+Hopae Workload subject references (`s_` followed by 48 lowercase hexadecimal
+characters) to existing application roles. An absent or empty map is omitted
+when serializing policy. It shares the same `Policy.compile()`, role inheritance,
+permission/class/network indexes and immutable authority `View` as `users`.
+Both maps count toward the existing total 65,536 subject assignment limit.
+
+`CompiledPolicy::evaluate_scoped_workload_resource` is the explicit native
+Workload resource entrypoint. Its caller must first authenticate a Workload and
+bind its subject and service. This deterministic compiler does not authenticate
+any supplied string. The entrypoint fixes assurance to AAL0, consults only
+`workload_users`, and retains the existing catalog, role, network and enforced
+Sumunjang guard conjunction. Resource, role or network minimum assurance above
+zero refuses Workload. Existing resource/service entrypoints consult only
+`users`; identical subject bytes never cross either direction. No Human
+assurance, new receipt RPC, or Workload transport activation is provided by this
+compiler stage. Existing Service receipt APIs and default behavior remain intact.
+
+Mapping `version: 1`, including its `workload` coordinate helper, keeps its
+original output and legacy `users` semantics. It does **not** enable typed
+Workload authorization. Use explicit mapping `version: 2` for this stage:
+[typed candidate example](../examples/kubernetes-workload-mapping-v2.json).
+A v2 `workload` grant writes `workload_users`; a `native_subject` grant retains
+legacy `users`. The fields remain mutually exclusive. Both versions reject any
+independent grants in either template map. V2 candidates report `version: 2`
+and each outcome's `subject_class` (`workload` or `legacy`); v1 has no new outcome
+field. The existing issuer/cluster/ServiceAccount UID/Pod UID subject derivation
+is preserved, and v2 still requires the exact pinned source Binding/Role rules.
+A candidate is not authentication, a permit or automatic Kubernetes RBAC access.
+
+Source-authoritative mode publishes the complete candidate through the existing
+single writer, durable revision, compiler and original BOOTTIME source lifetime.
+Withdrawal, expiry and replacement fence the exact captured View even if policy
+content and revision later match. Typed Workload grant removal changes that same
+native policy revision. Actual TokenReview → receipt → Pum permit → paired Hopae
+projection → Hangang dispatch remains a separate integration gate; these policy
+and mapping tests do not claim that chain is enabled.

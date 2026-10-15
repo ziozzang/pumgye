@@ -369,3 +369,38 @@ Linux BOOTTIME 기한을 사용한다. 수집 시작부터 컴파일/영속 커�
 시작을 거부한다. 일반 DB-only strict 운영은 source clock을 초기화하지 않아 기존
 플랫폼 지원을 유지한다. observed permit 활성화는 별도로 native clock이 필요하며
 strict 경로로 대체하지 않는다. 단독 read-only observer 출력은 진단용으로 남는다.
+
+## 타입이 분리된 네이티브 Workload 정책 (컴파일러 단계)
+
+선택적 `services.<service>.workload_users`는 호패의 canonical Workload subject
+(`s_` 뒤 소문자 16진수 48자리)를 기존 애플리케이션 역할에 연결합니다. 필드가
+없거나 비어 있으면 정책 직렬화에도 추가되지 않습니다. 기존 `users`와 같은
+`Policy.compile()`, 역할 상속, 권한/정보등급/네트워크 인덱스와 불변 Authority
+`View`를 사용하며, 두 맵을 합쳐 기존 최대 65,536개 할당 제한을 적용합니다.
+
+`CompiledPolicy::evaluate_scoped_workload_resource`는 명시적인 네이티브 Workload
+리소스 진입점입니다. 호출자는 먼저 Workload를 인증하고 subject/service를
+연결해야 합니다. 이 결정적 컴파일러 자체가 입력 문자열을 인증하지는 않습니다.
+이 경로는 AAL0으로 고정하고 `workload_users`만 조회하며 기존 카탈로그·역할·
+네트워크·수문장 enforced guard 교집합을 유지합니다. 리소스/역할/네트워크가
+AAL1 이상을 요구하면 거절합니다. 기존 리소스/서비스 경로는 `users`만 조회합니다.
+동일한 subject 문자열이 있어도 양방향 fallback은 없습니다. Human assurance,
+새 receipt RPC 또는 Workload 전송 활성화는 이 단계에 포함되지 않습니다.
+기존 Service receipt API와 기본 동작은 유지됩니다.
+
+매핑 `version: 1`은 기존 `workload` 좌표 도우미를 포함하여 원래 출력과 legacy
+`users` 의미를 그대로 유지합니다. typed Workload 허용을 활성화하지 않습니다.
+이 단계에서는 명시적 `version: 2`와 [타입 분리 예제](../examples/kubernetes-workload-mapping-v2.json)를
+사용합니다. v2 `workload` grant는 `workload_users`에, `native_subject` grant는
+기존 `users`에 기록합니다. 두 입력은 함께 지정할 수 없습니다. 두 버전 모두
+템플릿의 어느 맵에도 독립 grant가 있으면 거절합니다. v2 후보는 `version: 2`와
+각 결과의 `subject_class` (`workload` 또는 `legacy`)를 표시하고, v1 결과에는
+새 필드를 넣지 않습니다. 기존 issuer/cluster/ServiceAccount UID/Pod UID 해시와
+정확한 Binding/Role 핀·규칙 조건을 유지합니다. 후보는 인증·permit·자동 RBAC
+권한이 아닙니다.
+
+원천 권위 모드도 기존 단일 작성자·영속 revision·컴파일러·원래 BOOTTIME
+수명으로 전체 정책을 발행합니다. 정책 내용과 revision이 같아져도 철회·만료·
+교체된 이전 View 캡처는 살아나지 않습니다. 실제 TokenReview→receipt→Pum permit→
+paired 호패 projection→한강 dispatch는 후속 통합 게이트이며, 이 단계의 테스트가
+전체 체인 활성화를 의미하지는 않습니다.
