@@ -353,3 +353,10 @@ fleet/restore retirement, static release, Kubernetes and operating adoption and
 throughput are still open.
 
 Workload-only native observed permits are additive and opt-in; see [the contract and qualification limits](docs/WORKLOAD_OBSERVED_PERMITS.md). Service/default APIs are preserved.
+
+## 0.1.9 candidate: opt-in Kubernetes SAR
+
+The [0.1.9 candidate contract](docs/RELEASE_0_1_9.md) records the new default-off
+persistent mTLS SAR listener, unchanged native grant ownership, feature matrix
+and required real API-server/adoption gates. Local fixtures do not constitute
+production rollout or throughput qualification.

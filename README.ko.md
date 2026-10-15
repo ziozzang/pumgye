@@ -297,3 +297,9 @@ RPC를 필수 호출하고 짧아진 만료를 적용합니다. 실제 네 서�
 투영·분산/복원 회수·정적 릴리스·K8s/운영 적용·처리량은 아직 남아 있습니다.
 
 Workload 전용 네이티브 observed permit은 별도 선택 기능입니다. [계약과 검증 범위](docs/WORKLOAD_OBSERVED_PERMITS.ko.md)를 참고하세요. 기존 Service/기본 API는 유지합니다.
+
+## 0.1.9 후보: 선택적 Kubernetes SAR
+
+[0.1.9 후보 계약](docs/RELEASE_0_1_9.ko.md)에 기본-off persistent mTLS SAR listener,
+동일 native grants, feature matrix와 실제 API-server/적용 gate를 기록했습니다.
+로컬 fixture 통과는 운영 적용이나 처리량 완료를 뜻하지 않습니다.
