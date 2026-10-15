@@ -44,7 +44,15 @@ impl Service {
         request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
         issue: bool,
     ) -> Result<crate::authenticated_resource::Outcome, Status> {
-        let _permit = self.admission(request.metadata())?;
+        let permit = self.admission(request.metadata())?;
+        self.authenticated_admitted(request, issue, permit).await
+    }
+    async fn authenticated_admitted(
+        &self,
+        request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
+        issue: bool,
+        _permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<crate::authenticated_resource::Outcome, Status> {
         let metadata = request.metadata().clone();
         let input = request.into_inner();
         if input.receipt.len() != hopae_grpc::receipt::LENGTH || input.request_sha256.len() != 32 {
@@ -131,6 +139,82 @@ impl
 }
 #[tonic::async_trait]
 impl pumgye_grpc::v1::projection_permits_server::ProjectionPermits for Service {
+    async fn validate(
+        &self,
+        request: Request<pumgye_grpc::v1::PermitValidationRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::PermitValidationReply>, Status> {
+        let admission = self.admission(request.metadata())?;
+        let metadata = request.metadata().clone();
+        let input = request.into_inner();
+        if !(1..=9_007_199_254_740_991).contains(&input.request_id) {
+            return Err(Status::invalid_argument("invalid validation correlation"));
+        }
+        let native = input
+            .request
+            .ok_or_else(|| Status::invalid_argument("native request required"))?;
+        let wire = input
+            .permit
+            .ok_or_else(|| Status::invalid_argument("permit required"))?;
+        if self.0.route_live.is_none() || self.0.projection_live.is_none() || native.route.is_none()
+        {
+            return Err(Status::unavailable("native permit owners required"));
+        }
+        let signer = self
+            .0
+            .permit_signer
+            .as_ref()
+            .ok_or_else(|| Status::unavailable("native signer unavailable"))?;
+        let view = self.0.view.load_full();
+        let checked = pumgye_server::permit_wire::verify(
+            signer,
+            &self.0.authority_epoch,
+            &native,
+            &wire,
+            crate::authenticated_resource::now(),
+        )
+        .map_err(|_| Status::permission_denied("permit refused"))?;
+        let mut native = Request::new(native);
+        *native.metadata_mut() = metadata;
+        let outcome = self
+            .authenticated_admitted(native, false, admission)
+            .await?;
+        let owners = outcome
+            .owners
+            .ok_or_else(|| Status::unavailable("native owners unavailable"))?;
+        let now = crate::authenticated_resource::now();
+        if !outcome.allow
+            || checked.revisions()
+                != (
+                    outcome.revision,
+                    outcome.network_revision,
+                    owners.route_revision,
+                    owners.plan_revision,
+                )
+        {
+            return Err(Status::permission_denied("permit owner state retired"));
+        }
+        if !checked.valid_at(now)
+            || now >= owners.expires_ms
+            || !self.0.healthy.load(std::sync::atomic::Ordering::Acquire)
+            || !Arc::ptr_eq(&view, &self.0.view.load_full())
+            || (self.0.kubernetes_owned
+                && (!self
+                    .0
+                    .source_ready
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    || view
+                        .source_expires
+                        .is_none_or(|expires| std::time::Instant::now() >= expires)))
+        {
+            return Err(Status::unavailable("permit validation expired or retired"));
+        }
+        Ok(Response::new(pumgye_grpc::v1::PermitValidationReply {
+            request_id: input.request_id,
+            expires_ms: checked.expires_ms().min(owners.expires_ms),
+            cache_ttl_ms: 0,
+        }))
+    }
+
     async fn issue(
         &self,
         request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
@@ -297,7 +381,7 @@ pub async fn serve(
             .max_encoding_message_size(1024),
         )
         .add_service(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128))
-        .add_service(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(2048))
+        .add_service(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048))
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
     Ok(())
@@ -536,6 +620,33 @@ mod tests {
         };
         let mut permits = pumgye_grpc::v1::projection_permits_client::ProjectionPermitsClient::new(
             channel.clone(),
+        );
+        let validation = |token: &str| {
+            let mut request = Request::new(pumgye_grpc::v1::PermitValidationRequest {
+                request_id: 92,
+                request: None,
+                permit: None,
+            });
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            request
+        };
+        assert_eq!(
+            permits
+                .validate(validation(&owner.admin))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            permits
+                .validate(validation(&owner.decision))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
         );
         assert_eq!(
             permits

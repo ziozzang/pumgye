@@ -66,7 +66,15 @@ pub(crate) struct Query {
     pub(crate) request_sha256: Vec<u8>,
 }
 #[derive(Serialize)]
+pub(crate) struct OwnerState {
+    pub(crate) route_revision: u64,
+    pub(crate) plan_revision: u64,
+    pub(crate) expires_ms: u64,
+}
+#[derive(Serialize)]
 pub(crate) struct Outcome {
+    #[serde(skip)]
+    pub(crate) owners: Option<OwnerState>,
     #[serde(skip)]
     pub(crate) permit: Option<pumgye_grpc::v1::ProjectionPermitReply>,
     pub(crate) route_observed: bool,
@@ -77,7 +85,7 @@ pub(crate) struct Outcome {
     pub(crate) allow: bool,
     ttl_ms: u8,
 }
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |time| time.as_millis().min(u64::MAX as u128) as u64)
@@ -440,7 +448,26 @@ pub(crate) async fn evaluate_mode(
     } else {
         None
     };
+    let owners = route_observation
+        .as_ref()
+        .zip(final_plan.as_ref())
+        .map(|(route, plan)| OwnerState {
+            route_revision: route.configuration_revision(),
+            plan_revision: plan.revision(),
+            expires_ms: route
+                .expires_ms()
+                .min(plan.expires_ms())
+                .min(network.expires_ms())
+                .min(checked.expires_ms()),
+        });
+    if owners
+        .as_ref()
+        .is_some_and(|owners| now() >= owners.expires_ms)
+    {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     Ok(Outcome {
+        owners,
         permit,
         route_observed: route_observation.is_some(),
         version: 1,

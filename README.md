@@ -332,3 +332,14 @@ issuing a permit alone does not deliver an upstream credential.
 Workspace tests and actual mTLS admission/missing-resource refusals pass. The
 positive actual Hangang issuance/receiver/projection path, distributed authority
 incarnation retirement, release and operating adoption remain unqualified.
+
+`ProjectionPermits/Validate` adds current-owner validation for a signed permit
+and its original native request. It verifies the permit-purpose signature,
+original authentication receipt chain, exact process incarnation and scope, then
+reruns native authentication/network/route/plan/policy evaluation. All four owner
+revisions must equal the permit; an exact policy snapshot fence also rejects
+same-number replacement. Expiry is bounded by the permit and new observations,
+with zero cache TTL. The result is a point-in-time observation, not replay
+consumption or a remote lease. Workspace 72 tests, including canonical hostile
+proofs and actual mTLS admission refusal, pass; positive gateway/receiver use is
+a separate integration gate.
