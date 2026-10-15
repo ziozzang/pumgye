@@ -1,5 +1,11 @@
 # Additional gRPC decision transport
 
+Initial caller metadata is authenticated before generated protobuf decoding on
+all four services. Bearer credentials must be in initial headers; trailer-only
+credentials do not grant admission. Handler checks and configured message limits
+remain in place. This is not a cumulative unary-body or process-wide decoding
+memory budget; those shared ingress controls remain separate work.
+
 [한국어](GRPC.ko.md)
 
 Status: implemented and locally qualified for Pumgye service-matrix decisions.

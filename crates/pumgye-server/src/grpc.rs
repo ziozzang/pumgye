@@ -13,12 +13,10 @@ use std::{
 use tokio::net::TcpListener;
 use tonic::{Request, Response, Status, transport::ServerTlsConfig};
 
+#[derive(Clone)]
 struct Service(Arc<Authority>);
 impl Service {
-    fn admission(
-        &self,
-        metadata: &tonic::metadata::MetadataMap,
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, Status> {
+    fn caller(&self, metadata: &tonic::metadata::MetadataMap) -> Result<(), Status> {
         let mut values = metadata.get_all("authorization").iter();
         let value = values
             .next()
@@ -31,12 +29,29 @@ impl Service {
         {
             return Err(Status::unauthenticated("decision credential required"));
         }
+        Ok(())
+    }
+    fn admission(
+        &self,
+        metadata: &tonic::metadata::MetadataMap,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, Status> {
+        self.caller(metadata)?;
         self.0
             .requests
             .clone()
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("decision capacity"))
     }
+}
+fn authenticate_transport<S>(
+    service: S,
+    authority: Arc<Authority>,
+) -> tonic::service::interceptor::InterceptedService<S, impl tonic::service::Interceptor + Clone> {
+    let caller = Service(authority);
+    tonic::service::interceptor::InterceptedService::new(service, move |request: Request<()>| {
+        caller.caller(request.metadata())?;
+        Ok(request)
+    })
 }
 impl Service {
     async fn authenticated(
@@ -368,20 +383,22 @@ pub async fn serve(
 ) -> Result<()> {
     let incoming = hangang_runtime::incoming(listener);
     hangang_runtime::server(tls)?
-        .add_service(
+        .add_service(authenticate_transport(
             AuthorizationServer::new(Service(authority.clone()))
                 .max_decoding_message_size(2048)
                 .max_encoding_message_size(1024),
-        )
-        .add_service(
+            authority.clone(),
+        ))
+        .add_service(authenticate_transport(
             pumgye_grpc::v1::resource_authorization_server::ResourceAuthorizationServer::new(
                 Service(authority.clone()),
             )
             .max_decoding_message_size(2048)
             .max_encoding_message_size(1024),
-        )
-        .add_service(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128))
-        .add_service(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048))
+            authority.clone(),
+        ))
+        .add_service(authenticate_transport(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128), authority.clone()))
+        .add_service(authenticate_transport(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048), authority))
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
     Ok(())
@@ -991,5 +1008,218 @@ mod tests {
             .into_inner();
         assert_eq!(reply.verdict, 3);
         assert_eq!(reply.native_reason, 255);
+    }
+
+    use axum::{
+        body::{Body, Bytes},
+        http,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tower::ServiceExt;
+
+    struct PredecodeStream {
+        polls: Arc<AtomicUsize>,
+        forbid_poll: bool,
+        chunks: std::collections::VecDeque<Bytes>,
+    }
+    impl tonic::codegen::tokio_stream::Stream for PredecodeStream {
+        type Item = Result<Bytes, std::io::Error>;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                !self.forbid_poll,
+                "unauthenticated protobuf body was polled"
+            );
+            std::task::Poll::Ready(self.chunks.pop_front().map(Ok))
+        }
+    }
+    fn predecode_body(chunks: Vec<Bytes>, forbid_poll: bool) -> (Body, Arc<AtomicUsize>) {
+        let polls = Arc::new(AtomicUsize::new(0));
+        (
+            Body::from_stream(PredecodeStream {
+                polls: polls.clone(),
+                forbid_poll,
+                chunks: chunks.into(),
+            }),
+            polls,
+        )
+    }
+    fn predecode_frame(payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![0];
+        frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+    fn predecode_request(path: &str, credentials: &[&str], body: Body) -> http::Request<Body> {
+        let mut request = http::Request::builder()
+            .method("POST")
+            .version(http::Version::HTTP_2)
+            .uri(path)
+            .header("content-type", "application/grpc")
+            .header("te", "trailers")
+            .body(body)
+            .unwrap();
+        for credential in credentials {
+            request
+                .headers_mut()
+                .append("authorization", credential.parse().unwrap());
+        }
+        request
+    }
+    async fn predecode_response<B>(response: http::Response<B>) -> (u16, Vec<u8>)
+    where
+        B: tonic::codegen::Body<Data = Bytes> + Unpin,
+        B::Error: std::fmt::Debug,
+    {
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let mut status = response
+            .headers()
+            .get("grpc-status")
+            .map(|v| v.to_str().unwrap().parse::<u16>().unwrap());
+        let mut body = response.into_body();
+        let mut data = Vec::new();
+        while let Some(frame) =
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut body).poll_frame(cx)).await
+        {
+            match frame.unwrap().into_data() {
+                Ok(bytes) => data.extend_from_slice(&bytes),
+                Err(frame) => {
+                    if let Ok(trailers) = frame.into_trailers()
+                        && let Some(value) = trailers.get("grpc-status")
+                    {
+                        status = Some(value.to_str().unwrap().parse::<u16>().unwrap());
+                    }
+                }
+            }
+        }
+        (status.expect("gRPC status"), data)
+    }
+
+    fn predecode_service(
+        owner: Arc<Authority>,
+        kind: usize,
+    ) -> tower::util::BoxCloneService<
+        http::Request<Body>,
+        http::Response<Body>,
+        std::convert::Infallible,
+    > {
+        macro_rules! wrap {
+            ($server:expr) => {
+                tower::util::BoxCloneService::new(
+                    tower::ServiceExt::<http::Request<Body>>::map_response(
+                        authenticate_transport($server, owner.clone()),
+                        |response| response.map(Body::new),
+                    ),
+                )
+            };
+        }
+        match kind {
+                0 => wrap!(AuthorizationServer::new(Service(owner.clone())).max_decoding_message_size(2048).max_encoding_message_size(1024)),
+                1 => wrap!(pumgye_grpc::v1::resource_authorization_server::ResourceAuthorizationServer::new(Service(owner.clone())).max_decoding_message_size(2048).max_encoding_message_size(1024)),
+                2 => wrap!(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(owner.clone())).max_decoding_message_size(4096).max_encoding_message_size(128)),
+                3 => wrap!(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(owner.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048)),
+                _ => panic!("unknown test service"),
+            }
+    }
+    const PREDECODE_METHODS: &[(usize, &str, usize)] = &[
+        (0, "/hangang.pumgye.v1.Authorization/Decide", 2048),
+        (1, "/hangang.pumgye.v1.ResourceAuthorization/Decide", 2048),
+        (
+            2,
+            "/hangang.pumgye.v1.AuthenticatedResourceAuthorization/Decide",
+            4096,
+        ),
+        (3, "/hangang.pumgye.v1.ProjectionPermits/Issue", 8192),
+        (3, "/hangang.pumgye.v1.ProjectionPermits/Validate", 8192),
+    ];
+    #[tokio::test]
+    async fn predecode_auth_rejects_missing_wrong_role_and_duplicate_headers_before_body() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = crate::tests::authority(root.path());
+        for &(kind, path, _) in PREDECODE_METHODS {
+            for credentials in [
+                vec![],
+                vec!["Bearer incorrect"],
+                vec!["Bearer fixture-admin-credential"],
+                vec!["Bearer fixture-decision-credential", "Bearer incorrect"],
+                vec!["Bearer incorrect", "Bearer fixture-decision-credential"],
+                vec![
+                    "Bearer fixture-decision-credential",
+                    "Bearer fixture-decision-credential",
+                ],
+            ] {
+                let (body, polls) = predecode_body(vec![Bytes::from_static(&[255; 5])], true);
+                let response = predecode_service(owner.clone(), kind)
+                    .oneshot(predecode_request(path, &credentials, body))
+                    .await
+                    .unwrap();
+                let (status, data) = predecode_response(response).await;
+                assert_eq!(status, tonic::Code::Unauthenticated as u16, "{path}");
+                assert!(data.is_empty());
+                assert_eq!(polls.load(Ordering::SeqCst), 0);
+                assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+                assert_eq!(owner.requests.available_permits(), 4096);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn predecode_auth_preserves_decoding_and_real_decision_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = crate::tests::authority(root.path());
+        // Canonical DecisionRequest protobuf: id=7, ip=192.0.2.8, aal=1,
+        // enforced allow evidence, orders/fixture/read/public, minimum=0.
+        let payload = b"\x08\x07\x1a\x04\xc0\x00\x02\x08\x20\x01\x28\x01\x32\x06orders\x3a\x07fixture\x42\x04read\x4a\x06public";
+        let frame = predecode_frame(payload);
+        let (body, polls) = predecode_body(
+            vec![
+                Bytes::copy_from_slice(&frame[..2]),
+                Bytes::copy_from_slice(&frame[2..5]),
+                Bytes::copy_from_slice(&frame[5..]),
+            ],
+            false,
+        );
+        let response = predecode_service(owner.clone(), 0)
+            .oneshot(predecode_request(
+                PREDECODE_METHODS[0].1,
+                &["Bearer fixture-decision-credential"],
+                body,
+            ))
+            .await
+            .unwrap();
+        let (status, data) = predecode_response(response).await;
+        assert_eq!(status, tonic::Code::Ok as u16);
+        // The fixture's revision-one catalog denies the unknown service:
+        // request_id=7, revision=1, verdict=2, native_reason=1, cache_ttl=0.
+        assert_eq!(data, predecode_frame(b"\x08\x07\x10\x01\x18\x02\x20\x01"));
+        assert_eq!(owner.queries.load(Ordering::SeqCst), 1);
+        assert!(polls.load(Ordering::SeqCst) >= 3);
+        assert_eq!(owner.requests.available_permits(), 4096);
+    }
+    #[tokio::test]
+    async fn predecode_auth_preserves_each_generated_service_message_cap() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = crate::tests::authority(root.path());
+        for &(kind, path, limit) in PREDECODE_METHODS {
+            let mut prefix = vec![0];
+            prefix.extend_from_slice(&u32::try_from(limit + 1).unwrap().to_be_bytes());
+            let (body, polls) = predecode_body(vec![Bytes::from(prefix)], false);
+            let response = predecode_service(owner.clone(), kind)
+                .oneshot(predecode_request(
+                    path,
+                    &["Bearer fixture-decision-credential"],
+                    body,
+                ))
+                .await
+                .unwrap();
+            let (status, data) = predecode_response(response).await;
+            assert_eq!(status, tonic::Code::OutOfRange as u16, "{path}");
+            assert!(data.is_empty());
+            assert!(polls.load(Ordering::SeqCst) > 0);
+            assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+            assert_eq!(owner.requests.available_permits(), 4096);
+        }
     }
 }
