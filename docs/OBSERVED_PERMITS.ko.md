@@ -28,8 +28,8 @@ nonce와 Linux BOOTTIME 시계를 만든다. permit의 서명된 `binding.author
 publication 세대가 계속 유효해야 한다. Kubernetes 수집에는 Authority BOOTTIME
 틱을 사용하고 원래 수집 결과의 `valid_until_ms`를 publication 트랜잭션 전에 비공개
 `LocalDeadline`에 묶는다. 수집, 컴파일, 영속 커밋, RPC, 콜백, 서명, 호스트 suspend가
-모두 이 원래 예산을 소비한다. source evidence가 없거나 만료/폐기되면 기존 `Instant`
-기한이 남아 있어도 observed 인가는 거부한다.
+모두 이 원래 예산을 소비한다. source evidence가 없거나 만료/폐기되면 인가를 거부한다.
+strict 결정과 readiness도 같은 원래 publication 수명을 사용하며 `Instant` 구제는 없다.
 
 발급에는 고정 Hopae SDK 클라이언트의 실제 `CheckedObservedService`, Sumunjang의
 Enforce Allow, 실제 route/plan 소유자 관찰, 정책 Allow가 모두 필요하다. 기존

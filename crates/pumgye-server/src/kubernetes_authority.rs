@@ -1,47 +1,44 @@
 //! Sole-writer Kubernetes source reconciliation with process-local, non-persisted leases.
 use crate::{Authority, Document, View, kubernetes_api::Collector, kubernetes_mapping::Mapping};
 use anyhow::{Result, ensure};
+#[cfg(all(test, target_os = "linux"))]
+use std::time::Instant;
 use std::{
     path::PathBuf,
     sync::{Arc, atomic::Ordering},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
-#[cfg(any(test, not(feature = "observed-authentication")))]
+#[cfg(all(test, target_os = "linux"))]
 fn install(a: &Authority, policy: pumgye_core::Policy, expires: Instant) -> Result<()> {
-    #[cfg(feature = "observed-authentication")]
-    let observed = {
-        let start = a
-            .source_clock
-            .begin_exchange()
-            .map_err(|_| anyhow::anyhow!("source clock unavailable"))?;
-        let remaining = expires.saturating_duration_since(Instant::now());
-        let sample = a
-            .source_clock
-            .finish_exchange(start)
-            .map_err(|_| anyhow::anyhow!("source clock unavailable"))?;
-        let bound = sample
-            .before_ticks()
-            .checked_add(u64::try_from(remaining.as_millis())?)
-            .ok_or_else(|| anyhow::anyhow!("source deadline overflow"))?;
-        sample
-            .bind_bounds(bound, bound)
-            .map_err(|_| anyhow::anyhow!("source deadline expired"))?
-            .0
-    };
-    install_inner(
-        a,
-        policy,
-        expires,
-        #[cfg(feature = "observed-authentication")]
-        observed,
-    )
+    let clock = a
+        .source_clock
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("source clock absent"))?;
+    let sample = clock
+        .finish_exchange(
+            clock
+                .begin_exchange()
+                .map_err(|_| anyhow::anyhow!("source clock unavailable"))?,
+        )
+        .map_err(|_| anyhow::anyhow!("source clock unavailable"))?;
+    let bound = sample
+        .before_ticks()
+        .checked_add(u64::try_from(
+            expires
+                .saturating_duration_since(Instant::now())
+                .as_millis(),
+        )?)
+        .ok_or_else(|| anyhow::anyhow!("source expiry overflow"))?;
+    let (deadline, _) = sample
+        .bind_bounds(bound, bound)
+        .map_err(|_| anyhow::anyhow!("source expired"))?;
+    install_inner(a, policy, crate::source_lifetime::Lifetime::new(deadline))
 }
 fn install_inner(
     a: &Authority,
     policy: pumgye_core::Policy,
-    expires: Instant,
-    #[cfg(feature = "observed-authentication")] observed: hangang_runtime::time::LocalDeadline,
+    lifetime: Arc<crate::source_lifetime::Lifetime>,
 ) -> Result<()> {
     a.source_ready.store(false, Ordering::Release);
     ensure!(
@@ -53,7 +50,16 @@ fn install_inner(
         a.healthy.store(false, Ordering::Release);
         anyhow::anyhow!("source persistence unavailable")
     })?;
-    ensure!(Instant::now() < expires, "source lease expired");
+    ensure!(
+        lifetime
+            .remaining(
+                a.source_clock
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("source clock absent"))?
+            )
+            .is_some(),
+        "source lease expired"
+    );
     let previous = a.view.load_full();
     let changed = serde_json::to_vec(&previous.document.policy)? != serde_json::to_vec(&policy)?;
     let revision = if changed {
@@ -79,12 +85,18 @@ fn install_inner(
     a.view.store(Arc::new(View {
         document,
         compiled,
-        source_expires: Some(expires),
-        #[cfg(feature = "observed-authentication")]
-        source_observed_deadline: Some(observed),
+        source_lifetime: Some(lifetime.clone()),
     }));
-    a.source_ready
-        .store(Instant::now() < expires, Ordering::Release);
+    a.source_ready.store(
+        lifetime
+            .remaining(
+                a.source_clock
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("source clock absent"))?,
+            )
+            .is_some(),
+        Ordering::Release,
+    );
     Ok(())
 }
 
@@ -95,76 +107,31 @@ pub async fn run(
     ca: PathBuf,
     token: PathBuf,
 ) {
-    #[cfg(not(feature = "observed-authentication"))]
-    let epoch = Instant::now();
     loop {
         // Withdraw before collection; errors never retain a prior permissive view.
         a.source_ready.store(false, Ordering::Release);
         a.source_phase.store(1, Ordering::Release);
-        #[cfg(not(feature = "observed-authentication"))]
-        let now = u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
-        #[cfg(feature = "observed-authentication")]
-        let now = source_ticks(&a).unwrap_or(u64::MAX);
-        let phase = if collector.refresh(&ca, &token, now).await.is_err() {
+        let collection = match source_ticks(&a) {
+            Ok(now) => collector.refresh(&ca, &token, now).await,
+            Err(error) => Err(error),
+        };
+        let phase = if collection.is_err() {
             // Do not expose transport errors, URLs, credential paths or provider bodies.
             3
         } else {
-            #[cfg(not(feature = "observed-authentication"))]
-            let now = u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX);
-            #[cfg(feature = "observed-authentication")]
-            let now = source_ticks(&a).unwrap_or(u64::MAX);
-            let candidate = collector.fresh(now).and_then(|observation| {
-                let policy = mapping.candidate(&observation.inventory).ok()?.policy;
-                #[cfg(not(feature = "observed-authentication"))]
-                let expires =
-                    epoch.checked_add(Duration::from_millis(observation.valid_until_ms))?;
-                #[cfg(feature = "observed-authentication")]
-                let expires = Instant::now().checked_add(Duration::from_millis(
-                    observation.valid_until_ms.checked_sub(now)?,
-                ))?;
-                #[cfg(feature = "observed-authentication")]
-                let deadline = {
-                    let bound = observation.valid_until_ms;
-                    let result = a
-                        .source_clock
-                        .begin_exchange()
-                        .and_then(|start| a.source_clock.finish_exchange(start))
-                        .and_then(|sample| sample.bind_bounds(bound, bound));
-                    match result {
-                        Ok((deadline, _)) => deadline,
-                        Err(error) => {
-                            if matches!(
-                                error,
-                                hangang_runtime::time::TimeError::ClockRead
-                                    | hangang_runtime::time::TimeError::UnsupportedClock
-                                    | hangang_runtime::time::TimeError::Overflow
-                            ) {
-                                a.source_clock.retire();
-                                a.source_ready.store(false, Ordering::Release);
-                            }
-                            return None;
-                        }
-                    }
-                };
-                #[cfg(not(feature = "observed-authentication"))]
-                let deadline = expires;
-                Some((policy, expires, deadline))
-            });
-            if let Some((policy, expires, deadline)) = candidate {
+            let candidate = source_ticks(&a)
+                .ok()
+                .and_then(|now| collector.fresh(now))
+                .and_then(|observation| {
+                    let policy = mapping.candidate(&observation.inventory).ok()?.policy;
+                    let clock = a.source_clock.as_ref()?;
+                    let lifetime = observation.lifetime(clock)?;
+                    Some((policy, lifetime))
+                });
+            if let Some((policy, lifetime)) = candidate {
                 let active = a.clone();
-                // Durable writes and compilation stay off the decision executor.
-                match tokio::task::spawn_blocking(move || {
-                    #[cfg(feature = "observed-authentication")]
-                    {
-                        install_inner(&active, policy, expires, deadline)
-                    }
-                    #[cfg(not(feature = "observed-authentication"))]
-                    {
-                        let _ = deadline;
-                        install(&active, policy, expires)
-                    }
-                })
-                .await
+                match tokio::task::spawn_blocking(move || install_inner(&active, policy, lifetime))
+                    .await
                 {
                     Ok(Ok(())) => 2,
                     _ => 4,
@@ -178,25 +145,133 @@ pub async fn run(
     }
 }
 
-#[cfg(feature = "observed-authentication")]
+fn invalidate_source(a: &Authority) {
+    a.source_ready.store(false, Ordering::Release);
+    if let Some(lifetime) = &a.view.load().source_lifetime {
+        lifetime.retire();
+    }
+}
 fn source_ticks(a: &Authority) -> Result<u64> {
+    let previous = a.source_ticks_floor.load(Ordering::Acquire);
     let result = a
         .source_clock
-        .begin_exchange()
-        .and_then(|s| a.source_clock.finish_exchange(s))
-        .map(|s| s.after_ticks());
-    result.map_err(|_| {
-        a.source_clock.retire();
-        a.source_ready.store(false, Ordering::Release);
-        anyhow::anyhow!("source clock unavailable")
-    })
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("source clock absent"))?
+        .sample_ticks();
+    match result {
+        Ok(now) if now >= previous => {
+            a.source_ticks_floor.fetch_max(now, Ordering::AcqRel);
+            Ok(now)
+        }
+        _ => {
+            invalidate_source(a);
+            Err(anyhow::anyhow!("source clock unavailable or reversed"))
+        }
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use crate::tests::{authority, headers};
     use axum::response::IntoResponse;
+    #[tokio::test]
+    async fn original_publication_budget_fences_generic_resource_readiness_and_repeat_install() {
+        use std::sync::atomic::AtomicU64;
+        let root = tempfile::tempdir().unwrap();
+        let mut a = authority(root.path());
+        Arc::get_mut(&mut a).unwrap().kubernetes_owned = true;
+        let document: Document =
+            serde_json::from_str(include_str!("../../../examples/resource-catalog.json")).unwrap();
+        let remaining = Arc::new(AtomicU64::new(900));
+        let read = remaining.clone();
+        let lifetime = crate::source_lifetime::Lifetime::controlled(
+            a.source_clock.as_ref().unwrap(),
+            Arc::new(move || Some(Duration::from_millis(read.load(Ordering::Acquire)))),
+        );
+        install_inner(&a, document.policy.clone(), lifetime.clone()).unwrap();
+        let revision = a.view.load().document.revision;
+        a.source_phase.store(2, Ordering::Release);
+        let query = pumgye_protocol::Query {
+            request_id: 1,
+            minimum_revision: 1,
+            ip: "192.0.2.9".parse().unwrap(),
+            aal: 2,
+            guard: crate::GuardEvidence::EnforcedAllow,
+            service_id: "orders",
+            subject: "fixture",
+            permission: "read",
+            information_class: "internal",
+        };
+        let resource = crate::ResourceEvaluation {
+            service_id: "orders",
+            resource: "db:orders",
+            action: "select",
+            subject: "fixture",
+            ip: query.ip,
+            aal: 2,
+            guard: query.guard,
+            minimum_revision: 1,
+        };
+        assert_eq!(
+            a.evaluate(&query).decision,
+            Some(pumgye_core::Decision::Allow)
+        );
+        assert!(a.resource_authorize_then(&resource, |_, _| ()).is_ok());
+        let captured = a.view.load_full();
+        remaining.store(700, Ordering::Release);
+        assert_eq!(
+            a.source_remaining(&captured).unwrap(),
+            Duration::from_millis(700)
+        );
+        // Reinstalling the same immutable source observation preserves its
+        // remaining budget; no policy/version equality can re-anchor it.
+        install_inner(&a, document.policy.clone(), lifetime.clone()).unwrap();
+        assert_eq!(
+            a.source_remaining(&a.view.load()).unwrap(),
+            Duration::from_millis(700)
+        );
+        assert_eq!(a.view.load().document.revision, revision);
+        let private = a.resource_authorize_then(&resource, |_, _| {
+            remaining.store(0, Ordering::Release);
+            "private signed candidate"
+        });
+        assert!(private.is_err());
+        assert!(a.evaluate(&query).decision.is_none());
+        assert!(!a.available());
+        assert_eq!(
+            crate::readiness(crate::State(a.clone()))
+                .await
+                .into_response()
+                .status(),
+            crate::StatusCode::SERVICE_UNAVAILABLE
+        );
+        let status = crate::status(crate::State(a.clone())).await.0;
+        assert_eq!(status["source_state"], "expired");
+        assert_eq!(status["source_lease_remaining_ms"], 0);
+        remaining.store(900, Ordering::Release); // wall/repeat-poll recovery cannot revive old evidence
+        assert!(install_inner(&a, document.policy.clone(), lifetime.clone()).is_err());
+        assert!(!a.available());
+        // Only a distinct legitimate complete collection may publish a fresh
+        // lifetime, even when the native policy's content revision is unchanged.
+        let read = remaining.clone();
+        let fresh = crate::source_lifetime::Lifetime::controlled(
+            a.source_clock.as_ref().unwrap(),
+            Arc::new(move || Some(Duration::from_millis(read.load(Ordering::Acquire)))),
+        );
+        install_inner(&a, document.policy, fresh).unwrap();
+        assert_eq!(a.view.load().document.revision, revision);
+        assert!(a.available());
+        assert_eq!(
+            a.evaluate(&query).decision,
+            Some(pumgye_core::Decision::Allow)
+        );
+        assert!(
+            lifetime
+                .remaining(a.source_clock.as_ref().unwrap())
+                .is_none()
+        );
+    }
     #[tokio::test]
     async fn management_distinguishes_source_failure_and_expired_grants() {
         let root = tempfile::tempdir().unwrap();
@@ -245,9 +320,7 @@ mod tests {
         a.view.store(Arc::new(View {
             compiled: document.policy.compile().unwrap(),
             document,
-            source_expires: Some(Instant::now()),
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         let current = crate::status(crate::State(a.clone())).await.0;
         assert_eq!(
@@ -294,9 +367,7 @@ mod tests {
         a.view.store(Arc::new(View {
             compiled: expired.policy.compile().unwrap(),
             document: expired,
-            source_expires: Some(Instant::now()),
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         assert!(!a.available());
         install(&a, policy.clone(), Instant::now() + Duration::from_secs(1)).unwrap();

@@ -236,11 +236,7 @@ pub(crate) async fn evaluate_mode(
     let current = || {
         a.healthy.load(Ordering::Acquire)
             && Arc::ptr_eq(&view, &a.view.load_full())
-            && (!a.kubernetes_owned
-                || (a.source_ready.load(Ordering::Acquire)
-                    && view
-                        .source_expires
-                        .is_some_and(|deadline| std::time::Instant::now() < deadline)))
+            && a.source_remaining(&view).is_some()
     };
     if !current() || view.document.revision < q.minimum_revision {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
@@ -339,8 +335,7 @@ pub(crate) async fn evaluate_mode(
             base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, nonce);
         let start = now();
         let policy_budget = if a.kubernetes_owned {
-            view.source_expires
-                .and_then(|expires| expires.checked_duration_since(std::time::Instant::now()))
+            a.source_remaining(&view)
                 .map(|duration| duration.as_millis().min(1000) as u64)
                 .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
         } else {

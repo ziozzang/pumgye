@@ -18,23 +18,6 @@ impl NativePolicySource for Source {
         Ok(Arc::new(Snapshot { owner, view }))
     }
 }
-impl Snapshot {
-    fn source_remaining(&self) -> Result<std::time::Duration, Status> {
-        let result = self
-            .view
-            .source_observed_deadline
-            .as_ref()
-            .ok_or_else(|| Status::unavailable("policy source evidence absent"))?
-            .remaining(&self.owner.source_clock);
-        result.map_err(|err| {
-            if !matches!(err, hangang_runtime::time::TimeError::Expired) {
-                self.owner.source_clock.retire();
-                self.owner.source_ready.store(false, Ordering::Release);
-            }
-            Status::unavailable("policy source expired or clock retired")
-        })
-    }
-}
 impl NativePolicySnapshot for Snapshot {
     fn compiled(&self) -> &CompiledPolicy {
         &self.view.compiled
@@ -45,9 +28,7 @@ impl NativePolicySnapshot for Snapshot {
     fn current(&self) -> bool {
         self.owner.healthy.load(Ordering::Acquire)
             && Arc::ptr_eq(&self.view, &self.owner.view.load_full())
-            && (!self.owner.kubernetes_owned
-                || (self.owner.source_ready.load(Ordering::Acquire)
-                    && self.source_remaining().is_ok()))
+            && self.owner.source_remaining(&self.view).is_some()
     }
     fn remaining(&self) -> Result<std::time::Duration, Status> {
         if !self.current() {
@@ -56,11 +37,13 @@ impl NativePolicySnapshot for Snapshot {
         if !self.owner.kubernetes_owned {
             return Ok(std::time::Duration::from_millis(1000));
         }
-        self.source_remaining()
+        self.owner
+            .source_remaining(&self.view)
+            .ok_or_else(|| Status::unavailable("policy source evidence expired or retired"))
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     #[tokio::test]
@@ -78,8 +61,7 @@ mod tests {
         owner.view.store(Arc::new(View {
             compiled: document.policy.compile().unwrap(),
             document,
-            source_expires: None,
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         assert!(!snapshot.current());
         drop(snapshot);
@@ -91,9 +73,9 @@ mod tests {
         let source = Source(Arc::downgrade(&owner));
         owner.source_ready.store(true, Ordering::Release);
         assert!(!source.capture().unwrap().current());
-        let sample = owner
-            .source_clock
-            .finish_exchange(owner.source_clock.begin_exchange().unwrap())
+        let clock = owner.source_clock.as_ref().unwrap();
+        let sample = clock
+            .finish_exchange(clock.begin_exchange().unwrap())
             .unwrap();
         let bound = sample.before_ticks() + 30;
         let deadline = sample.bind_bounds(bound, bound).unwrap().0;
@@ -101,9 +83,7 @@ mod tests {
         owner.view.store(Arc::new(View {
             compiled: document.policy.compile().unwrap(),
             document,
-            // A legacy non-suspend clock cannot rescue observed readiness.
-            source_expires: Some(std::time::Instant::now() + std::time::Duration::from_secs(60)),
-            source_observed_deadline: Some(deadline),
+            source_lifetime: Some(crate::source_lifetime::Lifetime::new(deadline)),
         }));
         let snapshot = source.capture().unwrap();
         assert!(snapshot.current());

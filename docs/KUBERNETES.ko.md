@@ -53,7 +53,8 @@ continue를 URL 인코딩하고 순환·페이지간 collection resourceVersion 
 부분 상태를 게시하지 않습니다. 종류별 버전은 독립이므로 전역 원자 스냅샷이 아닙니다.
 
 불변 ArcSwap 관찰 상태는 프로세스 내부 revision, 네 collection 버전, inventory,
-프로세스 상대 valid_until_ms를 갖습니다. 삭제·내용·원천 버전 변경은 revision을
+프로세스 로컬 Linux BOOTTIME tick인 `valid_until_ms`를 갖습니다. 이 값은 UTC가
+아니고 다른 프로세스에서 비교할 수 없으며 프로세스 간 권한 증거로 사용할 수 없습니다. 삭제·내용·원천 버전 변경은 revision을
 올리고 동일한 관찰은 유지합니다. 수집 전 기존 상태를 비우며 실패 시 available:false를
 출력합니다. 신선도는 수집 시작 후 최대 1초이며 통신·정규화·해시 시간도 소비합니다. 진단 출력은 권한 receipt가 아니며
 워크로드 검증·앱 매핑·권한 부여를 포함하지 않습니다. revision은 재시작 시 초기화하며
@@ -351,3 +352,20 @@ Pod UID 교체 후 PVC의 정책·리비전 보존 및 같은 거부를 검사�
 보고합니다. 이 fixture는 보존된 저장소를 삭제하지 않습니다. 자체 정책 원천과
 합성된 신뢰 호출자 근거를 사용하는 검사이며 Kubernetes 원천 신선도와 네 모듈
 전체 통합 패키지는 별도 검증 대상입니다.
+
+
+## 모든 네이티브 결정의 원래 source 수명
+
+Kubernetes source-authoritative 모드의 strict HTTP/resource/gRPC/PPG1,
+서명 permit 검증, observed permit, status/readiness는 모두 같은 View의 원래
+Linux BOOTTIME 기한을 사용한다. 수집 시작부터 컴파일/영속 커밋/출력/suspend가
+예산을 소비하며 UTC나 `Instant`로 구제하지 않는다. 읽기 실패, 시계 역행, 만료는
+그 immutable publication을 영구 거부한다. 같은 수명을 반복 조회하거나 다시
+설치해도 갱신하지 못한다. 실제로 새 인증 API 전체 수집을 완료한 경우에만 새 수명을
+발행할 수 있다. 이때 source resourceVersion이나 정책 내용이 같아 정책 revision이
+그대로여도 새로운 현재성 확인이다. 캐시 파일 재조회나 UTC valid_until 재변환과 다르다.
+
+이 source 모드는 suspend 포함 native clock(현재 Linux BOOTTIME)이 없는 플랫폼에서
+시작을 거부한다. 일반 DB-only strict 운영은 source clock을 초기화하지 않아 기존
+플랫폼 지원을 유지한다. observed permit 활성화는 별도로 native clock이 필요하며
+strict 경로로 대체하지 않는다. 단독 read-only observer 출력은 진단용으로 남는다.

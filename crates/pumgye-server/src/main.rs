@@ -115,16 +115,15 @@ struct Document {
 }
 #[cfg(feature = "observed-authentication")]
 mod observed_native;
+mod source_lifetime;
 struct View {
     document: Document,
     compiled: CompiledPolicy,
-    source_expires: Option<std::time::Instant>,
-    #[cfg(feature = "observed-authentication")]
-    source_observed_deadline: Option<hangang_runtime::time::LocalDeadline>,
+    source_lifetime: Option<Arc<source_lifetime::Lifetime>>,
 }
 struct Authority {
-    #[cfg(feature = "observed-authentication")]
-    source_clock: hangang_runtime::time::ReceiverClock,
+    source_clock: Option<hangang_runtime::time::ReceiverClock>,
+    source_ticks_floor: AtomicU64,
     #[cfg(feature = "observed-authentication")]
     observed_permits: std::sync::OnceLock<Arc<pumgye_server::observed_permit::Service>>,
     authority_epoch: String,
@@ -243,14 +242,8 @@ impl Authority {
             return Err(None);
         }
         let view = self.view.load();
-        let active = || {
-            self.healthy.load(Ordering::Acquire)
-                && (!self.kubernetes_owned
-                    || (self.source_ready.load(Ordering::Acquire)
-                        && view
-                            .source_expires
-                            .is_some_and(|deadline| std::time::Instant::now() < deadline)))
-        };
+        let active =
+            || self.healthy.load(Ordering::Acquire) && self.source_remaining(&view).is_some();
         if !active() || view.document.revision < q.minimum_revision {
             return Err(None);
         }
@@ -277,15 +270,19 @@ impl Authority {
         }
         Ok(output)
     }
+    fn source_remaining(&self, view: &View) -> Option<std::time::Duration> {
+        if !self.kubernetes_owned {
+            return Some(std::time::Duration::from_millis(1000));
+        }
+        if !self.source_ready.load(Ordering::Acquire) {
+            return None;
+        }
+        view.source_lifetime
+            .as_ref()?
+            .remaining(self.source_clock.as_ref()?)
+    }
     fn available(&self) -> bool {
-        self.healthy.load(Ordering::Acquire)
-            && (!self.kubernetes_owned
-                || (self.source_ready.load(Ordering::Acquire)
-                    && self
-                        .view
-                        .load()
-                        .source_expires
-                        .is_some_and(|expiry| std::time::Instant::now() < expiry)))
+        self.healthy.load(Ordering::Acquire) && self.source_remaining(&self.view.load()).is_some()
     }
     fn evaluate(&self, q: &pumgye_protocol::Query<'_>) -> pumgye_protocol::Reply {
         self.authorize_then(q, |revision| pumgye_protocol::Reply {
@@ -303,14 +300,8 @@ impl Authority {
         operation: impl FnOnce(u64) -> T,
     ) -> Result<T, pumgye_protocol::Reply> {
         let view = self.view.load();
-        let active = || {
-            self.healthy.load(Ordering::Acquire)
-                && (!self.kubernetes_owned
-                    || (self.source_ready.load(Ordering::Acquire)
-                        && view
-                            .source_expires
-                            .is_some_and(|expiry| std::time::Instant::now() < expiry)))
-        };
+        let active =
+            || self.healthy.load(Ordering::Acquire) && self.source_remaining(&view).is_some();
         let decision = if !active() || view.document.revision < q.minimum_revision {
             None
         } else {
@@ -451,9 +442,7 @@ async fn publish(
         a.view.store(Arc::new(View {
             document: next.clone(),
             compiled,
-            source_expires: None,
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         Ok(Json(next))
     })
@@ -503,14 +492,9 @@ fn readiness_router(a: Arc<Authority>) -> Router {
 
 async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
     let view = a.view.load();
-    let remaining = view.source_expires.map(|deadline| {
-        u64::try_from(
-            deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_millis(),
-        )
-        .unwrap_or(u64::MAX)
-    });
+    let remaining = a
+        .source_remaining(&view)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64);
     let source_state = if !a.kubernetes_owned {
         "native"
     } else if !a.healthy.load(Ordering::Acquire) {
@@ -518,13 +502,7 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
     } else {
         match a.source_phase.load(Ordering::Acquire) {
             1 => "collecting",
-            2 if a.source_ready.load(Ordering::Acquire)
-                && view
-                    .source_expires
-                    .is_some_and(|deadline| std::time::Instant::now() < deadline) =>
-            {
-                "fresh"
-            }
+            2 if remaining.is_some() => "fresh",
             2 => "expired",
             3 => "collection_failed",
             4 => "candidate_rejected",
@@ -542,7 +520,7 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "authentication_live_configured":a.authentication_live.is_some(),
         "network_live_configured":a.network_live.is_some(),
         "authentication_trust_entries":a.authentication_trust.as_ref().map_or(0, |trust| trust.entries()),
-        "source_lease_remaining_ms":if a.kubernetes_owned {remaining} else {None},
+        "source_lease_remaining_ms":if a.kubernetes_owned {Some(remaining.unwrap_or(0))} else {None},
         "source_writable":!a.kubernetes_owned,
         "decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0
     }))
@@ -873,8 +851,12 @@ async fn main() -> anyhow::Result<()> {
     let authority_epoch =
         base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, epoch);
     let authority = Arc::new(Authority {
-        #[cfg(feature = "observed-authentication")]
-        source_clock: fresh_source_clock()?,
+        source_clock: if args.authorize_kubernetes_rbac {
+            Some(fresh_source_clock()?)
+        } else {
+            None
+        },
+        source_ticks_floor: AtomicU64::new(0),
         #[cfg(feature = "observed-authentication")]
         observed_permits: std::sync::OnceLock::new(),
         authority_epoch,
@@ -887,9 +869,7 @@ async fn main() -> anyhow::Result<()> {
         view: ArcSwap::from_pointee(View {
             document,
             compiled,
-            source_expires: None,
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }),
         store: std::sync::Mutex::new(store),
         admin,
@@ -1091,7 +1071,6 @@ async fn termination_signal() -> std::io::Result<()> {
     }
 }
 
-#[cfg(feature = "observed-authentication")]
 fn fresh_source_clock() -> anyhow::Result<hangang_runtime::time::ReceiverClock> {
     let mut nonce = [0; 16];
     getrandom::fill(&mut nonce).map_err(|_| anyhow::anyhow!("source process nonce unavailable"))?;
@@ -1164,9 +1143,7 @@ mod tests {
                 revision: 1,
                 ..document
             },
-            source_expires: None,
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         let router = Router::new()
             .route("/v1/resource/decision", resource_route())
@@ -1268,9 +1245,7 @@ mod tests {
         owner.view.store(Arc::new(View {
             compiled: document.policy.compile().unwrap(),
             document: document.clone(),
-            source_expires: None,
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         let mut query = ResourceEvaluation {
             service_id: "orders",
@@ -1336,9 +1311,7 @@ mod tests {
             owner.view.store(Arc::new(View {
                 compiled: document.policy.compile().unwrap(),
                 document: document.clone(),
-                source_expires: None,
-                #[cfg(feature = "observed-authentication")]
-                source_observed_deadline: None,
+                source_lifetime: None,
             }));
             "private signed candidate"
         });
@@ -1361,9 +1334,7 @@ mod tests {
                 policy: policy.clone(),
             },
             compiled: policy.compile().unwrap(),
-            source_expires: None,
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         let query = pumgye_protocol::Query {
             request_id: 42,
@@ -1388,9 +1359,7 @@ mod tests {
                         policy: policy.clone(),
                     },
                     compiled: policy.compile().unwrap(),
-                    source_expires: None,
-                    #[cfg(feature = "observed-authentication")]
-                    source_observed_deadline: None,
+                    source_lifetime: None,
                 }));
                 "private permit candidate"
             })
@@ -1413,8 +1382,8 @@ mod tests {
             store::Store::open(&root.join("authority.sqlite3"), Some(&initial)).unwrap();
         let compiled = document.policy.compile().unwrap();
         Arc::new(Authority {
-            #[cfg(feature = "observed-authentication")]
-            source_clock: fresh_source_clock().unwrap(),
+            source_clock: fresh_source_clock().ok(),
+            source_ticks_floor: AtomicU64::new(0),
             #[cfg(feature = "observed-authentication")]
             observed_permits: std::sync::OnceLock::new(),
             authority_epoch: "owned-fixture-epoch".into(),
@@ -1427,9 +1396,7 @@ mod tests {
             view: ArcSwap::from_pointee(View {
                 document,
                 compiled,
-                source_expires: None,
-                #[cfg(feature = "observed-authentication")]
-                source_observed_deadline: None,
+                source_lifetime: None,
             }),
             store: std::sync::Mutex::new(store),
             admin: "fixture-admin-credential".into(),

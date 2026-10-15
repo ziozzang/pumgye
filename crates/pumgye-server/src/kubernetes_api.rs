@@ -14,6 +14,27 @@ pub struct Observation {
     pub valid_until_ms: u64,
     pub collection_versions: Vec<(String, String)>,
     pub inventory: Inventory,
+    /// Process-only evidence, sealed once per completed authenticated List.
+    /// Repeated reads of this observation retain both deadline and refusal.
+    #[serde(skip)]
+    lifetime: std::sync::OnceLock<Option<Arc<crate::source_lifetime::Lifetime>>>,
+}
+impl Observation {
+    pub(crate) fn lifetime(
+        &self,
+        clock: &hangang_runtime::time::ReceiverClock,
+    ) -> Option<Arc<crate::source_lifetime::Lifetime>> {
+        self.lifetime
+            .get_or_init(|| {
+                let start = clock.begin_exchange().ok()?;
+                let sample = clock.finish_exchange(start).ok()?;
+                let (deadline, _) = sample
+                    .bind_bounds(self.valid_until_ms, self.valid_until_ms)
+                    .ok()?;
+                Some(crate::source_lifetime::Lifetime::new(deadline))
+            })
+            .clone()
+    }
 }
 pub struct Collector {
     origin: Url,
@@ -100,6 +121,7 @@ impl Collector {
             valid_until_ms,
             collection_versions: versions,
             inventory,
+            lifetime: std::sync::OnceLock::new(),
         })));
         Ok(())
     }
@@ -354,6 +376,42 @@ mod tests {
         let mut p = Pages::new("Role");
         assert!(p.accept(&page("opaque:a", ""), &mut Vec::new()).unwrap());
     }
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn same_source_observation_seals_once_and_never_reanchors_or_recovers() {
+        let clock = hangang_runtime::time::ReceiverClock::new([4; 16]).unwrap();
+        let observation = |valid_until_ms| Observation {
+            revision: 7,
+            valid_until_ms,
+            collection_versions: vec![("Role".into(), "unchanged:opaque".into())],
+            inventory: kubernetes::inspect(
+                "example",
+                br#"{"kind":"List","apiVersion":"v1","items":[]}"#,
+            )
+            .unwrap(),
+            lifetime: std::sync::OnceLock::new(),
+        };
+        let source = observation(clock.sample_ticks().unwrap() + 100);
+        let first = source.lifetime(&clock).unwrap();
+        let left = first.remaining(&clock).unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let repeated = source.lifetime(&clock).unwrap();
+        assert!(Arc::ptr_eq(&first, &repeated));
+        assert!(repeated.remaining(&clock).unwrap() < left);
+        first.retire();
+        assert!(source.lifetime(&clock).unwrap().remaining(&clock).is_none());
+        let expired = observation(clock.sample_ticks().unwrap());
+        assert!(expired.lifetime(&clock).is_none());
+        assert!(expired.lifetime(&clock).is_none());
+        // A new completed authenticated collection owns a distinct observation
+        // even if content revision and opaque source versions are unchanged.
+        let fresh = observation(clock.sample_ticks().unwrap() + 100);
+        let next = fresh.lifetime(&clock).unwrap();
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert!(next.remaining(&clock).is_some());
+        assert_eq!(fresh.revision, source.revision);
+        assert_eq!(fresh.collection_versions, source.collection_versions);
+    }
     #[tokio::test]
     async fn expired_or_failed_observation_cannot_retain_a_snapshot() {
         let mut collector =
@@ -368,6 +426,7 @@ mod tests {
             valid_until_ms: 1000,
             collection_versions: Vec::new(),
             inventory,
+            lifetime: std::sync::OnceLock::new(),
         })));
         assert!(collector.fresh(999).is_some());
         assert!(collector.fresh(1000).is_none());

@@ -37,8 +37,9 @@ policy copy. Kubernetes collection uses the authority's BOOTTIME ticks, and seal
 the original collector `valid_until_ms` into a private `LocalDeadline` before the
 publication transaction. Collection, compilation, durable commit, asynchronous
 RPCs, callbacks, signing, and suspend all consume that original budget. Missing,
-expired, or retired source evidence refuses observed authorization regardless of
-the legacy `Instant` deadline.
+expired, or retired source evidence refuses authorization. The same original
+publication lifetime now gates strict decisions and readiness as well; there is
+no legacy `Instant` rescue.
 
 Issuance requires actual `CheckedObservedService` evidence from the persistent
 fixed Hopae SDK client, enforced Sumunjang Allow, native route ownership, a native

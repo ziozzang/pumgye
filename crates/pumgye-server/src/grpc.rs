@@ -217,14 +217,7 @@ impl pumgye_grpc::v1::projection_permits_server::ProjectionPermits for Service {
             || now >= owners.expires_ms
             || !self.0.healthy.load(std::sync::atomic::Ordering::Acquire)
             || !Arc::ptr_eq(&view, &self.0.view.load_full())
-            || (self.0.kubernetes_owned
-                && (!self
-                    .0
-                    .source_ready
-                    .load(std::sync::atomic::Ordering::Acquire)
-                    || view
-                        .source_expires
-                        .is_none_or(|expires| std::time::Instant::now() >= expires)))
+            || self.0.source_remaining(&view).is_none()
         {
             return Err(Status::unavailable("permit validation expired or retired"));
         }
@@ -631,9 +624,7 @@ mod tests {
                 revision: 1,
                 ..document
             },
-            source_expires: None,
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -814,9 +805,7 @@ mod tests {
         owner.view.store(Arc::new(crate::View {
             compiled: document.policy.compile().unwrap(),
             document,
-            source_expires: None,
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         let reply = client
             .decide(request(&owner.decision))
@@ -866,9 +855,7 @@ mod tests {
                 revision: 1,
                 ..document
             },
-            source_expires: None,
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         let service = Service(owner.clone());
         let request = |token: &str| {
@@ -1052,9 +1039,7 @@ mod tests {
         a.view.store(Arc::new(crate::View {
             compiled: document.policy.compile().unwrap(),
             document,
-            source_expires: Some(std::time::Instant::now()),
-            #[cfg(feature = "observed-authentication")]
-            source_observed_deadline: None,
+            source_lifetime: None,
         }));
         let reply = Service(a)
             .decide(request("fixture-decision-credential"))

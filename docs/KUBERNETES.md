@@ -62,7 +62,9 @@ state. Different kinds have independent collection versions: this is not a globa
 atomic cross-resource snapshot.
 
 An immutable ArcSwap observation has a local process revision, the four collection
-versions, inventory and process-relative `valid_until_ms`. Changes, deletion and
+versions, inventory and process-local Linux BOOTTIME `valid_until_ms` ticks.
+These ticks are neither UTC nor portable across processes and never constitute
+cross-process authorization evidence. Changes, deletion and
 source version changes advance this local revision; identical observations retain
 it. The old view is removed before collection and failures emit `available:false`.
 Freshness ends one second after collection starts; network, parsing and hashing consume that budget. Output is diagnostic metadata,
@@ -182,6 +184,23 @@ policy in SQLite. It withdraws availability before each complete collection;
 HTTP/mapping/compilation failures never reuse the previous permit. A live view
 expires one second after collection starts, including compilation
 and durable-write time. Persistence uncertainty fences the authority until restart.
+The lifetime uses the original Linux BOOTTIME deadline for every decision path,
+including strict HTTP/resource/gRPC/PPG1, signed permit validation, observed
+permits, status and readiness. Host suspend consumes this budget. A read failure,
+clock reversal or expiry permanently refuses that immutable publication; later
+reads or repeated installation of the same lifetime cannot renew it. A new
+complete authenticated API collection may publish a new lifetime even when the
+opaque collection versions and policy content are unchanged. This is fresh
+source observation, not rereading a cached file or converting UTC `valid_until`.
+There is no UTC or `Instant` fallback in an authoritative decision gate.
+
+Kubernetes source-authoritative mode requires a supported suspend-inclusive
+native clock (currently Linux BOOTTIME). It refuses startup where that capability
+is unavailable. Ordinary DB-only strict operation does not initialize a source
+clock and retains its platform support. Observed permit activation separately
+requires its native clock; it never falls back to strict operation. The standalone
+read-only observer remains diagnostic and is not an authorization capability.
+
 The loop pauses 500 ms between collections. Source health and decision eligibility
 are reported by `/healthz` and authenticated `/v1/status`; administrative policy
 reads remain available for inspection of the last durable policy. HTTP and PPG1
