@@ -48,3 +48,8 @@ message AuthenticatedResourceReply { uint64 request_id = 1; uint64 revision = 2;
 
 // Opaque native reference; destination is a digest, never a caller-selected URL.
 message NativeRouteReference { bytes reference = 1; bytes destination_sha256 = 2; }
+
+// Separate issuance endpoint: requires native route and plan owners; never signs caller state.
+service ProjectionPermits { rpc Issue(AuthenticatedResourceRequest) returns (ProjectionPermitReply); }
+message PermitBinding { bytes authentication_receipt_sha256 = 1; string decision_ref = 2; string resource = 3; string action = 4; string authority_epoch = 5; uint64 catalog_revision = 6; uint64 policy_revision = 7; uint64 network_revision = 8; uint64 route_revision = 9; uint64 plan_revision = 10; }
+message ProjectionPermitReply { uint64 request_id = 1; hangang.hopae.v1.AuthenticationReceiptContext context = 2; PermitBinding binding = 3; bytes receipt = 4; uint32 cache_ttl_ms = 5; }

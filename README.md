@@ -310,3 +310,25 @@ fixture passes with route and projection owners, wrong Hopae identity/caller
 refusal, recovery, durable permission/profile withdrawal and authority outages.
 These are source functional checks; static release, Kubernetes, operating
 adoption, signed permit/projection/replay and throughput remain open.
+
+## Projection permit RPC source implementation
+
+`ProjectionPermits/Issue` is a separate mandatory-mTLS decision-role RPC using
+`AuthenticatedResourceRequest`. It refuses without the native signer, receipt
+trust/live validation, Sumunjang, gateway route owner/reference and Hopae plan
+owner. The request cannot supply permit revisions, deadlines, decision reference,
+authority epoch, key or network verdict. These come from native owners and the
+server; zero/invalid revisions cannot be signed. The process generates a fresh
+random authority incarnation and exposes it in status, not a fleet/restore epoch.
+
+Only native Allow reaches the signer. Expiry is bounded by authentication,
+network, policy source, route, plan and a maximum one-second lifetime. The signed
+candidate stays private through additional post-sign route/plan queries and
+final native owner/caller/time fences. The reply contains canonical context,
+permit binding and signed bytes with zero cache TTL. Ordinary Decide/HTTP
+responses do not contain permits. A receiver must verify and consume replay;
+issuing a permit alone does not deliver an upstream credential.
+
+Workspace tests and actual mTLS admission/missing-resource refusals pass. The
+positive actual Hangang issuance/receiver/projection path, distributed authority
+incarnation retirement, release and operating adoption remain unqualified.

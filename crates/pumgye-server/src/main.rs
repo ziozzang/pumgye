@@ -111,6 +111,7 @@ struct View {
     source_expires: Option<std::time::Instant>,
 }
 struct Authority {
+    authority_epoch: String,
     projection_live: Option<pumgye_server::plan_live::Client>,
     route_live: Option<pumgye_server::route_live::Client>,
     network_live: Option<pumgye_server::network_live::Client>,
@@ -517,6 +518,7 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "policy_source":if a.kubernetes_owned {"kubernetes"} else {"native"},
         "source_state":source_state,
         "permit_key_configured":a.permit_signer.is_some(),
+        "authority_epoch":a.authority_epoch,
         "route_live_configured":a.route_live.is_some(),
         "projection_live_configured":a.projection_live.is_some(),
         "authentication_live_configured":a.authentication_live.is_some(),
@@ -825,7 +827,12 @@ async fn main() -> anyhow::Result<()> {
             .map_or(&[], |trust| trust.revision_floors()),
     )?;
     let compiled = document.policy.compile()?;
+    let mut epoch = [0u8; 32];
+    getrandom::fill(&mut epoch).map_err(|_| anyhow::anyhow!("authority epoch unavailable"))?;
+    let authority_epoch =
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, epoch);
     let authority = Arc::new(Authority {
+        authority_epoch,
         network_live,
         authentication_live,
         permit_signer,
@@ -1316,6 +1323,7 @@ mod tests {
             store::Store::open(&root.join("authority.sqlite3"), Some(&initial)).unwrap();
         let compiled = document.policy.compile().unwrap();
         Arc::new(Authority {
+            authority_epoch: "owned-fixture-epoch".into(),
             permit_signer: None,
             authentication_trust: None,
             authentication_live: None,

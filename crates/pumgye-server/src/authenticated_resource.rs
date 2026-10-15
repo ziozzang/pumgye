@@ -67,6 +67,8 @@ pub(crate) struct Query {
 }
 #[derive(Serialize)]
 pub(crate) struct Outcome {
+    #[serde(skip)]
+    pub(crate) permit: Option<pumgye_grpc::v1::ProjectionPermitReply>,
     pub(crate) route_observed: bool,
     version: u8,
     pub(crate) request_id: u64,
@@ -97,6 +99,14 @@ pub(crate) async fn evaluate(
     q: Query,
     caller: &(dyn Fn() -> bool + Sync),
 ) -> Result<Outcome, StatusCode> {
+    evaluate_mode(a, q, caller, false).await
+}
+pub(crate) async fn evaluate_mode(
+    a: &Authority,
+    q: Query,
+    caller: &(dyn Fn() -> bool + Sync),
+    issue: bool,
+) -> Result<Outcome, StatusCode> {
     if !caller() {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -114,6 +124,14 @@ pub(crate) async fn evaluate(
         })
     {
         return Err(StatusCode::BAD_REQUEST);
+    }
+    if issue
+        && (a.permit_signer.is_none()
+            || a.route_live.is_none()
+            || a.projection_live.is_none()
+            || q.route.is_none())
+    {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let trust = a
         .authentication_trust
@@ -295,7 +313,135 @@ pub(crate) async fn evaluate(
     {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
+    let permit = if issue {
+        if !allow {
+            return Err(StatusCode::FORBIDDEN);
+        }
+        let signer = a
+            .permit_signer
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let route = route_observation
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let plan = final_plan.as_ref().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+        let mut nonce = [0u8; 32];
+        getrandom::fill(&mut nonce).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let decision_ref =
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, nonce);
+        let start = now();
+        let policy_budget = if a.kubernetes_owned {
+            view.source_expires
+                .and_then(|expires| expires.checked_duration_since(std::time::Instant::now()))
+                .map(|duration| duration.as_millis().min(1000) as u64)
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+        } else {
+            1000
+        };
+        let state = pumgye_server::permit::State {
+            decision_ref: &decision_ref,
+            authority_epoch: &a.authority_epoch,
+            policy_revision: view.document.revision,
+            network_revision: network.revision(),
+            route_revision: route.configuration_revision(),
+            plan_revision: plan.revision(),
+            policy_expires_ms: start
+                .checked_add(policy_budget)
+                .ok_or(StatusCode::SERVICE_UNAVAILABLE)?,
+            route_expires_ms: route.expires_ms(),
+            plan_expires_ms: plan.expires_ms(),
+        };
+        let signed = signer
+            .issue_combined(
+                &view.compiled,
+                &target,
+                &checked,
+                &evidence,
+                &state,
+                now,
+                || {
+                    current()
+                        && caller()
+                        && route.valid_at(now())
+                        && plan.valid_at(now())
+                        && plan_observation
+                            .as_ref()
+                            .is_some_and(|prior| prior.valid_at(now()))
+                },
+            )
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let context = signed.context();
+        let binding = signed.permit();
+        let reply = pumgye_grpc::v1::ProjectionPermitReply {
+            request_id: q.request_id,
+            cache_ttl_ms: 0,
+            receipt: signed.bytes().to_vec(),
+            context: Some(hopae_grpc::v1::AuthenticationReceiptContext {
+                issuer_ref: context.issuer_ref.into(),
+                key_epoch: context.key_epoch,
+                identity_authority_epoch: context.identity_authority_epoch.into(),
+                identity: Some(hopae_grpc::v1::ReceiptIdentity {
+                    subject_ref: context.identity.subject_ref.into(),
+                    kind: 2,
+                    aal: 0,
+                    revision: context.identity.revision,
+                    credential_generation: context.identity.credential_generation,
+                }),
+                service: context.service.into(),
+                audience: context.audience.into(),
+                request_sha256: context.request_sha256.to_vec(),
+            }),
+            binding: Some(pumgye_grpc::v1::PermitBinding {
+                authentication_receipt_sha256: binding.authentication_receipt_sha256.to_vec(),
+                decision_ref: binding.decision_ref.into(),
+                resource: binding.resource.into(),
+                action: binding.action.into(),
+                authority_epoch: binding.authority_epoch.into(),
+                catalog_revision: binding.catalog_revision,
+                policy_revision: binding.policy_revision,
+                network_revision: binding.network_revision,
+                route_revision: binding.route_revision,
+                plan_revision: binding.plan_revision,
+            }),
+        };
+        // Keep the signed candidate private through fresh post-sign owner queries.
+        let post_route = a
+            .route_live
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+            .observe(route_expected.ok_or(StatusCode::SERVICE_UNAVAILABLE)?, &now)
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        let post_plan = a
+            .projection_live
+            .as_ref()
+            .ok_or(StatusCode::SERVICE_UNAVAILABLE)?
+            .observe(plan_expected, &now)
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if !route.same_owner(&post_route)
+            || !plan.same_owner(&post_plan)
+            || !post_route.valid_at(now())
+            || !post_plan.valid_at(now())
+        {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        if now() >= signed.expires_ms()
+            || !current()
+            || !caller()
+            || !observation.valid_for(&checked, now())
+            || !network.valid_at(q.ip, now())
+            || !route.valid_at(now())
+            || !plan.valid_at(now())
+        {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        Some(reply)
+    } else {
+        None
+    };
     Ok(Outcome {
+        permit,
         route_observed: route_observation.is_some(),
         version: 1,
         request_id: q.request_id,

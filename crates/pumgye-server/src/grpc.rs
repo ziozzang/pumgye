@@ -38,15 +38,12 @@ impl Service {
             .map_err(|_| Status::resource_exhausted("decision capacity"))
     }
 }
-#[tonic::async_trait]
-impl
-    pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorization
-    for Service
-{
-    async fn decide(
+impl Service {
+    async fn authenticated(
         &self,
         request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
-    ) -> Result<Response<pumgye_grpc::v1::AuthenticatedResourceReply>, Status> {
+        issue: bool,
+    ) -> Result<crate::authenticated_resource::Outcome, Status> {
         let _permit = self.admission(request.metadata())?;
         let metadata = request.metadata().clone();
         let input = request.into_inner();
@@ -95,7 +92,7 @@ impl
                     crate::credential_matches(token.as_bytes(), self.0.decision.as_bytes())
                 })
         };
-        let result = crate::authenticated_resource::evaluate(&self.0, query, &caller)
+        let result = crate::authenticated_resource::evaluate_mode(&self.0, query, &caller, issue)
             .await
             .map_err(|status| match status {
                 axum::http::StatusCode::BAD_REQUEST => {
@@ -109,14 +106,40 @@ impl
                 }
                 _ => Status::unavailable("native authority unavailable"),
             })?;
+        Ok(result)
+    }
+}
+#[tonic::async_trait]
+impl
+    pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorization
+    for Service
+{
+    async fn decide(
+        &self,
+        request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::AuthenticatedResourceReply>, Status> {
+        let result = self.authenticated(request, false).await?;
         Ok(Response::new(pumgye_grpc::v1::AuthenticatedResourceReply {
             route_observed: result.route_observed,
-            request_id: input.request_id,
+            request_id: result.request_id,
             revision: result.revision,
             network_revision: result.network_revision,
             verdict: if result.allow { 1 } else { 2 },
             cache_ttl_ms: 0,
         }))
+    }
+}
+#[tonic::async_trait]
+impl pumgye_grpc::v1::projection_permits_server::ProjectionPermits for Service {
+    async fn issue(
+        &self,
+        request: Request<pumgye_grpc::v1::AuthenticatedResourceRequest>,
+    ) -> Result<Response<pumgye_grpc::v1::ProjectionPermitReply>, Status> {
+        let result = self.authenticated(request, true).await?;
+        result
+            .permit
+            .map(Response::new)
+            .ok_or_else(|| Status::unavailable("native permit unavailable"))
     }
 }
 #[tonic::async_trait]
@@ -274,6 +297,7 @@ pub async fn serve(
             .max_encoding_message_size(1024),
         )
         .add_service(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128))
+        .add_service(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(2048))
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
     Ok(())
@@ -328,6 +352,21 @@ mod tests {
             .code(),
             tonic::Code::InvalidArgument
         );
+        use pumgye_grpc::v1::projection_permits_server::ProjectionPermits;
+        assert_eq!(
+            ProjectionPermits::issue(&service, call(&owner.admin, message.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            ProjectionPermits::issue(&service, call(&owner.decision, message.clone()))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
         let mut valid = message;
         valid.context = Some(hopae_grpc::v1::AuthenticationReceiptContext {
             issuer_ref: "hopae".into(),
@@ -345,10 +384,20 @@ mod tests {
             request_sha256: vec![3; 32],
         });
         assert_eq!(
-            AuthenticatedResourceAuthorization::decide(&service, call(&owner.decision, valid))
+            AuthenticatedResourceAuthorization::decide(
+                &service,
+                call(&owner.decision, valid.clone())
+            )
+            .await
+            .err()
+            .unwrap()
+            .code(),
+            tonic::Code::Unavailable
+        );
+        assert_eq!(
+            ProjectionPermits::issue(&service, call(&owner.decision, valid))
                 .await
-                .err()
-                .unwrap()
+                .unwrap_err()
                 .code(),
             tonic::Code::Unavailable
         );
@@ -485,6 +534,45 @@ mod tests {
                 .insert("authorization", format!("Bearer {token}").parse().unwrap());
             request
         };
+        let mut permits = pumgye_grpc::v1::projection_permits_client::ProjectionPermitsClient::new(
+            channel.clone(),
+        );
+        assert_eq!(
+            permits
+                .issue(authenticated_request(&owner.admin))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::Unauthenticated
+        );
+        assert_eq!(
+            permits
+                .issue(authenticated_request(&owner.decision))
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+        let mut missing = authenticated_request(&owner.decision);
+        missing.get_mut().context = Some(hopae_grpc::v1::AuthenticationReceiptContext {
+            issuer_ref: "hopae".into(),
+            key_epoch: 1,
+            identity_authority_epoch: "owned-epoch".into(),
+            identity: Some(hopae_grpc::v1::ReceiptIdentity {
+                subject_ref: "s_owned".into(),
+                kind: 2,
+                aal: 0,
+                revision: 1,
+                credential_generation: 1,
+            }),
+            service: "orders".into(),
+            audience: "orders-api".into(),
+            request_sha256: vec![3; 32],
+        });
+        assert_eq!(
+            permits.issue(missing).await.unwrap_err().code(),
+            tonic::Code::Unavailable
+        );
         assert_eq!(
             authenticated
                 .decide(authenticated_request(&owner.admin))
