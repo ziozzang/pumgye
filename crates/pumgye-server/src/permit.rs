@@ -80,6 +80,56 @@ impl Signer {
             key,
         })
     }
+    /// Require actual Hopae and Sumunjang observations before signing. This
+    /// bounds the candidate by observed network expiry and revision rather than
+    /// trusting caller-provided Guard evidence. Observations are not leases:
+    /// `current` must still fence the exact policy/key/route/projection owners,
+    /// and the downstream receiver must independently consume replay.
+    #[allow(clippy::too_many_arguments)]
+    pub fn issue_combined<'a>(
+        &'a self,
+        policy: &CompiledPolicy,
+        target: &authorization::NativeResourceRequest<'a>,
+        authentication: &'a CheckedService<'a>,
+        evidence: &authorization::LiveEvidence<'_>,
+        state: &State<'a>,
+        clock: impl Fn() -> u64,
+        current: impl Fn() -> bool,
+    ) -> Result<SignedPermit<'a>, Refused> {
+        if state.network_revision != evidence.network.revision() {
+            return Err(Refused::InvalidBinding);
+        }
+        let last = Cell::new(0);
+        let reversed = Cell::new(false);
+        let observed = || {
+            let now = clock();
+            if now < last.get() {
+                reversed.set(true);
+            }
+            last.set(now);
+            now
+        };
+        let request = ResourceRequest {
+            resource: target.resource,
+            action: target.action,
+            ip: target.ip,
+            guard: pumgye_core::GuardEvidence::EnforcedAllow,
+            network_expires_ms: evidence.network.expires_ms(),
+        };
+        self.issue(policy, &request, authentication, state, observed, || {
+            let now = observed();
+            !reversed.get()
+                && evidence.authentication.valid_for(authentication, now)
+                && evidence.network.valid_at(target.ip, now)
+                && current()
+                && {
+                    let after = observed();
+                    !reversed.get()
+                        && evidence.authentication.valid_for(authentication, after)
+                        && evidence.network.valid_at(target.ip, after)
+                }
+        })
+    }
     /// All state/fences are native owner facts, never unchecked request fields.
     /// `current` checks the exact policy and identity/key/network/route/plan owners.
     pub fn issue<'a>(
@@ -259,6 +309,195 @@ mod tests {
             route_expires_ms: 1500,
             plan_expires_ms: 1400,
         }
+    }
+    #[test]
+    fn combined_signing_binds_actual_network_deadline_and_refuses_mismatched_evidence() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let auth = authentication(&context());
+        let live = crate::authentication_live::Observation::fixture(&auth, 1001);
+        let floor = AtomicU64::new(5);
+        let ip = "192.0.2.9".parse().unwrap();
+        let network = crate::network_live::Observation::fixture(&floor, ip, 5, 1200);
+        let evidence = authorization::LiveEvidence {
+            authentication: &live,
+            network: &network,
+        };
+        let signer = Signer::new("pumgye".into(), 2, SigningKey::from_bytes(&[11; 32])).unwrap();
+        let policy = policy();
+        let mut state = state();
+        let mut target = authorization::NativeResourceRequest {
+            resource: "db:orders",
+            action: "select",
+            ip,
+        };
+        let signed = signer
+            .issue_combined(&policy, &target, &auth, &evidence, &state, || 1002, || true)
+            .unwrap();
+        assert_eq!(signed.expires_ms(), 1200);
+        assert_eq!(signed.permit().network_revision, 5);
+        let binding = receipt_binding::digest(signed.context(), Some(signed.permit())).unwrap();
+        receipt::verify(
+            &signer.key.verifying_key(),
+            signed.bytes(),
+            receipt::Purpose::Permit,
+            &binding,
+            1003,
+        )
+        .unwrap();
+        assert!(
+            receipt::verify(
+                &signer.key.verifying_key(),
+                signed.bytes(),
+                receipt::Purpose::Permit,
+                &binding,
+                1200
+            )
+            .is_err()
+        );
+        state.network_revision = 6;
+        assert!(matches!(
+            signer.issue_combined(
+                &policy,
+                &target,
+                &auth,
+                &evidence,
+                &state,
+                || 1002,
+                || panic!("mismatched native revision")
+            ),
+            Err(Refused::InvalidBinding)
+        ));
+        state.network_revision = 5;
+        target.ip = "192.0.2.10".parse().unwrap();
+        assert!(
+            signer
+                .issue_combined(&policy, &target, &auth, &evidence, &state, || 1002, || true)
+                .is_err()
+        );
+        target.ip = ip;
+        target.action = "drop";
+        assert!(matches!(
+            signer.issue_combined(&policy, &target, &auth, &evidence, &state, || 1002, || true),
+            Err(Refused::Authorization(authorization::Refused::Denied(_)))
+        ));
+        target.action = "select";
+        assert!(
+            signer
+                .issue_combined(&policy, &target, &auth, &evidence, &state, || 1200, || true)
+                .is_err()
+        );
+        floor.store(6, Ordering::Release);
+        assert!(
+            signer
+                .issue_combined(&policy, &target, &auth, &evidence, &state, || 1002, || true)
+                .is_err()
+        );
+    }
+    #[test]
+    fn combined_signing_rechecks_native_owners_during_signing_and_rejects_clock_reversal() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let auth = authentication(&context());
+        let live = crate::authentication_live::Observation::fixture(&auth, 1001);
+        let floor = AtomicU64::new(5);
+        let ip = "192.0.2.9".parse().unwrap();
+        let network = crate::network_live::Observation::fixture(&floor, ip, 5, 1600);
+        let evidence = authorization::LiveEvidence {
+            authentication: &live,
+            network: &network,
+        };
+        let signer = Signer::new("pumgye".into(), 2, SigningKey::from_bytes(&[11; 32])).unwrap();
+        let policy = policy();
+        let state = state();
+        let target = authorization::NativeResourceRequest {
+            resource: "db:orders",
+            action: "select",
+            ip,
+        };
+        let checks = Cell::new(0);
+        assert!(
+            signer
+                .issue_combined(
+                    &policy,
+                    &target,
+                    &auth,
+                    &evidence,
+                    &state,
+                    || 1002,
+                    || {
+                        checks.set(checks.get() + 1);
+                        if checks.get() == 2 {
+                            floor.store(6, Ordering::Release);
+                        }
+                        true
+                    }
+                )
+                .is_err()
+        );
+        // Retirement during even the final owner callback must discard the
+        // private signature, rather than expose a previously checked network.
+        floor.store(5, Ordering::Release);
+        checks.set(0);
+        assert!(
+            signer
+                .issue_combined(
+                    &policy,
+                    &target,
+                    &auth,
+                    &evidence,
+                    &state,
+                    || 1002,
+                    || {
+                        checks.set(checks.get() + 1);
+                        if checks.get() == 4 {
+                            floor.store(6, Ordering::Release);
+                        }
+                        true
+                    }
+                )
+                .is_err()
+        );
+        assert_eq!(checks.get(), 4);
+        floor.store(5, Ordering::Release);
+        let ticks = Cell::new(0);
+        assert!(
+            signer
+                .issue_combined(
+                    &policy,
+                    &target,
+                    &auth,
+                    &evidence,
+                    &state,
+                    || {
+                        ticks.set(ticks.get() + 1);
+                        if ticks.get() == 3 { 1001 } else { 1002 }
+                    },
+                    || true
+                )
+                .is_err()
+        );
+        let expired_live = crate::authentication_live::Observation::fixture(&auth, 1003);
+        let evidence = authorization::LiveEvidence {
+            authentication: &expired_live,
+            network: &network,
+        };
+        assert!(
+            signer
+                .issue_combined(&policy, &target, &auth, &evidence, &state, || 1002, || true)
+                .is_err()
+        );
+        assert!(
+            signer
+                .issue_combined(
+                    &policy,
+                    &target,
+                    &auth,
+                    &evidence,
+                    &state,
+                    || 1004,
+                    || false
+                )
+                .is_err()
+        );
     }
     #[test]
     fn native_allow_signs_independent_permit_bound_to_authentication_and_all_revisions() {

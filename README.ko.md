@@ -199,3 +199,18 @@ endpoint 검증은 다음 단계로 남아 있습니다.
 서명 자산·운영 DB 복제본 사전 검사·비공개 일관된 백업·정책 유지·실제 mTLS
 관리/PPG1 거부·두 차례 재시작을 통과해 내부에 적용했습니다. 기존 배포의
 네이티브 receipt/실시간 자원은 미설정이며 새 endpoint는 거부하도록 유지합니다.
+
+### 통합 관측 기반 permit 후보
+
+`permit::Signer::issue_combined`은 검증된 인증과 함께 실제 호패·수문장의 비공개
+생성자 관측 타입을 요구합니다. Enforce 근거·네트워크 만료를 실제 관측에서 가져오고
+다른 네트워크 리비전/IP를 거부하며 소유자 확인 전후에 두 관측을 재검사합니다.
+서명 후보는 네트워크 관측·인증 receipt보다 오래 유효하지 않습니다. 시계 역행과
+마지막 콜백 도중 회수도 비공개 후보를 폐기합니다. 판정 경로는 SQL을 읽지 않습니다.
+
+격리 `authenticated_resource_smoke.py --combined-permit` 검사는 참여 클라이언트를
+요구합니다. `hopae_live_qualification`과 `--live-validation --grpc-decisions
+--nonempty-entity`로 실제 원천·네트워크 차단/복구·신원 회수/복구·장애를 검사합니다.
+이때 route/projection 소유자는 로컬 합성 상태입니다. permit RPC·분산 소유자 발견·
+하류 replay 소비·운영 활성화의 근거는 아닙니다. 저수준 `issue` API는 여전히
+호출자가 실제 소유자 근거를 제공해야 합니다.

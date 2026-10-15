@@ -35,6 +35,7 @@ fn default_ip() -> String {
 }
 #[derive(Deserialize)]
 struct Config {
+    permit_network: Option<PathBuf>,
     pumgye_endpoint: Option<String>,
     pumgye_grpc_address: Option<String>,
     #[serde(default = "default_epoch")]
@@ -184,6 +185,12 @@ async fn main() -> Result<()> {
             .nth(1)
             .ok_or_else(|| anyhow!("configuration required"))?,
     )?)?;
+    let permit_network = match &config.permit_network {
+        Some(path) => Some(
+            pumgye_server::network_live_config::load(path, &|name| std::env::var(name).ok()).await,
+        ),
+        None => None,
+    };
     let setup = async {
         ensure!(config.settings.transport == "grpc", "grpc required");
         let ca = std::fs::read(&config.settings.tls.ca)?;
@@ -340,6 +347,26 @@ async fn main() -> Result<()> {
             let native_class = pumgye_server::authorization::authorize_live_resource_then(&compiled, &resource_request, &checked, &observation, now, || std::sync::Arc::ptr_eq(&owner.load_full(), &compiled), |resource| resource.information_class.clone()).map_err(|_| anyhow!("native resource refused"))?;
             ensure!(native_class == "internal", "owner classification changed");
             if config.pumgye_endpoint.is_some() || config.pumgye_grpc_address.is_some() { ensure!(endpoint(&config, &checked, &reply.receipt, rpc).await?, "native endpoint refused Allow"); }
+            if let Some(network) = &permit_network {
+                let network = network.as_ref().map_err(|_| anyhow!("permit network resources refused"))?;
+                let ip = config.qualification_ip.parse()?;
+                let network = network.check(ip, 1, &now).await.map_err(|_| anyhow!("permit network observation refused"))?;
+                let evidence = pumgye_server::authorization::LiveEvidence { authentication: &observation, network: &network };
+                let target = pumgye_server::authorization::NativeResourceRequest { resource: "db:orders", action: "select", ip };
+                let mut seed = zeroize::Zeroizing::new([0; 32]);
+                getrandom::fill(seed.as_mut()).map_err(|_| anyhow!("permit entropy unavailable"))?;
+                let key = ed25519_dalek::SigningKey::from_bytes(&seed);
+                let public = key.verifying_key();
+                let signer = pumgye_server::permit::Signer::new("owned-pumgye".into(), 1, key).map_err(|_| anyhow!("permit signer refused"))?;
+                // These are local synthetic fixture owners, not remote route or
+                // projection discovery and not downstream replay admission.
+                let deadline = now().checked_add(1000).ok_or_else(|| anyhow!("permit clock overflow"))?;
+                let state = pumgye_server::permit::State { decision_ref: "owned-decision", authority_epoch: "owned-policy", policy_revision: 1, network_revision: network.revision(), route_revision: 1, plan_revision: 1, policy_expires_ms: deadline, route_expires_ms: deadline, plan_expires_ms: deadline };
+                let signed = signer.issue_combined(&compiled, &target, &checked, &evidence, &state, now, || std::sync::Arc::ptr_eq(&owner.load_full(), &compiled)).map_err(|_| anyhow!("combined permit refused"))?;
+                let binding = receipt_binding::digest(signed.context(), Some(signed.permit())).map_err(|_| anyhow!("permit binding refused"))?;
+                hopae_grpc::receipt::verify(&public, signed.bytes(), hopae_grpc::receipt::Purpose::Permit, &binding, now()).map_err(|_| anyhow!("permit signature refused"))?;
+                ensure!(signed.expires_ms() <= network.expires_ms() && signed.expires_ms() <= checked.expires_ms(), "permit exceeded evidence deadline");
+            }
             let revision = checked.revision();
             prior = Some(reply);
             Ok::<_, anyhow::Error>(revision)
@@ -348,7 +375,7 @@ async fn main() -> Result<()> {
         match (command.as_str(), result) {
             ("allow", Ok(revision)) => println!(
                 "{}",
-                serde_json::json!({"allowed":true,"revision":revision})
+                serde_json::json!({"allowed":true,"revision":revision,"permit_candidate":config.permit_network.is_some()})
             ),
             ("deny" | "deny-network", Err(_)) => {
                 println!("{}", serde_json::json!({"allowed":false}))

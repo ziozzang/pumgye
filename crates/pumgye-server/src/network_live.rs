@@ -25,7 +25,23 @@ pub struct Observation<'a> {
     before_ms: u64,
     begun: Instant,
 }
-impl Observation<'_> {
+impl<'a> Observation<'a> {
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        floor: &'a AtomicU64,
+        ip: IpAddr,
+        revision: u64,
+        expires_ms: u64,
+    ) -> Self {
+        Self {
+            floor,
+            ip,
+            revision,
+            expires_ms,
+            before_ms: 1000,
+            begun: Instant::now(),
+        }
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }

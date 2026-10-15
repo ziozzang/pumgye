@@ -13,6 +13,7 @@ def main():
     parser.add_argument('--pumgye', required=True, type=Path)
     parser.add_argument('--sumunjang', required=True, type=Path)
     parser.add_argument('--grpc-decisions', action='store_true')
+    parser.add_argument('--combined-permit', action='store_true', help='require the client to sign and verify candidates using actual live authority observations; not a permit RPC/replay test')
     parser.add_argument('--nonempty-entity', action='store_true', help='bind an owned nonempty entity instead of an empty request body')
     parser.add_argument('--fragmented-entity', action='store_true', help='require a client that qualifies and reports two prepared entity frames')
     args = parser.parse_args()
@@ -92,6 +93,9 @@ def main():
                 trust=write('trust.json',{'entries':[{'issuer_ref':'owned','key_epoch':1,'identity_epoch':'epoch1','service':'orders','audience':'orders-api','minimum_revision':1,'public_key':pin}]})
                 auth_live=write('auth-live.json',dict(tls_fields,issuer_ref='owned',address=f'https://localhost:{grpc}',token_env='OWNED_RECEIPT_CALLER'))
                 network_live=write('network-live.json',dict(tls_fields,address=f'https://localhost:{guard_grpc}',token_env='HANGANG_GUARD_COLLECTOR_TOKEN'))
+                if args.combined_permit:
+                    client_config['permit_network']=network_live
+                    client_path.write_text(json.dumps(client_config))
                 import struct
                 subject_hash=hashlib.sha256(bytes([1]))
                 for field in ['hopae:owned','owned','worker']:
@@ -119,7 +123,9 @@ def main():
                     line=client.stdout.readline();assert line, 'owned client refused expected result'
                     return json.loads(line)
                 allowed=command('allow');assert allowed['allowed'] is True and allowed['revision']==1
+                if args.combined_permit:assert allowed.get('permit_candidate') is True, 'selected client did not qualify combined permit signing'
                 if args.fragmented_entity:assert allowed.get('entity_frames')==2, 'selected client did not qualify fragmented entity preparation'
+                if args.combined_permit:print('PASS: combined permit candidate signs and verifies using actual Hopae and Sumunjang mTLS observations; local synthetic route/plan owners, no permit RPC or replay claim')
                 guard('POST','/v1/blocks',{'network':'203.0.113.9/32','expires_at':int(time.time())+600,'reason':'owned combined qualification'})
                 assert command('deny-network')['allowed'] is False
                 guard('DELETE','/v1/blocks',{'network':'203.0.113.9/32'})

@@ -237,3 +237,21 @@ Internal deployment passed signed-artifact verification, isolated operating DB
 clone preflight, private consistent backup, exact policy preservation, actual
 mTLS management/PPG1 refusal and two restarts. Native receipt/live resources
 remain unconfigured in this existing deployment; the new endpoint fails closed.
+
+### Combined-observation permit candidates
+
+`permit::Signer::issue_combined` requires opaque actual Hopae and Sumunjang
+observations in addition to verified authentication. It derives Enforce evidence
+and network expiry from that observation, refuses a mismatched network revision
+or IP, and rechecks both observations before and after owner fences. The signed
+candidate cannot outlive the network observation or authentication receipt.
+Clock reversal and retirement during the final callback discard the private
+candidate. No policy decision performs SQL.
+
+The owned `authenticated_resource_smoke.py --combined-permit` fixture requires
+a participating client; use `hopae_live_qualification`, `--live-validation`,
+`--grpc-decisions` and `--nonempty-entity` to exercise actual live authorities,
+network refusal/restoration, identity withdrawal/restoration and outage. Its
+route/projection owners are local synthetic fixture state. This is not a permit
+RPC, distributed owner discovery, downstream replay consumption or production
+activation. The low-level `issue` API still requires native caller-owned facts.
