@@ -26,6 +26,68 @@ pub(super) async fn read_header<S: AsyncRead + Unpin>(
     }
     Ok(header)
 }
+// client-go adds its HTTP timeout as an advisory query parameter. It never
+// changes this server's original native operation budget.
+fn canonical_timeout(value: &str) -> bool {
+    let (number, scale, precision, max_integer) = if let Some(n) = value.strip_suffix("ns") {
+        (n, 1u64, 0usize, 999u64)
+    } else if let Some(n) = value.strip_suffix("%C2%B5s") {
+        (n, 1_000, 3, 999)
+    } else if let Some(n) = value.strip_suffix("ms") {
+        (n, 1_000_000, 6, 999)
+    } else if let Some(n) = value.strip_suffix('s') {
+        (n, 1_000_000_000, 9, 30)
+    } else {
+        return false;
+    };
+    let (integer, fraction) = number
+        .split_once('.')
+        .map_or((number, None), |(a, b)| (a, Some(b)));
+    if integer.is_empty()
+        || integer.len() > 3
+        || integer.starts_with('0')
+        || !integer.bytes().all(|b| b.is_ascii_digit())
+    {
+        return false;
+    }
+    let Ok(integer) = integer.parse::<u64>() else {
+        return false;
+    };
+    if integer > max_integer {
+        return false;
+    }
+    let fractional = match fraction {
+        None => 0,
+        Some(f) => {
+            if f.is_empty()
+                || f.len() > precision
+                || f.ends_with('0')
+                || !f.bytes().all(|b| b.is_ascii_digit())
+            {
+                return false;
+            }
+            let Ok(n) = f.parse::<u64>() else {
+                return false;
+            };
+            let Some(n) = n.checked_mul(10u64.pow((precision - f.len()) as u32)) else {
+                return false;
+            };
+            n
+        }
+    };
+    integer
+        .checked_mul(scale)
+        .and_then(|n| n.checked_add(fractional))
+        .is_some_and(|n| n > 0 && n <= 30_000_000_000)
+}
+fn valid_target(target: &str) -> bool {
+    const PATH: &str = "/v1/kubernetes/subjectaccessreviews";
+    target == PATH
+        || target
+            .strip_prefix(PATH)
+            .and_then(|s| s.strip_prefix("?timeout="))
+            .is_some_and(canonical_timeout)
+}
 pub(super) fn parse_header(bytes: &[u8], authority: &str, token: &str) -> Result<Frame, u16> {
     if !bytes.starts_with(b"POST ") || bytes.windows(2).any(|v| v[1] == b'\n' && v[0] != b'\r') {
         return Err(400);
@@ -37,8 +99,7 @@ pub(super) fn parse_header(bytes: &[u8], authority: &str, token: &str) -> Result
     {
         return Err(400);
     }
-    if request.method != Some("POST") || request.path != Some("/v1/kubernetes/subjectaccessreviews")
-    {
+    if request.method != Some("POST") || !request.path.is_some_and(valid_target) {
         return Err(404);
     }
     let mut host = None;

@@ -13,3 +13,20 @@ raw TCP 아래 guard가 TLS의 scalar/vectored write·flush·shutdown과 read �
 검증 범위는 매 poll send-boundary 관측이며 분산 원자적 철회·원격 수신/ACK·이미 kernel에 수락된 bytes/완료 작업의 회수 보장이 아니다. 실제 로컬 mTLS 같은 연결 Allow/Deny/Allow, native CAS publication, body 없는 caller 거부, 실제 binary main/CLI/종료, Pending TLS flush 중 교체·shutdown·cancel·queued next request의 추가 전송0을 검증한다. 실제 Kubernetes API-server/고속처리 완료 주장은 아니다. Bytewise header 읽기는 명시적 최적화 후속이다.
 
 운영 전 별도 승인된 전용 API-server에서 v1 envelope/실제 H1재사용/cacheAuthorizedRequests:false/cacheUnauthorizedRequests:false/failurePolicyDeny/authorizer순서/system:masters 제외/철회·장애·재시작·credential rotation을 검증해야 한다. 현재 main K3s authorizer를 바꾸지 않는다. Root core pin 및 context-aware Pum UI가 전체 policy/API metadata를 보존하고 부적절한 network/Workload 편집을 막아야 하며 현재 Kubernetes 관리화면 완료를 주장하지 않는다. 기존 transport pooling은 그대로이며 H2 owner분리/처리량은 후속이다.
+
+
+## 실제 client-go advisory timeout 호환
+
+실제 Kubernetes98e9 NewGenericWebhook 클라이언트의 로컬 httptest POST에서
+`/v1/kubernetes/subjectaccessreviews?timeout=3s`를 관측했다. 이전 query 없는 경로만
+허용한 frozen5817 정적 binary는 실제 검증 mTLS에서404를 반환했다. 이제 정확한
+기존 경로에 query 없음 또는 단일 timeout만 허용한다. 양수 canonical Go Duration
+URI이며 최대30s: ns1..999, `%C2%B5s` micro1..999(소수3자리), ms1..999(소수6자리),
+s1..30(소수9자리)만 허용한다. 소수 끝0/선행0/영음수/overflow/추가·중복·미지원query/
+경로percent/다른escape/fragment는 거부한다. 이 값은 advisory로 버리며 원래1초
+BOOTTIME 예산이나 원천 수명을 절대 연장·재구성하지 않는다.
+
+fixtures의 Go probe는 실제 POST 캡처 및 실제 REST URL 생성 증거를 재현한다.
+subsecond URL 생성은 짧은 네트워크 deadline 성공 증거가 아니다. 실제 mTLS 같은
+연결 Allow/Deny/Allow와 child CLI에 캡처한3s target을 적용했다. 실제 API-server/
+K3s는 새 source/static으로 재검증해야 하며 이전 후보의 결과를 상속하지 않는다.

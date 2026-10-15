@@ -44,8 +44,8 @@ def main(binary):
      if index:
       policy['services']['api']['users']={} if not allow else {'k8sapi:owned-cluster:reader':['reader']}
       connection=http.client.HTTPConnection('127.0.0.1',management,timeout=3);connection.request('PUT','/v1/policy',json.dumps({'revision':index,'policy':policy}),{'Authorization':'Bearer '+ADMIN,'If-Match':'"'+str(index)+'"','Content-Type':'application/json'});response=connection.getresponse();response.read();assert response.status==200;connection.close()
-     stream.sendall(('POST /v1/kubernetes/subjectaccessreviews HTTP/1.1\r\nHost: sar.test\r\nAuthorization: Bearer '+TOKEN+'\r\nContent-Type: application/json\r\nContent-Length: '+str(len(payload))+'\r\n\r\n').encode()+payload)
-     assert file.readline().startswith(b'HTTP/1.1 200 ');headers={}
+     stream.sendall(('POST /v1/kubernetes/subjectaccessreviews?timeout=3s HTTP/1.1\r\nHost: sar.test\r\nAuthorization: Bearer '+TOKEN+'\r\nContent-Type: application/json\r\nContent-Length: '+str(len(payload))+'\r\n\r\n').encode()+payload)
+     status_line=file.readline();assert status_line.startswith(b'HTTP/1.1 200 '),status_line.decode('ascii',errors='replace').strip();headers={}
      while True:
       line=file.readline()
       if line==b'\r\n':break

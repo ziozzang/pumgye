@@ -140,6 +140,85 @@ fn strict_http1_framing_auth_precedes_body_and_ambiguous_inputs_refuse() {
         Some(415)
     );
 }
+#[test]
+fn actual_client_go_timeout_uri_and_noncanonical_ambiguities() {
+    let header = |target: &str| {
+        format!(
+            "POST {target} HTTP/1.1\r\nHost: sar.test\r\nAuthorization: Bearer {TOKEN}\r\nContent-Type: application/json\r\nContent-Length: 1\r\n\r\n"
+        )
+    };
+    let path = "/v1/kubernetes/subjectaccessreviews";
+    // Captured from the real upstream NewGenericWebhook REST client/httptest.
+    for duration in [
+        "3s",
+        "30s",
+        "1.000000001s",
+        "1ns",
+        "999ns",
+        "1%C2%B5s",
+        "1.001%C2%B5s",
+        "999.999%C2%B5s",
+        "1ms",
+        "999.999999ms",
+    ] {
+        assert!(
+            wire::parse_header(
+                header(&format!("{path}?timeout={duration}")).as_bytes(),
+                "sar.test",
+                TOKEN
+            )
+            .is_ok(),
+            "{duration}"
+        );
+    }
+    for duration in [
+        "",
+        "0s",
+        "31s",
+        "30.000000001s",
+        "1.0000000001s",
+        "1.0s",
+        "01s",
+        "+3s",
+        "-3s",
+        "1000ms",
+        "0.5s",
+        "1.1ns",
+        "1000ns",
+        "1us",
+        "1%c2%b5s",
+        "1%CE%BCs",
+        "1µs",
+        "3s&x=1",
+        "3s&timeout=3s",
+        "3s?x=1",
+        "3s#fragment",
+        "%33s",
+        "999999999999999999999999s",
+    ] {
+        assert!(
+            wire::parse_header(
+                header(&format!("{path}?timeout={duration}")).as_bytes(),
+                "sar.test",
+                TOKEN
+            )
+            .is_err(),
+            "{duration}"
+        );
+    }
+    for target in [
+        format!("{path}/?timeout=3s"),
+        format!("{path}?x=3s"),
+        format!("{path}%3Ftimeout=3s"),
+        format!("{path}?timeout=3s&"),
+        "/v1/kubernetes/%73ubjectaccessreviews?timeout=3s".into(),
+    ] {
+        assert!(
+            wire::parse_header(header(&target).as_bytes(), "sar.test", TOKEN).is_err(),
+            "{target}"
+        );
+    }
+}
 fn tls_files(path: &Path) {
     let command = |args: &[&str]| {
         let out = std::process::Command::new("openssl")
@@ -267,10 +346,14 @@ fn client(path: &Path, name: Option<&str>) -> tokio_rustls::TlsConnector {
     client_alpn(path, name, vec![b"http/1.1".to_vec()])
 }
 fn request(token: &str, body: &[u8]) -> Vec<u8> {
-    let mut out=format!("POST /v1/kubernetes/subjectaccessreviews HTTP/1.1\r\nHost: sar.test\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",body.len()).into_bytes();
-    out.extend_from_slice(body);
-    out
+    request_target(token, body, "/v1/kubernetes/subjectaccessreviews")
 }
+fn request_target(token: &str, body: &[u8], target: &str) -> Vec<u8> {
+    let mut request = format!("POST {target} HTTP/1.1\r\nHost: sar.test\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+    request.extend_from_slice(body);
+    request
+}
+
 async fn reply<S: AsyncRead + Unpin>(stream: &mut S) -> (u16, Vec<u8>) {
     let first = stream.read_u8().await.unwrap();
     let header = wire::read_header(stream, first).await.unwrap();
@@ -330,7 +413,14 @@ async fn actual_verified_mtls_persistent_same_connection_native_allow_deny_allow
         } else if a.view.load().document.revision > 1 {
             publication(&a, policy()).await;
         }
-        stream.write_all(&request(TOKEN, &body())).await.unwrap();
+        stream
+            .write_all(&request_target(
+                TOKEN,
+                &body(),
+                "/v1/kubernetes/subjectaccessreviews?timeout=3s",
+            ))
+            .await
+            .unwrap();
         stream.flush().await.unwrap();
         let (status, raw) = reply(&mut stream).await;
         assert_eq!(status, 200);

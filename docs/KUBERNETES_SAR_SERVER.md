@@ -12,7 +12,7 @@ Mandatory verified mTLS plus exact fingerprint allowlist establishes API-server 
 
 Verified HTTP1.1 ALPN and absent ALPN are accepted, both through the same strict H1 parser; other negotiated protocols/h2c/upgrade/HTTP2 prior knowledge refuse. One owning task serializes each connection; no Hyper/detached driver/split writer. It supports repeated requests on one TLS connection, not a handshake per request. At most128 owned connections and128 active requests, idle30s, connection lifetime300s,4096 requests/connection; server drain5s then shared runtime aborts/owns tasks. Listener generation retires on shutdown, error and cancellation (RAII), before normal drain. These bounds are transport limits, not authorization TTL/grace.
 
-Exactly POST `/v1/kubernetes/subjectaccessreviews`, HTTP1.1, exact configured Host. Headers16KiB/64fields, strict CRLF and mature httparse with additional framing constraints. Exactly one canonical decimal Content-Length1..32768, supported application/json (optional literal charset=utf-8), one Authorization. Any TE, Expect/100-continue, trailer, upgrade, content-encoding, duplicate framing/auth/Host fields, noncanonical/comma length, unsupported Connection nominations or absolute/query target refuses/closes. No chunked body support. Body authentication/admission precede JSON decoding. Fixed safe errors have no input echo; ambiguous framing/timeout/EOF may close without an HTTP response. Decoder malformed JSON/duplicates/size/depth/envelope =>400; valid unsupported/unknown/source-withdrawn/native-denied input =>HTTP200 explicit deniedtrue, never no-opinion. Failures/non200/transport outage require API-server failurePolicyDeny.
+Exactly POST `/v1/kubernetes/subjectaccessreviews`, HTTP1.1, exact configured Host. Headers16KiB/64fields, strict CRLF and mature httparse with additional framing constraints. Exactly one canonical decimal Content-Length1..32768, supported application/json (optional literal charset=utf-8), one Authorization. Any TE, Expect/100-continue, trailer, upgrade, content-encoding, duplicate framing/auth/Host fields, noncanonical/comma length, unsupported Connection nominations or absolute/unrecognized-query target refuses/closes. No chunked body support. Body authentication/admission precede JSON decoding. Fixed safe errors have no input echo; ambiguous framing/timeout/EOF may close without an HTTP response. Decoder malformed JSON/duplicates/size/depth/envelope =>400; valid unsupported/unknown/source-withdrawn/native-denied input =>HTTP200 explicit deniedtrue, never no-opinion. Failures/non200/transport outage require API-server failurePolicyDeny.
 
 The driver reads only the needed header/body frame and does not evaluate another request before previous response completion. Rustls can buffer later plaintext from one TLS record, so this is not a claim to detect/reject every client pipeline. Any queued next request is processed strictly AFTER full previous flush with new credential/admission/deadline/View. Connection reuse cannot renew prior source or allowing owner. Header currently reads bytewise to avoid read-ahead ambiguity; this is an acknowledged optimization area, not extreme-throughput qualification.
 
@@ -31,3 +31,32 @@ This is per-poll send-boundary observation, NOT an atomic distributed revocation
 Local tests exercise actual production listener with verified mTLS, one same connection native Allow/Deny/Allow through real management CAS publication; wrong same-CA leaf/no certificate/caller credential rejected without body/native evaluation; absent-ALPN H1 accepted. Actual CLI process fixture proves preflight/noDB refusal, default-off flag parsing, actual owning main listener/native publication and normal SIGTERM cleanup. Deterministic actual TLS transport confirms plaintext accepted while flush Pending, then same-grant publication/shutdown/cancel plus queued second request emits zero additional raw bytes/evaluator calls and releases permits. Pure captured View/deadline/source failure/reversal/late callback/active-after-clock and abort-generation tests cover irreversible refusal. These are local fixtures, NOT a real Kubernetes API-server or performance gate.
 
 Before production: dedicated parent-approved API-server fixture; no current main K3s authorizer changes. Verify v1 webhook envelope, persistentH1 actual client behavior, ordered authoritative webhook BEFORE permissive later authorizers, failurePolicyDeny and cacheAuthorizedRequests:false/cacheUnauthorizedRequests:false (authorizedTTL0 alone is insufficient), ordinary requester without system:masters bypass, grant/source withdrawal/outage/restart/credential rotation and backend-effects counts. Preserve backup/rollback plan. Root core pin and context-aware Pum admin UI must also preserve API metadata/whole policy and prevent inappropriate network/Workload assignments; current UI is not Kubernetes-admin complete. H2 per-stream safe ownership and throughput/bytewise-header optimization remain followups, not silent changes to existing pooled transports.
+
+
+## Actual client-go advisory timeout interoperability
+
+The real Kubernetes98e9 NewGenericWebhook/UnversionedRESTClient emits
+`POST /v1/kubernetes/subjectaccessreviews?timeout=3s` for configured3s webhook
+HTTP timeout. This was captured by the actual upstream client at a local
+httptest server; the earlier strict query-free endpoint returned404, including
+with the frozen5817ee4 static binary under actual verified mTLS. The listener now
+accepts the unchanged exact path with either no query or ONE `timeout` parameter.
+It accepts only canonical positive Go Duration.String URI encodings <=30s:
+ns1..999; `%C2%B5s` microseconds1..999 with <=3 fractional digits;
+ms1..999 with <=6; seconds1..30 with <=9 (30s is the upper bound).
+Fractions must end nonzero, have exact nanosecond precision, and integer parts
+have no leading zero. Zero/negative/overflow, raw/other percent spellings,
+duplicate/unknown parameters, path percent encoding/fragments and trailing
+slashes remain refused. No new dependency or general URI normalization is used.
+The parsed number is **advisory and discarded**: it cannot extend, replace or
+construct the original native1s BOOTTIME owner budget or source lease.
+
+Reproduction sources are `crates/pumgye-server/tests/fixtures/sar-client-go-path-probe.go`
+(actual POST capture) and `sar-client-go-duration-vectors.go` (actual REST URL
+construction including subsecond encodings). Run each from the checked upstream
+Kubernetes98e9 module with `GOTOOLCHAIN=auto go run -mod=vendor <absolute-file>`.
+They need Go1.26 and local httptest only, with no cluster or credentials. Tiny
+subsecond vectors are URL-construction evidence, not actual network timeout
+success. Actual verified mTLS persistent Allow/Deny/Allow and child CLI tests
+use the captured3s request target. Broader real API-server/K3s requalification
+is still required; prior static candidate qualification is not inherited.
