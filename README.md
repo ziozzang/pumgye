@@ -343,3 +343,11 @@ with zero cache TTL. The result is a point-in-time observation, not replay
 consumption or a remote lease. Workspace 72 tests, including canonical hostile
 proofs and actual mTLS admission refusal, pass; positive gateway/receiver use is
 a separate integration gate.
+
+Positive source integration now passes with Hangang b326f03: after checking the
+signature it requires this live validation RPC and adopts the shorter deadline.
+The actual four-server route+plan+permit fixture passes final dispatch, wrong
+pins/owner trust refusal, restoration, durable withdrawal and authority outages.
+No-permit compatibility passes separately. Receiver paired replay/projection,
+fleet/restore retirement, static release, Kubernetes and operating adoption and
+throughput are still open.
