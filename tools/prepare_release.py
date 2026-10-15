@@ -32,7 +32,7 @@ def prepare(target,output,signer,seed):
     artifact=output/('pumgye-'+target);artifact.write_bytes(binary.read_bytes());artifact.chmod(0o755)
     folder=f'pumgye-v{version}-linux-musl-{TARGETS[target]}'
     sources={'pumgye':binary,'LICENSE':ROOT/'LICENSE','README.md':ROOT/'README.md','README.ko.md':ROOT/'README.ko.md','release-public-key.txt':ROOT/'release-public-key.txt'}
-    for name in ['SERVER.md','SERVER.ko.md','GRPC.md','GRPC.ko.md','KUBERNETES.md','KUBERNETES.ko.md','AUTHENTICATION_RECEIPTS.md','AUTHENTICATION_RECEIPTS.ko.md','OBSERVED_PERMITS.md','OBSERVED_PERMITS.ko.md']:
+    for name in ['SERVER.md','SERVER.ko.md','GRPC.md','GRPC.ko.md','KUBERNETES.md','KUBERNETES.ko.md','AUTHENTICATION_RECEIPTS.md','AUTHENTICATION_RECEIPTS.ko.md','OBSERVED_PERMITS.md','OBSERVED_PERMITS.ko.md','WORKLOAD_OBSERVED_PERMITS.md','WORKLOAD_OBSERVED_PERMITS.ko.md']:
         p=ROOT/'docs'/name
         if p.is_file():sources['docs/'+name]=p
     with (output/(folder+'.tar.gz')).open('wb') as raw,gzip.GzipFile(fileobj=raw,mode='wb',filename='',mtime=0) as gz,tarfile.open(fileobj=gz,mode='w') as tar:

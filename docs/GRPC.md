@@ -104,3 +104,16 @@ service syntax consistently with gRPC.
 
 
 [Native observed permits](OBSERVED_PERMITS.md) documents the opt-in BOOTTIME permit RPC protocol.
+
+
+## Workload source contract (0.1.8 candidate)
+
+`WorkloadResourceAuthorization.Decide` is a fixed Workload/AAL0 preliminary
+metadata query for authenticated enforcement callers. It uses the same current
+compiled policy/source fences and only `workload_users`; it never falls back to
+`users`. Its unsigned result is neither authentication evidence nor a freshness
+lease. Hangang must still complete the independent observed authentication,
+signed permission, output and final transport checks. See
+[Workload observed permits](WORKLOAD_OBSERVED_PERMITS.md) for explicit activation
+and release/qualification boundaries. Static release archives include both
+language versions of that contract.

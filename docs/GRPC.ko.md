@@ -93,3 +93,14 @@ HTTP의 네이티브 서비스 문법도 gRPC와 같은 기준으로 검증합�
 
 
 [네이티브 observed permit](OBSERVED_PERMITS.ko.md)에서 opt-in BOOTTIME permit RPC를 설명한다.
+
+
+## Workload 원천 계약 (0.1.8 후보)
+
+`WorkloadResourceAuthorization.Decide`는 인증된 집행 호출자용 Workload/AAL0
+고정 사전 메타데이터 조회다. 같은 현재 컴파일 정책·원천 경계를 사용하고
+`workload_users`만 조회하며 `users`로 대체하지 않는다. 서명 없는 결과는 인증
+증거나 freshness lease가 아니다. 한강은 별도의 observed 인증·서명 권한·출력·최종
+전송 검사를 완료해야 한다. 명시적 활성화와 릴리즈/검증 범위는
+[Workload observed permit](WORKLOAD_OBSERVED_PERMITS.ko.md)을 참고한다.
+정적 릴리즈 아카이브에 이 계약의 영어·한국어 문서를 포함한다.
