@@ -1,10 +1,24 @@
 # Additional gRPC decision transport
 
-Initial caller metadata is authenticated before generated protobuf decoding on
-all four services. Bearer credentials must be in initial headers; trailer-only
-credentials do not grant admission. Handler checks and configured message limits
-remain in place. This is not a cumulative unary-body or process-wide decoding
-memory budget; those shared ingress controls remain separate work.
+Initial caller metadata is authenticated outside the shared unary ingress adapter,
+before generated protobuf decoding on all four services. Bearer credentials must
+be in initial headers; trailer-only credentials do not grant admission. Handler
+checks and generated Prost message limits remain in place.
+
+All services/connections share 64 ingress slots, separate from the 4096 handler
+slots. Admission fails immediately without polling the body when exhausted. Each
+slot lasts through decoding and the handler future, and returns on completion,
+error or cancellation. Uncompressed requests contain exactly one frame; actual
+DATA is capped at the method payload limit plus its five-byte prefix. Payload
+limits remain 2048/2048/4096/8192 bytes and response limits remain unchanged.
+
+Capacity planning reserves an estimated 64 KiB per active request: approximately
+8 times the largest 8 KiB payload for owned string/byte buffers, scalar/message
+storage and allocation slack. These schemas have no repeated message collection.
+64 slots therefore reserve a 4 MiB planning envelope, excluding HTTP/2 buffers,
+responses, backend work and other process memory. This is a conservative estimate,
+not a measured allocation ceiling or a throughput qualification; slow backend
+calls also occupy these slots. No handler acquires the ingress semaphore again.
 
 [한국어](GRPC.ko.md)
 

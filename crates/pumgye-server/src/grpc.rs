@@ -2,6 +2,7 @@
 use crate::Authority;
 use anyhow::Result;
 pub use hangang_runtime::configuration;
+use hangang_runtime::unary_ingress::UnaryIngress;
 use pumgye_grpc::v1::{
     DecisionReply, DecisionRequest,
     authorization_server::{Authorization, AuthorizationServer},
@@ -12,6 +13,10 @@ use std::{
 };
 use tokio::net::TcpListener;
 use tonic::{Request, Response, Status, transport::ServerTlsConfig};
+
+// A separate process-wide budget: 64 * estimated 64 KiB/request = 4 MiB.
+// See docs/GRPC.md for assumptions; handler admission remains independent.
+const UNARY_INGRESS_SLOTS: usize = 64;
 
 #[derive(Clone)]
 struct Service(Arc<Authority>);
@@ -382,23 +387,24 @@ pub async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
     let incoming = hangang_runtime::incoming(listener);
+    let ingress = Arc::new(tokio::sync::Semaphore::new(UNARY_INGRESS_SLOTS));
     hangang_runtime::server(tls)?
         .add_service(authenticate_transport(
-            AuthorizationServer::new(Service(authority.clone()))
+            UnaryIngress::new(AuthorizationServer::new(Service(authority.clone()))
                 .max_decoding_message_size(2048)
-                .max_encoding_message_size(1024),
+                .max_encoding_message_size(1024), ingress.clone(), 2048),
             authority.clone(),
         ))
         .add_service(authenticate_transport(
-            pumgye_grpc::v1::resource_authorization_server::ResourceAuthorizationServer::new(
+            UnaryIngress::new(pumgye_grpc::v1::resource_authorization_server::ResourceAuthorizationServer::new(
                 Service(authority.clone()),
             )
             .max_decoding_message_size(2048)
-            .max_encoding_message_size(1024),
+            .max_encoding_message_size(1024), ingress.clone(), 2048),
             authority.clone(),
         ))
-        .add_service(authenticate_transport(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128), authority.clone()))
-        .add_service(authenticate_transport(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048), authority))
+        .add_service(authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::authenticated_resource_authorization_server::AuthenticatedResourceAuthorizationServer::new(Service(authority.clone())).max_decoding_message_size(4096).max_encoding_message_size(128), ingress.clone(), 4096), authority.clone()))
+        .add_service(authenticate_transport(UnaryIngress::new(pumgye_grpc::v1::projection_permits_server::ProjectionPermitsServer::new(Service(authority.clone())).max_decoding_message_size(8192).max_encoding_message_size(2048), ingress, 8192), authority))
         .serve_with_incoming_shutdown(incoming, shutdown)
         .await?;
     Ok(())
@@ -1106,11 +1112,30 @@ mod tests {
         http::Response<Body>,
         std::convert::Infallible,
     > {
+        predecode_service_with_budget(
+            owner,
+            kind,
+            Arc::new(tokio::sync::Semaphore::new(UNARY_INGRESS_SLOTS)),
+        )
+    }
+    fn predecode_service_with_budget(
+        owner: Arc<Authority>,
+        kind: usize,
+        ingress: Arc<tokio::sync::Semaphore>,
+    ) -> tower::util::BoxCloneService<
+        http::Request<Body>,
+        http::Response<Body>,
+        std::convert::Infallible,
+    > {
+        let limit = [2048, 2048, 4096, 8192][kind];
         macro_rules! wrap {
             ($server:expr) => {
                 tower::util::BoxCloneService::new(
                     tower::ServiceExt::<http::Request<Body>>::map_response(
-                        authenticate_transport($server, owner.clone()),
+                        authenticate_transport(
+                            UnaryIngress::new($server, ingress.clone(), limit),
+                            owner.clone(),
+                        ),
                         |response| response.map(Body::new),
                     ),
                 )
@@ -1135,6 +1160,85 @@ mod tests {
         (3, "/hangang.pumgye.v1.ProjectionPermits/Issue", 8192),
         (3, "/hangang.pumgye.v1.ProjectionPermits/Validate", 8192),
     ];
+    #[tokio::test]
+    async fn unary_ingress_refuses_two_frames_without_handler_execution() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = crate::tests::authority(root.path());
+        // Any handler dispatch would fail admission with ResourceExhausted.
+        owner.requests.close();
+        for &(kind, path, _) in PREDECODE_METHODS {
+            let slots = Arc::new(tokio::sync::Semaphore::new(1));
+            let (body, _) = predecode_body(
+                vec![
+                    Bytes::from(predecode_frame(&[])),
+                    Bytes::from(predecode_frame(&[])),
+                ],
+                false,
+            );
+            let response = predecode_service_with_budget(owner.clone(), kind, slots.clone())
+                .oneshot(predecode_request(
+                    path,
+                    &["Bearer fixture-decision-credential"],
+                    body,
+                ))
+                .await
+                .unwrap();
+            let (status, data) = predecode_response(response).await;
+            assert_eq!(status, tonic::Code::InvalidArgument as u16, "{path}");
+            assert!(data.is_empty());
+            assert_eq!(slots.available_permits(), 1);
+            assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+            assert_eq!(owner.requests.available_permits(), 4096);
+        }
+    }
+
+    #[tokio::test]
+    async fn unary_ingress_shared_budget_refuses_before_poll_and_cancel_releases() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = crate::tests::authority(root.path());
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let (_pending_sender, pending_receiver) =
+            tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+        let mut pending = Box::pin(
+            predecode_service_with_budget(owner.clone(), 0, slots.clone()).oneshot(
+                predecode_request(
+                    PREDECODE_METHODS[0].1,
+                    &["Bearer fixture-decision-credential"],
+                    Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(
+                        pending_receiver,
+                    )),
+                ),
+            ),
+        );
+        assert!(
+            std::future::poll_fn(|cx| std::task::Poll::Ready(
+                pending.as_mut().poll(cx).is_pending()
+            ))
+            .await
+        );
+        assert_eq!(slots.available_permits(), 0);
+        for &(kind, path, _) in PREDECODE_METHODS {
+            let (body, polls) = predecode_body(vec![], true);
+            let response = predecode_service_with_budget(owner.clone(), kind, slots.clone())
+                .oneshot(predecode_request(
+                    path,
+                    &["Bearer fixture-decision-credential"],
+                    body,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                predecode_response(response).await.0,
+                tonic::Code::ResourceExhausted as u16
+            );
+            assert_eq!(polls.load(Ordering::SeqCst), 0);
+        }
+        drop(pending);
+        assert_eq!(slots.available_permits(), 1);
+        assert_eq!(owner.queries.load(Ordering::SeqCst), 0);
+        assert_eq!(owner.requests.available_permits(), 4096);
+    }
+
     #[tokio::test]
     async fn predecode_auth_rejects_missing_wrong_role_and_duplicate_headers_before_body() {
         let root = tempfile::tempdir().unwrap();
