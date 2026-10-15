@@ -23,12 +23,15 @@ def verify(root):
 # Deliberate allowlist: never recursively include local credentials or evidence.
 LEGACY_DOCS=('SERVER.md','SERVER.ko.md','GRPC.md','GRPC.ko.md','KUBERNETES.md','KUBERNETES.ko.md','AUTHENTICATION_RECEIPTS.md','AUTHENTICATION_RECEIPTS.ko.md','OBSERVED_PERMITS.md','OBSERVED_PERMITS.ko.md','WORKLOAD_OBSERVED_PERMITS.md','WORKLOAD_OBSERVED_PERMITS.ko.md')
 SAR_DOCS=tuple(stem+suffix for stem in ('KUBERNETES_API_CONTEXT','KUBERNETES_AUTHORIZATION_MAPPING','KUBERNETES_SAR_WIRE','KUBERNETES_SAR_SERVER','RELEASE_0_1_9') for suffix in ('.md','.ko.md'))
+# Historical release notes remain provenance; these are the current Human contracts.
+HUMAN_DOCS=('HUMAN_POLICY_CORE.md','HUMAN_POLICY_CORE.ko.md','HUMAN_OBSERVED_PERMITS.md','ko/HUMAN_OBSERVED_PERMITS.md')
 def package_sources(binary):
     sources={'pumgye':binary,'LICENSE':ROOT/'LICENSE','README.md':ROOT/'README.md','README.ko.md':ROOT/'README.ko.md','release-public-key.txt':ROOT/'release-public-key.txt'}
-    for name in LEGACY_DOCS+SAR_DOCS:
+    for name in LEGACY_DOCS+SAR_DOCS+HUMAN_DOCS:
         p=ROOT/'docs'/name
         if p.is_file():sources['docs/'+name]=p
         elif name in SAR_DOCS:raise ValueError('required SAR release documentation missing')
+        elif name in HUMAN_DOCS:raise ValueError('required Human release documentation missing')
     return sources
 
 def write_package(binary,destination,target,version):
