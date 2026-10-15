@@ -678,7 +678,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hopae-grpc"
 version = "0.0.3"
-source = "git+https://github.com/ziozzang/hopae?rev=fd0605361165235086df70e9105ca276327ccb27#fd0605361165235086df70e9105ca276327ccb27"
+source = "git+https://github.com/ziozzang/hopae?rev=96c9af6bc0af1a81cdb42eea3da05f14c763a647#96c9af6bc0af1a81cdb42eea3da05f14c763a647"
 dependencies = [
  "ed25519-dalek",
  "prost",

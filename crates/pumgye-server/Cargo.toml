@@ -12,7 +12,7 @@ path = "src/main.rs"
 [dependencies]
 hangang-route-grpc = { git = "https://github.com/ziozzang/hangang", rev = "dfc099ea763650f98b31110f0720cf3d9042f3ec" }
 guard-grpc = { git = "https://github.com/ziozzang/sumunjang", rev = "1f70428e9481654845a696cf30cdb917a6aef009" }
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "fd0605361165235086df70e9105ca276327ccb27" }
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "96c9af6bc0af1a81cdb42eea3da05f14c763a647" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.3"
 base64 = "0.22"
