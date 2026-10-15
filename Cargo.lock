@@ -1310,6 +1310,7 @@ dependencies = [
  "hangang-route-grpc",
  "hangang-runtime",
  "hopae-grpc",
+ "httparse",
  "hyper-util",
  "libc",
  "pumgye-core",

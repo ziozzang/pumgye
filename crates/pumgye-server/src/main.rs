@@ -5,6 +5,7 @@ mod kubernetes;
 mod kubernetes_api;
 mod kubernetes_authority;
 mod kubernetes_mapping;
+mod sar;
 mod store;
 mod transport;
 use arc_swap::ArcSwap;
@@ -72,6 +73,12 @@ struct Args {
     client_ca: Option<PathBuf>,
     #[arg(long, default_value = "pumgye.sqlite3")]
     database: PathBuf,
+    /// Opt-in fixed-cluster mandatory-mTLS persistent HTTP/1 SAR listener.
+    #[arg(long, conflicts_with_all=["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
+    kubernetes_authorization_config: Option<PathBuf>,
+    /// Validate SAR references, TLS and caller pins without database/listener mutation.
+    #[arg(long, requires = "kubernetes_authorization_config")]
+    check_kubernetes_authorization: bool,
     /// Initial policy for an empty database; ignored on subsequent starts.
     #[arg(long)]
     policy: Option<PathBuf>,
@@ -156,8 +163,6 @@ struct Document {
 }
 #[cfg(feature = "observed-authentication")]
 mod observed_native;
-// Staged private wire prerequisite; no listener or runtime activation yet.
-#[allow(dead_code)]
 mod sar_wire;
 mod source_lifetime;
 struct View {
@@ -714,6 +719,24 @@ fn resource_route() -> axum::routing::MethodRouter<Arc<Authority>> {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     args.validate_native_owners()?;
+    let sar_configuration = args
+        .kubernetes_authorization_config
+        .as_deref()
+        .map(|path| {
+            let admin = zeroize::Zeroizing::new(std::env::var(&args.admin_token_env)?);
+            let decision = zeroize::Zeroizing::new(std::env::var(&args.decision_token_env)?);
+            sar::load(
+                path,
+                &|name| std::env::var(name).ok(),
+                &[admin.as_str(), decision.as_str()],
+            )
+        })
+        .transpose()?;
+    if args.check_kubernetes_authorization {
+        println!("SAR configuration valid; no database or listener opened");
+        return Ok(());
+    }
+
     let mapping = if let Some(path) = &args.kubernetes_mapping {
         use std::io::Read;
         let mut bytes = Vec::new();
@@ -1110,6 +1133,12 @@ async fn main() -> anyhow::Result<()> {
         Some(address) => Some(tokio::net::TcpListener::bind(address).await?),
         None => None,
     };
+    let sar_server = sar_configuration.map(|config| sar::Server::new(config, authority.clone()));
+    let sar_listener = match &sar_server {
+        Some(server) => Some(tokio::net::TcpListener::bind(server.address()).await?),
+        None => None,
+    };
+    let sar_stop_owner = sar_server.clone();
     let grpc_authority = authority.clone();
     let grpc_tls = if grpc_listener.is_some() {
         Some(grpc::configuration(
@@ -1125,11 +1154,20 @@ async fn main() -> anyhow::Result<()> {
     let http_stop = stopped.clone();
     let grpc_stop = stopped.clone();
     let native_stop = stopped.clone();
+    let sar_stop = stopped.clone();
     let readiness_stop = stopped;
     let draining = authority.clone();
     let servers = async {
         tokio::try_join!(
             transport::http(listener, http_tls, router, shutdown_requested(http_stop)),
+            async move {
+                match (sar_server, sar_listener) {
+                    (Some(server), Some(listener)) => {
+                        server.serve(listener, shutdown_requested(sar_stop)).await
+                    }
+                    _ => Ok(()),
+                }
+            },
             async move {
                 match grpc_listener {
                     Some(listener) => {
@@ -1181,6 +1219,7 @@ async fn main() -> anyhow::Result<()> {
         result = termination_signal() => {
             result?;
             draining.healthy.store(false, Ordering::Release);
+            if let Some(server)=sar_stop_owner {server.retire();}
             let _ = stop.send(true);
             // Bound gRPC graceful shutdown as well as the native/HTTP task drains.
             if let Ok(result) = tokio::time::timeout(std::time::Duration::from_secs(6), &mut servers).await {
