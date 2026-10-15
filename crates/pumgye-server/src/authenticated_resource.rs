@@ -189,6 +189,23 @@ pub(crate) async fn evaluate(
         (None, None) => None,
         _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
     };
+    let plan_expected = pumgye_server::plan_live::Expected {
+        service: context.service,
+        audience: context.audience,
+        resource: &q.resource,
+        action: &q.action,
+        aal: context.identity.aal,
+        minimum_revision: 1,
+    };
+    let plan_observation = match a.projection_live.as_ref() {
+        Some(client) => Some(
+            client
+                .observe(plan_expected, &now)
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?,
+        ),
+        None => None,
+    };
     let view = a.view.load_full();
     let current = || {
         a.healthy.load(Ordering::Acquire)
@@ -234,6 +251,20 @@ pub(crate) async fn evaluate(
         Err(pumgye_server::authorization::Refused::Denied(_)) => false,
         Err(_) => return Err(StatusCode::SERVICE_UNAVAILABLE),
     };
+    let final_plan = match (&a.projection_live, &plan_observation) {
+        (Some(client), Some(prior)) => {
+            let final_plan = client
+                .observe(plan_expected, &now)
+                .await
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if !prior.valid_at(now()) || !prior.same_owner(&final_plan) {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            Some(final_plan)
+        }
+        (None, None) => None,
+        _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
     // Requery the actual owner after native identity/network/policy evaluation.
     // A first observation is not a distributed lease or a substitute for this.
     if let Some(prior) = route_observation.as_ref() {
@@ -251,7 +282,13 @@ pub(crate) async fn evaluate(
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     }
-    if !current()
+    if plan_observation
+        .as_ref()
+        .is_some_and(|plan| !plan.valid_at(now()))
+        || final_plan
+            .as_ref()
+            .is_some_and(|plan| !plan.valid_at(now()))
+        || !current()
         || !observation.valid_for(&checked, now())
         || !network.valid_at(q.ip, now())
         || !caller()

@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 [dependencies]
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "73796eea0466636acfd771964ac40f02328b22af" }
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "fd0605361165235086df70e9105ca276327ccb27" }
 prost = "0.14"
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
 [build-dependencies]
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "73796eea0466636acfd771964ac40f02328b22af" }
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "fd0605361165235086df70e9105ca276327ccb27" }
 tonic-prost-build = "0.14.6"

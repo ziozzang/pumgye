@@ -18,3 +18,6 @@ pub mod network_live_config;
 pub mod route_live;
 
 pub mod route_live_config;
+
+/// Authenticated native Hopae projection-plan owner client.
+pub mod plan_live;

@@ -1,4 +1,4 @@
-//! Reference-only native route authority loading.
+//! Reference-only native route/plan authority loading.
 use crate::route_live::{Client, Refused};
 use serde::Deserialize;
 use std::{
@@ -31,6 +31,26 @@ fn read(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>, Refused> {
     Ok(bytes)
 }
 pub fn load(path: &Path, resolve: &dyn Fn(&str) -> Option<String>) -> Result<Client, Refused> {
+    load_with(path, resolve, Client::prepare)
+}
+pub fn load_plan(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Option<String>,
+) -> Result<crate::plan_live::Client, Refused> {
+    load_with(
+        path,
+        resolve,
+        |address, name, ca, certificate, key, token| {
+            crate::plan_live::Client::prepare(address, name, ca, certificate, key, token)
+                .map_err(|_| Refused)
+        },
+    )
+}
+fn load_with<T>(
+    path: &Path,
+    resolve: &dyn Fn(&str) -> Option<String>,
+    prepare: impl FnOnce(&str, &str, &[u8], &[u8], &[u8], &str) -> Result<T, Refused>,
+) -> Result<T, Refused> {
     let config: Configuration =
         serde_json::from_slice(&read(path, 16 * 1024)?).map_err(|_| Refused)?;
     if config.token_env.is_empty()
@@ -46,7 +66,7 @@ pub fn load(path: &Path, resolve: &dyn Fn(&str) -> Option<String>) -> Result<Cli
     let ca = read(&config.ca, 128 * 1024)?;
     let certificate = read(&config.certificate, 128 * 1024)?;
     let key = read(&config.key, 128 * 1024)?;
-    Client::prepare(
+    prepare(
         &config.address,
         &config.server_name,
         &ca,

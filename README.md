@@ -286,3 +286,27 @@ and authority outages. Replacing the owned Pumgye process with signed legacy
 The no-owner compatibility mode passes separately. Workspace 69 tests and strict
 Clippy pass. Static release, Kubernetes/operating adoption, signed permissions,
 projection/replay and full objective qualification remain open.
+
+## Native Hopae projection-plan owner
+
+`--projection-live <path>` requires `--authentication-live` and activates a
+fixed authenticated Hopae `ProjectionPlans/Observe` client for native resource
+decisions. Its reference-only JSON has `address` (HTTPS), `server_name`, `ca`,
+`certificate`, `key` and `token_env`, using the same bounded loader as route
+ownership. The persistent lazy mTLS channel avoids a startup dependency cycle.
+No discovery endpoint or caller-provided plan facts can redirect this client.
+
+Before and after policy evaluation the server checks actual owner plan scope,
+minimum AAL, revision floor, correlation and zero cache TTL. Opaque observations
+retain configured-client identity and a conservative one-second exchange budget
+(including elapsed time and clock reversal checks). This budget is not a cache
+or remote lease. Final checks also retain native policy, identity, network and
+route fences. No query performs SQL or resolves a projected credential. Missing,
+untrusted or changed owners refuse rather than fall back. This is groundwork
+for signed permission issuance; it does not yet issue a projection permit.
+
+Workspace 71 tests and strict Clippy pass. The actual owned four-server gRPC
+fixture passes with route and projection owners, wrong Hopae identity/caller
+refusal, recovery, durable permission/profile withdrawal and authority outages.
+These are source functional checks; static release, Kubernetes, operating
+adoption, signed permit/projection/replay and throughput remain open.
