@@ -1,5 +1,6 @@
 //! Standalone Pumgye control/decision authority.
 mod authenticated_resource;
+mod explain_api;
 mod grpc;
 mod kubernetes;
 mod kubernetes_api;
@@ -133,6 +134,9 @@ struct Args {
     projection_live: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
+    /// Age bound for read-only simulation audit rows (also capped at 100,000 rows).
+    #[arg(long, default_value_t = explain_api::DEFAULT_RETENTION_DAYS, value_parser = clap::value_parser!(u64).range(1..=3650))]
+    simulation_audit_retention_days: u64,
     #[arg(long, default_value = "PUMGYE_DECISION_TOKEN")]
     decision_token_env: String,
 }
@@ -207,6 +211,7 @@ struct Authority {
     publications: Arc<tokio::sync::Semaphore>,
     requests: Arc<tokio::sync::Semaphore>,
     management: Arc<tokio::sync::Semaphore>,
+    simulation_budget: explain_api::Budget,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -467,8 +472,11 @@ async fn request_gate(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let expected = match request.uri().path() {
-        "/v1/policy" | "/v1/status" | "/v1/audit" => Some(&a.admin),
+    let path = request.uri().path();
+    let administrative = matches!(path, "/v1/policy" | "/v1/status" | "/v1/audit")
+        || explain_api::ADMIN_PATHS.contains(&path);
+    let expected = match path {
+        _ if administrative => Some(&a.admin),
         "/v1/decision" | "/v1/resource/decision" => Some(&a.decision),
         _ => None,
     };
@@ -478,10 +486,7 @@ async fn request_gate(
     let Ok(_request) = a.requests.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let _management = if matches!(
-        request.uri().path(),
-        "/v1/policy" | "/v1/status" | "/v1/audit"
-    ) {
+    let _management = if administrative {
         match a.management.clone().try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -649,7 +654,8 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "authentication_trust_entries":a.authentication_trust.as_ref().map_or(0, |trust| trust.entries()),
         "source_lease_remaining_ms":if a.kubernetes_owned {Some(remaining.unwrap_or(0))} else {None},
         "source_writable":!a.kubernetes_owned,
-        "decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0
+        "decision_queries":a.queries.load(Ordering::Relaxed),
+        "simulation_queries":a.simulation_budget.simulations.load(Ordering::Relaxed),"cache_ttl_ms":0
     }))
 }
 
@@ -1068,6 +1074,9 @@ async fn main() -> anyhow::Result<()> {
         publications: Arc::new(tokio::sync::Semaphore::new(4)),
         requests: Arc::new(tokio::sync::Semaphore::new(4096)),
         management: Arc::new(tokio::sync::Semaphore::new(4)),
+        simulation_budget: explain_api::Budget::with_retention_days(
+            args.simulation_audit_retention_days,
+        ),
     });
     #[cfg(feature = "observed-authentication")]
     if args.observed_permits {
@@ -1218,6 +1227,7 @@ async fn main() -> anyhow::Result<()> {
             "/v1/decision",
             post(decide).layer(axum::extract::DefaultBodyLimit::max(2048)),
         )
+        .merge(explain_api::routes())
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(
             authority.clone(),
@@ -1697,6 +1707,7 @@ mod tests {
             publications: Arc::new(tokio::sync::Semaphore::new(4)),
             requests: Arc::new(tokio::sync::Semaphore::new(4096)),
             management: Arc::new(tokio::sync::Semaphore::new(4)),
+            simulation_budget: Default::default(),
         })
     }
     pub(super) fn headers() -> HeaderMap {

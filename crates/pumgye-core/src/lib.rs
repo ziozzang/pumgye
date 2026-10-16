@@ -1,12 +1,18 @@
 //! Deterministic authorization. Callers must authenticate identity and network evidence.
+pub mod diff;
+pub mod explain;
 pub mod kubernetes_authorization;
-use anyhow::{Result, ensure};
+mod trace;
+use anyhow::{Context, Result, ensure};
 use guard_core::prefix::PrefixTrie;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     net::IpAddr,
+};
+pub use trace::{
+    MAX_TRACE_EVENTS, NetworkMatch, NoTrace, RightsView, SubjectMap, TraceEvent, Tracer, VecTrace,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -142,6 +148,14 @@ struct Rights {
     aal: u8,
 }
 impl Rights {
+    #[inline(always)]
+    fn view(self) -> RightsView {
+        RightsView {
+            permissions: self.permissions,
+            classes: self.classes,
+            minimum_aal: self.aal,
+        }
+    }
     fn union(self, other: Self) -> Self {
         Self {
             permissions: self.permissions | other.permissions,
@@ -156,13 +170,35 @@ pub struct CompiledPolicy {
     classes: HashMap<String, u64>,
     resources: HashMap<String, CompiledResource>,
 }
+/// Network rights plus the source rule index for explain; the index occupies
+/// existing padding, so the compiled entry size is unchanged.
+#[derive(Clone, Copy)]
+struct NetworkRights {
+    permissions: u64,
+    classes: u64,
+    aal: u8,
+    rule: u32,
+}
+impl NetworkRights {
+    #[inline(always)]
+    fn rights(self) -> Rights {
+        Rights {
+            permissions: self.permissions,
+            classes: self.classes,
+            aal: self.aal,
+        }
+    }
+}
+const _: () = assert!(std::mem::size_of::<NetworkRights>() == std::mem::size_of::<Rights>());
 struct CompiledService {
     permissions: HashMap<String, u64>,
     users: HashMap<String, Rights>,
     workload_users: HashMap<String, Rights>,
     human_users: HashMap<String, Rights>,
-    networks: PrefixTrie<Rights>,
-    hosts: HashMap<IpAddr, Rights>,
+    networks: PrefixTrie<NetworkRights>,
+    hosts: HashMap<IpAddr, NetworkRights>,
+    /// Cold copy of each source network rule's rights, for candidate diff only.
+    network_rules: Vec<Rights>,
     require_guard: bool,
     authorization_context: AuthorizationContext,
 }
@@ -292,17 +328,156 @@ fn assignment(ids: &[String], roles: &HashMap<String, Rights>) -> Result<Rights>
     }
     Ok(rights)
 }
+/// Document location of a compile failure, attached as anyhow context.
+#[derive(Debug)]
+struct PolicyPath(String);
+impl std::fmt::Display for PolicyPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "at {}", self.0)
+    }
+}
+fn at(path: impl Into<String>) -> PolicyPath {
+    PolicyPath(path.into())
+}
+/// Registered validator failure codes (`pumgye.validation.*`), keyed by the
+/// compiler's fixed refusal text. Unlisted refusals map to `invalid`.
+pub const VALIDATION_CODES: &[(&str, &str)] = &[
+    (
+        "invalid version or service count",
+        "pumgye.validation.version_or_service_count",
+    ),
+    (
+        "vocabulary must contain 1..64 entries",
+        "pumgye.validation.vocabulary_size",
+    ),
+    (
+        "invalid or duplicate vocabulary",
+        "pumgye.validation.vocabulary_entry",
+    ),
+    (
+        "invalid service or role count",
+        "pumgye.validation.service_name_or_role_count",
+    ),
+    (
+        "Kubernetes API context forbids network/guard requirements and typed assignments",
+        "pumgye.validation.kubernetes_context",
+    ),
+    (
+        "Kubernetes API context requires namespaced API subjects",
+        "pumgye.validation.kubernetes_subject",
+    ),
+    (
+        "policy assignment limit",
+        "pumgye.validation.assignment_limit",
+    ),
+    ("guest is reserved", "pumgye.validation.guest_reserved"),
+    ("invalid role name", "pumgye.validation.role_name"),
+    ("role inheritance cycle", "pumgye.validation.role_cycle"),
+    ("unknown role", "pumgye.validation.unknown_role"),
+    (
+        "invalid inheritance or assurance",
+        "pumgye.validation.role_inheritance_or_assurance",
+    ),
+    ("too many rights", "pumgye.validation.too_many_rights"),
+    ("duplicate right", "pumgye.validation.duplicate_right"),
+    ("unknown right", "pumgye.validation.unknown_right"),
+    ("duplicate parent", "pumgye.validation.duplicate_parent"),
+    (
+        "assignment must contain 1..8 roles",
+        "pumgye.validation.assignment_size",
+    ),
+    (
+        "guest cannot be combined with roles",
+        "pumgye.validation.guest_combined",
+    ),
+    (
+        "duplicate assigned role",
+        "pumgye.validation.duplicate_assigned_role",
+    ),
+    (
+        "unknown assigned role",
+        "pumgye.validation.unknown_assigned_role",
+    ),
+    ("invalid subject", "pumgye.validation.subject_name"),
+    (
+        "invalid workload subject",
+        "pumgye.validation.workload_subject",
+    ),
+    ("invalid Human subject", "pumgye.validation.human_subject"),
+    (
+        "network has host bits",
+        "pumgye.validation.network_host_bits",
+    ),
+    ("duplicate network", "pumgye.validation.duplicate_network"),
+    (
+        "resource catalog capacity",
+        "pumgye.validation.resource_capacity",
+    ),
+    (
+        "invalid resource metadata",
+        "pumgye.validation.resource_metadata",
+    ),
+    (
+        "resource action capacity",
+        "pumgye.validation.action_capacity",
+    ),
+    (
+        "unknown resource service",
+        "pumgye.validation.resource_service",
+    ),
+    ("unknown resource class", "pumgye.validation.resource_class"),
+    (
+        "invalid resource action",
+        "pumgye.validation.resource_action",
+    ),
+    (
+        "unknown resource permission",
+        "pumgye.validation.resource_permission",
+    ),
+];
+/// Fallback for refusals without a dedicated code (for example Kubernetes mapping).
+pub const VALIDATION_INVALID: &str = "pumgye.validation.invalid";
+/// Document schema (deserialization) refusal.
+pub const VALIDATION_SCHEMA: &str = "pumgye.validation.schema";
+/// A located, coded compile refusal; the code doubles as its message key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyViolation {
+    /// Dotted document path (`services.orders.roles.writer`), `$` for the root.
+    pub path: String,
+    pub code: &'static str,
+}
+impl PolicyViolation {
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        let path = error
+            .chain()
+            .filter_map(|e| e.to_string().strip_prefix("at ").map(str::to_owned))
+            .last()
+            .unwrap_or_else(|| "$".to_owned());
+        let root = error.root_cause().to_string();
+        let code = VALIDATION_CODES
+            .iter()
+            .find(|(text, _)| *text == root)
+            .map_or(VALIDATION_INVALID, |(_, code)| code);
+        Self { path, code }
+    }
+}
 impl Policy {
+    /// Compile, reporting the most specific document path and a registered code.
+    pub fn compile_located(&self) -> std::result::Result<CompiledPolicy, PolicyViolation> {
+        self.compile().map_err(|e| PolicyViolation::from_error(&e))
+    }
     pub fn compile(&self) -> Result<CompiledPolicy> {
         ensure!(
             self.version == 1 && self.services.len() <= 128,
             "invalid version or service count"
         );
-        let classes = vocabulary(&self.information_classes)?;
+        let classes =
+            vocabulary(&self.information_classes).with_context(|| at("information_classes"))?;
         let mut services = HashMap::new();
         let mut total_users = 0usize;
         let mut total_networks = 0usize;
         for (id, service) in &self.services {
+            let compiled = (|| -> Result<CompiledService> {
             ensure!(
                 name(id) && service.roles.len() <= 64,
                 "invalid service or role count"
@@ -330,41 +505,67 @@ impl Policy {
                 total_users <= 65536 && total_networks <= 65536,
                 "policy assignment limit"
             );
-            let permissions = vocabulary(&service.permissions)?;
+            let permissions = vocabulary(&service.permissions)
+                .with_context(|| at(format!("services.{id}.permissions")))?;
             ensure!(!service.roles.contains_key("guest"), "guest is reserved");
             let mut roles = HashMap::from([("guest".to_owned(), Rights::default())]);
             for role in service.roles.keys() {
-                ensure!(name(role), "invalid role name");
-                resolve_role(
-                    role,
-                    service,
-                    &permissions,
-                    &classes,
-                    &mut BTreeSet::new(),
-                    &mut roles,
-                )?;
+                (|| -> Result<()> {
+                    ensure!(name(role), "invalid role name");
+                    resolve_role(
+                        role,
+                        service,
+                        &permissions,
+                        &classes,
+                        &mut BTreeSet::new(),
+                        &mut roles,
+                    )?;
+                    Ok(())
+                })()
+                .with_context(|| at(format!("services.{id}.roles.{role}")))?;
             }
             let mut users = HashMap::new();
             for (subject, ids) in &service.users {
-                ensure!(name(subject), "invalid subject");
-                users.insert(subject.clone(), assignment(ids, &roles)?);
+                let rights = (|| {
+                    ensure!(name(subject), "invalid subject");
+                    assignment(ids, &roles)
+                })()
+                .with_context(|| at(format!("services.{id}.users.{subject}")))?;
+                users.insert(subject.clone(), rights);
             }
             let mut workload_users = HashMap::new();
             for (subject, ids) in &service.workload_users {
-                ensure!(workload_subject(subject), "invalid workload subject");
-                workload_users.insert(subject.clone(), assignment(ids, &roles)?);
+                let rights = (|| {
+                    ensure!(workload_subject(subject), "invalid workload subject");
+                    assignment(ids, &roles)
+                })()
+                .with_context(|| at(format!("services.{id}.workload_users.{subject}")))?;
+                workload_users.insert(subject.clone(), rights);
             }
             let mut human_users = HashMap::new();
             for (subject, ids) in &service.human_users {
-                HumanSubject::parse(subject)?;
-                human_users.insert(subject.clone(), assignment(ids, &roles)?);
+                let rights = (|| {
+                    HumanSubject::parse(subject)?;
+                    assignment(ids, &roles)
+                })()
+                .with_context(|| at(format!("services.{id}.human_users.{subject}")))?;
+                human_users.insert(subject.clone(), rights);
             }
             let mut networks = PrefixTrie::default();
             let mut hosts = HashMap::new();
-            for network in &service.networks {
+            let mut network_rules = Vec::with_capacity(service.networks.len());
+            for (rule, network) in service.networks.iter().enumerate() {
+                (|| -> Result<()> {
                 let cidr = network.cidr.trunc();
                 ensure!(cidr == network.cidr, "network has host bits");
                 let rights = assignment(&network.roles, &roles)?;
+                network_rules.push(rights);
+                let rights = NetworkRights {
+                    permissions: rights.permissions,
+                    classes: rights.classes,
+                    aal: rights.aal,
+                    rule: u32::try_from(rule)?,
+                };
                 let exact = matches!(cidr, IpNet::V4(n) if n.prefix_len() == 32)
                     || matches!(cidr, IpNet::V6(n) if n.prefix_len() == 128);
                 let previous = if exact {
@@ -373,59 +574,66 @@ impl Policy {
                     networks.insert(cidr, rights)
                 };
                 ensure!(previous.is_none(), "duplicate network");
+                Ok(())
+                })()
+                .with_context(|| at(format!("services.{id}.networks[{rule}]")))?;
             }
-            services.insert(
-                id.clone(),
-                CompiledService {
+            Ok(CompiledService {
                     permissions,
                     users,
                     workload_users,
                     human_users,
                     networks,
                     hosts,
+                    network_rules,
                     require_guard: service.require_guard,
                     authorization_context: service.authorization_context,
-                },
-            );
+                })
+            })()
+            .with_context(|| at(format!("services.{id}")))?;
+            services.insert(id.clone(), compiled);
         }
         ensure!(self.resources.len() <= 65536, "resource catalog capacity");
         let mut resources = HashMap::new();
         let mut total_actions = 0usize;
         for (id, resource) in &self.resources {
-            ensure!(
-                name(id)
-                    && resource.minimum_aal <= 3
-                    && !resource.actions.is_empty()
-                    && resource.actions.len() <= 64,
-                "invalid resource metadata"
-            );
-            total_actions += resource.actions.len();
-            ensure!(total_actions <= 65536, "resource action capacity");
-            let service = services
-                .get(&resource.service)
-                .ok_or_else(|| anyhow::anyhow!("unknown resource service"))?;
-            let class = *classes
-                .get(&resource.information_class)
-                .ok_or_else(|| anyhow::anyhow!("unknown resource class"))?;
-            let mut actions = HashMap::new();
-            for (action, permission) in &resource.actions {
-                ensure!(name(action), "invalid resource action");
-                actions.insert(
-                    action.clone(),
-                    *service
-                        .permissions
-                        .get(permission)
-                        .ok_or_else(|| anyhow::anyhow!("unknown resource permission"))?,
+            let compiled = (|| -> Result<CompiledResource> {
+                ensure!(
+                    name(id)
+                        && resource.minimum_aal <= 3
+                        && !resource.actions.is_empty()
+                        && resource.actions.len() <= 64,
+                    "invalid resource metadata"
                 );
-            }
-            resources.insert(
-                id.clone(),
-                CompiledResource {
+                total_actions += resource.actions.len();
+                ensure!(total_actions <= 65536, "resource action capacity");
+                let service = services
+                    .get(&resource.service)
+                    .ok_or_else(|| anyhow::anyhow!("unknown resource service"))?;
+                let class = *classes
+                    .get(&resource.information_class)
+                    .ok_or_else(|| anyhow::anyhow!("unknown resource class"))?;
+                let mut actions = HashMap::new();
+                for (action, permission) in &resource.actions {
+                    let bit = (|| {
+                        ensure!(name(action), "invalid resource action");
+                        service
+                            .permissions
+                            .get(permission)
+                            .copied()
+                            .ok_or_else(|| anyhow::anyhow!("unknown resource permission"))
+                    })()
+                    .with_context(|| at(format!("resources.{id}.actions.{action}")))?;
+                    actions.insert(action.clone(), bit);
+                }
+                Ok(CompiledResource {
                     metadata: resource.clone(),
                     actions,
                     class,
-                },
-            );
+                })
+            })()
+            .with_context(|| at(format!("resources.{id}")))?;
+            resources.insert(id.clone(), compiled);
         }
         let mut compiled = CompiledPolicy {
             services,
@@ -434,77 +642,137 @@ impl Policy {
             kubernetes_authorization: Default::default(),
         };
         if let Some(mapping) = &self.kubernetes_authorization {
-            compiled.kubernetes_authorization = mapping.compile(&compiled)?;
+            compiled.kubernetes_authorization = mapping
+                .compile(&compiled)
+                .with_context(|| at("kubernetes_authorization"))?;
         }
         Ok(compiled)
     }
 }
+#[derive(Clone, Copy)]
 enum Principal<'a> {
     Legacy(&'a str),
     Workload(&'a str),
     Human(&'a str),
 }
-fn evaluate_rights(
+impl<'a> Principal<'a> {
+    #[inline(always)]
+    fn lookup(self, service: &CompiledService) -> (SubjectMap, &'a str, Option<&Rights>) {
+        match self {
+            Principal::Legacy(s) => (SubjectMap::Users, s, service.users.get(s)),
+            Principal::Workload(s) => (SubjectMap::WorkloadUsers, s, service.workload_users.get(s)),
+            Principal::Human(s) => (SubjectMap::HumanUsers, s, service.human_users.get(s)),
+        }
+    }
+}
+/// The one network-and-guard evaluation function. Every gateway entrypoint and
+/// explain reach it; only the tracer type differs.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn evaluate_rights<'a, T: Tracer<'a>>(
     service: &CompiledService,
-    user: Option<&Rights>,
+    principal: Principal<'a>,
     ip: IpAddr,
     permission: impl FnOnce() -> Option<u64>,
     class: impl FnOnce() -> Option<u64>,
     assurance: (u8, u8),
     guard: GuardEvidence,
+    trace: &mut T,
 ) -> Decision {
+    trace.event(TraceEvent::Context {
+        context: service.authorization_context,
+        required: AuthorizationContext::NetworkAndGuard,
+    });
     if service.authorization_context != AuthorizationContext::NetworkAndGuard {
         return Decision::PermissionDenied;
     }
+    trace.event(TraceEvent::Guard {
+        evidence: guard,
+        require_guard: service.require_guard,
+    });
     if guard == GuardEvidence::Deny {
         return Decision::GuardDenied;
     }
     if service.require_guard && guard != GuardEvidence::EnforcedAllow {
         return Decision::GuardUnavailable;
     }
+    let (map, subject, user) = principal.lookup(service);
+    trace.event(TraceEvent::Subject {
+        map,
+        subject,
+        rights: user.map(|u| u.view()),
+    });
     let Some(user) = user else {
         return Decision::Guest;
     };
     if user.permissions == 0 {
         return Decision::Guest;
     }
-    let Some(network) = service
+    let network = service
         .hosts
         .get(&ip.to_canonical())
-        .or_else(|| service.networks.longest(ip))
-    else {
+        .map(|n| (n, true))
+        .or_else(|| service.networks.longest(ip).map(|n| (n, false)));
+    trace.event(TraceEvent::Network {
+        ip,
+        matched: network.map(|(n, exact_host)| NetworkMatch {
+            rule: n.rule,
+            exact_host,
+            rights: n.rights().view(),
+        }),
+    });
+    let Some((network, _)) = network else {
         return Decision::NetworkGuest;
     };
-    evaluate_entitlements(
-        user.permissions & network.permissions,
-        user.classes & network.classes,
-        user.aal.max(network.aal),
-        permission,
-        class,
-        assurance,
-    )
+    let network = network.rights();
+    let effective = Rights {
+        permissions: user.permissions & network.permissions,
+        classes: user.classes & network.classes,
+        aal: user.aal.max(network.aal),
+    };
+    trace.event(TraceEvent::Entitlements {
+        subject: user.view(),
+        network: Some(network.view()),
+        effective: effective.view(),
+    });
+    evaluate_entitlements(effective, permission, class, assurance, trace)
 }
-fn evaluate_entitlements(
-    permissions: u64,
-    classes: u64,
-    minimum_aal: u8,
+#[inline(always)]
+fn evaluate_entitlements<'a, T: Tracer<'a>>(
+    rights: Rights,
     permission: impl FnOnce() -> Option<u64>,
     class: impl FnOnce() -> Option<u64>,
     assurance: (u8, u8),
+    trace: &mut T,
 ) -> Decision {
-    let Some(permission) = permission() else {
+    let permission = permission();
+    trace.event(TraceEvent::Permission {
+        requested: permission,
+        granted: rights.permissions,
+    });
+    let Some(permission) = permission else {
         return Decision::PermissionDenied;
     };
-    if permissions & permission == 0 {
+    if rights.permissions & permission == 0 {
         return Decision::PermissionDenied;
     }
-    let Some(class) = class() else {
+    let class = class();
+    trace.event(TraceEvent::Class {
+        requested: class,
+        granted: rights.classes,
+    });
+    let Some(class) = class else {
         return Decision::ClassDenied;
     };
-    if classes & class == 0 {
+    if rights.classes & class == 0 {
         return Decision::ClassDenied;
     }
-    if assurance.0 > 3 || assurance.0 < minimum_aal.max(assurance.1) {
+    trace.event(TraceEvent::Assurance {
+        presented: assurance.0,
+        role_minimum: rights.aal,
+        resource_minimum: assurance.1,
+    });
+    if assurance.0 > 3 || assurance.0 < rights.aal.max(assurance.1) {
         return Decision::AssuranceDenied;
     }
     Decision::Allow
@@ -522,37 +790,97 @@ impl CompiledPolicy {
         action: &str,
         subject: KubernetesApiSubject<'_>,
     ) -> ResourceDecision {
-        let Some(resource) = self.resources.get(resource) else {
-            return ResourceDecision::UnknownResource;
+        self.evaluate_kubernetes_api_resource_traced(
+            service,
+            resource,
+            action,
+            subject,
+            &mut NoTrace,
+        )
+    }
+    /// [`Self::evaluate_kubernetes_api_resource`] with an explain trace sink.
+    pub fn evaluate_kubernetes_api_resource_traced<'a, T: Tracer<'a>>(
+        &'a self,
+        service: &'a str,
+        resource: &'a str,
+        action: &'a str,
+        subject: KubernetesApiSubject<'a>,
+        trace: &mut T,
+    ) -> ResourceDecision {
+        let resource = match self.resource_scope(service, resource, trace) {
+            Ok(resource) => resource,
+            Err(decision) => return decision,
         };
-        if resource.metadata.service != service {
-            return ResourceDecision::Decided(Decision::UnknownService);
-        }
-        let service = &self.services[&resource.metadata.service];
-        if service.authorization_context != AuthorizationContext::KubernetesApi {
+        let compiled_service = &self.services[&resource.metadata.service];
+        trace.event(TraceEvent::Context {
+            context: compiled_service.authorization_context,
+            required: AuthorizationContext::KubernetesApi,
+        });
+        if compiled_service.authorization_context != AuthorizationContext::KubernetesApi {
             return ResourceDecision::Decided(Decision::PermissionDenied);
         }
-        let Some(permission) = resource.actions.get(action) else {
+        let permission = resource.actions.get(action);
+        trace.event(TraceEvent::Action {
+            action,
+            permission: permission.copied(),
+        });
+        let Some(permission) = permission else {
             return ResourceDecision::UnknownAction;
         };
-        let Some(user) = service
-            .users
-            .get(subject.as_str())
-            .filter(|user| user.permissions != 0)
-        else {
+        let user = compiled_service.users.get(subject.as_str());
+        trace.event(TraceEvent::Subject {
+            map: SubjectMap::Users,
+            subject: subject.as_str(),
+            rights: user.map(|u| u.view()),
+        });
+        let Some(user) = user.filter(|user| user.permissions != 0) else {
             return ResourceDecision::Decided(Decision::Guest);
         };
+        trace.event(TraceEvent::Entitlements {
+            subject: user.view(),
+            network: None,
+            effective: user.view(),
+        });
         ResourceDecision::Decided(evaluate_entitlements(
-            user.permissions,
-            user.classes,
-            user.aal,
+            *user,
             || Some(*permission),
             || Some(resource.class),
             (0, resource.metadata.minimum_aal),
+            trace,
         ))
     }
     pub fn resource_metadata(&self, resource: &str) -> Option<&Resource> {
         self.resources.get(resource).map(|r| &r.metadata)
+    }
+    #[inline(always)]
+    fn resource_lookup<'a, T: Tracer<'a>>(
+        &'a self,
+        resource: &'a str,
+        trace: &mut T,
+    ) -> Result<&'a CompiledResource, ResourceDecision> {
+        let found = self.resources.get(resource);
+        trace.event(TraceEvent::Resource {
+            resource,
+            owner: found.map(|r| r.metadata.service.as_str()),
+        });
+        found.ok_or(ResourceDecision::UnknownResource)
+    }
+    #[inline(always)]
+    fn resource_scope<'a, T: Tracer<'a>>(
+        &'a self,
+        service: &'a str,
+        resource: &'a str,
+        trace: &mut T,
+    ) -> Result<&'a CompiledResource, ResourceDecision> {
+        let resource = self.resource_lookup(resource, trace)?;
+        trace.event(TraceEvent::Scope {
+            requested: service,
+            owner: &resource.metadata.service,
+        });
+        if resource.metadata.service != service {
+            return Err(ResourceDecision::Decided(Decision::UnknownService));
+        }
+        Ok(resource)
     }
     /// Bind a native gateway service scope to the catalog before evaluating rights.
     /// Callers must obtain the service from trusted route/authentication context.
@@ -567,13 +895,43 @@ impl CompiledPolicy {
         aal: u8,
         guard: GuardEvidence,
     ) -> ResourceDecision {
-        let Some(resource) = self.resources.get(resource) else {
-            return ResourceDecision::UnknownResource;
+        self.evaluate_scoped_resource_traced(
+            service,
+            resource,
+            action,
+            subject,
+            ip,
+            aal,
+            guard,
+            &mut NoTrace,
+        )
+    }
+    /// [`Self::evaluate_scoped_resource`] with an explain trace sink.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scoped_resource_traced<'a, T: Tracer<'a>>(
+        &'a self,
+        service: &'a str,
+        resource: &'a str,
+        action: &'a str,
+        subject: &'a str,
+        ip: IpAddr,
+        aal: u8,
+        guard: GuardEvidence,
+        trace: &mut T,
+    ) -> ResourceDecision {
+        let resource = match self.resource_scope(service, resource, trace) {
+            Ok(resource) => resource,
+            Err(decision) => return decision,
         };
-        if resource.metadata.service != service {
-            return ResourceDecision::Decided(Decision::UnknownService);
-        }
-        self.evaluate_catalog_entry(resource, action, Principal::Legacy(subject), ip, aal, guard)
+        self.evaluate_catalog_entry(
+            resource,
+            action,
+            Principal::Legacy(subject),
+            ip,
+            aal,
+            guard,
+            trace,
+        )
     }
     /// Resource class and minimum assurance are owned by the compiled catalog.
     pub fn evaluate_resource(
@@ -585,10 +943,20 @@ impl CompiledPolicy {
         aal: u8,
         guard: GuardEvidence,
     ) -> ResourceDecision {
-        let Some(resource) = self.resources.get(resource) else {
-            return ResourceDecision::UnknownResource;
+        let mut trace = NoTrace;
+        let resource = match self.resource_lookup(resource, &mut trace) {
+            Ok(resource) => resource,
+            Err(decision) => return decision,
         };
-        self.evaluate_catalog_entry(resource, action, Principal::Legacy(subject), ip, aal, guard)
+        self.evaluate_catalog_entry(
+            resource,
+            action,
+            Principal::Legacy(subject),
+            ip,
+            aal,
+            guard,
+            &mut trace,
+        )
     }
     /// Native Workload-only resource evaluation. The caller must authenticate the
     /// Workload and bind service/subject before using this deterministic compiler.
@@ -603,13 +971,41 @@ impl CompiledPolicy {
         ip: IpAddr,
         guard: GuardEvidence,
     ) -> ResourceDecision {
-        let Some(resource) = self.resources.get(resource) else {
-            return ResourceDecision::UnknownResource;
+        self.evaluate_scoped_workload_resource_traced(
+            service,
+            resource,
+            action,
+            subject,
+            ip,
+            guard,
+            &mut NoTrace,
+        )
+    }
+    /// [`Self::evaluate_scoped_workload_resource`] with an explain trace sink.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scoped_workload_resource_traced<'a, T: Tracer<'a>>(
+        &'a self,
+        service: &'a str,
+        resource: &'a str,
+        action: &'a str,
+        subject: &'a str,
+        ip: IpAddr,
+        guard: GuardEvidence,
+        trace: &mut T,
+    ) -> ResourceDecision {
+        let resource = match self.resource_scope(service, resource, trace) {
+            Ok(resource) => resource,
+            Err(decision) => return decision,
         };
-        if resource.metadata.service != service {
-            return ResourceDecision::Decided(Decision::UnknownService);
-        }
-        self.evaluate_catalog_entry(resource, action, Principal::Workload(subject), ip, 0, guard)
+        self.evaluate_catalog_entry(
+            resource,
+            action,
+            Principal::Workload(subject),
+            ip,
+            0,
+            guard,
+            trace,
+        )
     }
     /// Pure scoped Human metadata evaluation; callers own actual authentication.
     /// Only actual verified AAL1/2 may be supplied at an enforcement boundary.
@@ -624,47 +1020,91 @@ impl CompiledPolicy {
         aal: u8,
         guard: GuardEvidence,
     ) -> ResourceDecision {
-        let Some(resource) = self.resources.get(resource) else {
-            return ResourceDecision::UnknownResource;
-        };
-        if resource.metadata.service != service
-            || self.services[service].authorization_context != AuthorizationContext::NetworkAndGuard
-        {
-            return ResourceDecision::Decided(Decision::UnknownService);
-        }
-        if HumanSubject::parse(subject).is_err() {
-            return ResourceDecision::Decided(Decision::Guest);
-        }
-        if !matches!(aal, 1 | 2) {
-            return ResourceDecision::Decided(Decision::AssuranceDenied);
-        }
-        self.evaluate_catalog_entry(resource, action, Principal::Human(subject), ip, aal, guard)
+        self.evaluate_scoped_human_resource_traced(
+            service,
+            resource,
+            action,
+            subject,
+            ip,
+            aal,
+            guard,
+            &mut NoTrace,
+        )
     }
-    fn evaluate_catalog_entry(
-        &self,
-        resource: &CompiledResource,
-        action: &str,
-        subject: Principal<'_>,
+    /// [`Self::evaluate_scoped_human_resource`] with an explain trace sink.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scoped_human_resource_traced<'a, T: Tracer<'a>>(
+        &'a self,
+        service: &'a str,
+        resource: &'a str,
+        action: &'a str,
+        subject: &'a str,
         ip: IpAddr,
         aal: u8,
         guard: GuardEvidence,
+        trace: &mut T,
     ) -> ResourceDecision {
-        let Some(permission) = resource.actions.get(action) else {
+        let resource = match self.resource_scope(service, resource, trace) {
+            Ok(resource) => resource,
+            Err(decision) => return decision,
+        };
+        let context = self.services[service].authorization_context;
+        trace.event(TraceEvent::Context {
+            context,
+            required: AuthorizationContext::NetworkAndGuard,
+        });
+        if context != AuthorizationContext::NetworkAndGuard {
+            return ResourceDecision::Decided(Decision::UnknownService);
+        }
+        let valid = HumanSubject::parse(subject).is_ok();
+        trace.event(TraceEvent::PrincipalFormat { valid });
+        if !valid {
+            return ResourceDecision::Decided(Decision::Guest);
+        }
+        trace.event(TraceEvent::PrincipalAssurance { aal });
+        if !matches!(aal, 1 | 2) {
+            return ResourceDecision::Decided(Decision::AssuranceDenied);
+        }
+        self.evaluate_catalog_entry(
+            resource,
+            action,
+            Principal::Human(subject),
+            ip,
+            aal,
+            guard,
+            trace,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn evaluate_catalog_entry<'a, T: Tracer<'a>>(
+        &'a self,
+        resource: &'a CompiledResource,
+        action: &'a str,
+        subject: Principal<'a>,
+        ip: IpAddr,
+        aal: u8,
+        guard: GuardEvidence,
+        trace: &mut T,
+    ) -> ResourceDecision {
+        let permission = resource.actions.get(action);
+        trace.event(TraceEvent::Action {
+            action,
+            permission: permission.copied(),
+        });
+        let Some(permission) = permission else {
             return ResourceDecision::UnknownAction;
         };
         let service = &self.services[&resource.metadata.service];
         ResourceDecision::Decided(evaluate_rights(
             service,
-            match subject {
-                Principal::Legacy(subject) => service.users.get(subject),
-                Principal::Workload(subject) => service.workload_users.get(subject),
-                Principal::Human(subject) => service.human_users.get(subject),
-            },
+            subject,
             ip,
             || Some(*permission),
             || Some(resource.class),
             (aal, resource.metadata.minimum_aal),
             guard,
+            trace,
         ))
     }
     /// Allocation-free evaluation over immutable policy. Never accept client claims as evidence.
@@ -680,17 +1120,47 @@ impl CompiledPolicy {
         aal: u8,
         guard: GuardEvidence,
     ) -> Decision {
-        let Some(service) = self.services.get(service_id) else {
+        self.evaluate_traced(
+            service_id,
+            subject,
+            ip,
+            permission,
+            information_class,
+            aal,
+            guard,
+            &mut NoTrace,
+        )
+    }
+    /// [`Self::evaluate`] with an explain trace sink. Identical decision function.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_traced<'a, T: Tracer<'a>>(
+        &'a self,
+        service_id: &'a str,
+        subject: &'a str,
+        ip: IpAddr,
+        permission: &'a str,
+        information_class: &'a str,
+        aal: u8,
+        guard: GuardEvidence,
+        trace: &mut T,
+    ) -> Decision {
+        let service = self.services.get(service_id);
+        trace.event(TraceEvent::Service {
+            service: service_id,
+            found: service.is_some(),
+        });
+        let Some(service) = service else {
             return Decision::UnknownService;
         };
         evaluate_rights(
             service,
-            service.users.get(subject),
+            Principal::Legacy(subject),
             ip,
             || service.permissions.get(permission).copied(),
             || self.classes.get(information_class).copied(),
             (aal, 0),
             guard,
+            trace,
         )
     }
 }

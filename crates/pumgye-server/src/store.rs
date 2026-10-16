@@ -19,6 +19,34 @@ pub struct AuditRecord {
     pub actor: String,
     pub sha256: String,
 }
+/// Maximum retained read-only simulation audit rows (oldest pruned first); rows
+/// older than the configured age bound are also pruned on every insert.
+pub const MAX_SIMULATION_AUDIT_ROWS: i64 = 100_000;
+/// One administrative simulation (explain, batch explain or candidate diff).
+/// Simulations never change policy; this is a separate table from publication audit.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SimulationRecord {
+    pub id: u64,
+    pub at_unix: u64,
+    /// Always `simulation` (ADR 0019 event kind); never `enforced`.
+    pub kind: &'static str,
+    /// Authenticated transport actor (client certificate digest or loopback).
+    pub actor: String,
+    /// Untrusted caller-declared delegated actor, for correlation only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
+    pub operation: String,
+    pub source: String,
+    pub revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub candidate_sha256: Option<String>,
+    pub request_sha256: String,
+    pub cases: u64,
+    pub allowed: u64,
+    pub denied: u64,
+    pub unavailable: u64,
+    pub changed: u64,
+}
 pub struct Store {
     connection: Connection,
     _ownership: Ownership,
@@ -50,7 +78,8 @@ impl Store {
         connection.busy_timeout(Duration::from_secs(2))?;
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
             CREATE TABLE IF NOT EXISTS policy (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, document TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS audit (revision INTEGER PRIMARY KEY, at_unix INTEGER NOT NULL, actor TEXT NOT NULL, sha256 TEXT NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS audit (revision INTEGER PRIMARY KEY, at_unix INTEGER NOT NULL, actor TEXT NOT NULL, sha256 TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS simulation_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at_unix INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind='simulation'), actor TEXT NOT NULL, on_behalf_of TEXT, operation TEXT NOT NULL, source TEXT NOT NULL, revision INTEGER NOT NULL, candidate_sha256 TEXT, request_sha256 TEXT NOT NULL, cases INTEGER NOT NULL, allowed INTEGER NOT NULL, denied INTEGER NOT NULL, unavailable INTEGER NOT NULL, changed INTEGER NOT NULL);")?;
         let stored: Option<String> = connection
             .query_row("SELECT document FROM policy WHERE id=1", [], |r| r.get(0))
             .optional()?;
@@ -194,6 +223,83 @@ impl Store {
                     at_unix: row.get::<_, i64>(1)? as u64,
                     actor: row.get(2)?,
                     sha256: row.get(3)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    /// Append one simulation audit row and prune beyond the retention bound.
+    /// Returns the row ID. The policy and publication audit tables are untouched.
+    pub fn record_simulation(
+        &mut self,
+        record: &SimulationRecord,
+        max_age_seconds: u64,
+    ) -> Result<u64> {
+        let at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        self.record_simulation_at(record, at, max_age_seconds)
+    }
+    /// [`Self::record_simulation`] at an explicit time (tests inject old rows).
+    pub fn record_simulation_at(
+        &mut self,
+        record: &SimulationRecord,
+        at: u64,
+        max_age_seconds: u64,
+    ) -> Result<u64> {
+        ensure!(at <= i64::MAX as u64, "simulation time out of range");
+        ensure!(
+            record.revision <= i64::MAX as u64,
+            "simulation revision out of range"
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO simulation_audit (at_unix,kind,actor,on_behalf_of,operation,source,revision,candidate_sha256,request_sha256,cases,allowed,denied,unavailable,changed) VALUES(?1,'simulation',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                at as i64,
+                record.actor,
+                record.on_behalf_of,
+                record.operation,
+                record.source,
+                record.revision as i64,
+                record.candidate_sha256,
+                record.request_sha256,
+                record.cases as i64,
+                record.allowed as i64,
+                record.denied as i64,
+                record.unavailable as i64,
+                record.changed as i64,
+            ],
+        )?;
+        let id = transaction.last_insert_rowid();
+        transaction.execute(
+            "DELETE FROM simulation_audit WHERE id <= ?1 OR at_unix < ?2",
+            params![
+                id - MAX_SIMULATION_AUDIT_ROWS,
+                at.saturating_sub(max_age_seconds) as i64
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(id as u64)
+    }
+    pub fn simulations_after(&self, after: u64) -> Result<Vec<SimulationRecord>> {
+        ensure!(after <= i64::MAX as u64, "invalid audit cursor");
+        let mut statement = self.connection.prepare("SELECT id,at_unix,actor,on_behalf_of,operation,source,revision,candidate_sha256,request_sha256,cases,allowed,denied,unavailable,changed FROM simulation_audit WHERE id>?1 ORDER BY id LIMIT 100")?;
+        Ok(statement
+            .query_map([after as i64], |row| {
+                Ok(SimulationRecord {
+                    id: row.get::<_, i64>(0)? as u64,
+                    at_unix: row.get::<_, i64>(1)? as u64,
+                    kind: "simulation",
+                    actor: row.get(2)?,
+                    on_behalf_of: row.get(3)?,
+                    operation: row.get(4)?,
+                    source: row.get(5)?,
+                    revision: row.get::<_, i64>(6)? as u64,
+                    candidate_sha256: row.get(7)?,
+                    request_sha256: row.get(8)?,
+                    cases: row.get::<_, i64>(9)? as u64,
+                    allowed: row.get::<_, i64>(10)? as u64,
+                    denied: row.get::<_, i64>(11)? as u64,
+                    unavailable: row.get::<_, i64>(12)? as u64,
+                    changed: row.get::<_, i64>(13)? as u64,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -442,5 +548,50 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+    #[test]
+    fn simulation_audit_is_trimmed_by_age_and_count_on_insert() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = root.path().join("initial.json");
+        std::fs::write(&initial, r#"{"revision":1,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#).unwrap();
+        let (mut store, _) = Store::open(&root.path().join("p.sqlite3"), Some(&initial)).unwrap();
+        let record = SimulationRecord {
+            id: 0,
+            at_unix: 0,
+            kind: "simulation",
+            actor: "fixture".into(),
+            on_behalf_of: None,
+            operation: "explain".into(),
+            source: "published".into(),
+            revision: 1,
+            candidate_sha256: None,
+            request_sha256: "0".repeat(64),
+            cases: 1,
+            allowed: 1,
+            denied: 0,
+            unavailable: 0,
+            changed: 0,
+        };
+        let day = 86_400;
+        let now = 1_800_000_000;
+        store
+            .record_simulation_at(&record, now - 40 * day, 30 * day)
+            .unwrap();
+        store
+            .record_simulation_at(&record, now - 31 * day, 30 * day)
+            .unwrap();
+        store
+            .record_simulation_at(&record, now - 29 * day, 30 * day)
+            .unwrap();
+        // The row older than 30 days relative to the newest insert is trimmed now.
+        let id = store.record_simulation_at(&record, now, 30 * day).unwrap();
+        let rows = store.simulations_after(0).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.at_unix).collect::<Vec<_>>(),
+            [now - 29 * day, now]
+        );
+        assert_eq!(rows.last().unwrap().id, id);
+        // Publication audit is untouched by simulation retention.
+        assert_eq!(store.audit_after(0).unwrap().len(), 1);
     }
 }
