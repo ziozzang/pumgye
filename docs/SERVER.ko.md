@@ -167,7 +167,76 @@ JSON 한 줄을 남깁니다.
 {"event":"tls_reload_refused","name":"grpc listener","error":"…","serving_serial":"1001"}
 ```
 
-제약: `observed-*` 기능의 외부 클라이언트는 호패 gRPC SDK에 고정된 PEM 바이트를
-넘기므로 인증서를 교체한 뒤에도 재시작해야 합니다. Kubernetes API 클라이언트는
-CA만 쓰며, CA는 시작할 때 읽습니다. 새 인증서가 반영되기까지 최대 폴링 주기
-한 번만큼 걸립니다.
+Kubernetes API 소스(`--kubernetes-ca`, `--kubernetes-token`)는 relist할 때마다 CA와
+토큰 파일을 다시 읽으므로 폴러를 쓰지 않습니다. 두 파일 중 하나라도 내용이
+바뀌면 HTTP 클라이언트를 새로 만들고 이전 신뢰 풀은 더 쓰지 않습니다. 서버
+인증서와 맞지 않는 CA는 닫힌 쪽으로 실패합니다. 소스 관측이 만료되고, 유효한
+인증서로 다음 relist를 하면 회복합니다. 이런 변경 횟수는
+`pumgye_kubernetes_credential_reloads_total` 메트릭으로 셉니다.
+
+제약: 새 인증서가 반영되기까지 최대 폴링 주기 한 번만큼 걸립니다. `observed-*`
+기능의 외부 클라이언트는 호패 gRPC SDK(`hopae-grpc`)에 고정된 PEM 바이트를 넘기므로
+인증서를 교체한 뒤에도 재시작해야 합니다. 이 문제는 호패 SDK 후속 작업으로
+해결합니다. `hopae-grpc`에 재적재되는 커넥터나 클라이언트 설정을 받는 API가
+필요합니다(`docs/MODEL_V2.ko.md`의 "Hopae 의존성" 참고).
+
+## Prometheus 메트릭 (미릴리스)
+
+`GET /metrics`는 Prometheus 텍스트 형식(`text/plain; version=0.0.4`)으로 응답합니다.
+주 HTTPS 관리 리스너에 있으므로 스크레이프하려면 리스너의 mTLS 클라이언트
+인증서와 bearer 자격 증명이 필요합니다.
+
+- 관리자 자격 증명, 또는
+- 읽기 전용 스크레이프 전용 자격 증명. `--metrics-token-env`(기본
+  `PUMGYE_METRICS_TOKEN`)가 가리키는 환경 변수에서 읽습니다. 16–4096자의 보이는
+  ASCII 문자여야 하고 관리자·판정 자격 증명과 달라야 합니다. 이 자격 증명으로는
+  `/metrics`만 열 수 있습니다.
+
+평문 readiness 리스너는 메트릭을 제공하지 않습니다. Prometheus Operator
+`ServiceMonitor` 엔드포인트 예시는 다음과 같습니다.
+
+```yaml
+endpoints:
+  - port: management   # 9084, HTTPS 관리 리스너
+    scheme: https
+    path: /metrics
+    bearerTokenSecret: {name: pumgye-metrics, key: token}
+    tlsConfig:
+      ca: {secret: {name: pumgye-tls, key: ca.crt}}
+      cert: {secret: {name: pumgye-scrape-client, key: tls.crt}}
+      keySecret: {name: pumgye-scrape-client, key: tls.key}
+      serverName: pumgye.pumgye.svc
+```
+
+판정 경로에서의 기록은 relaxed 원자 증가 몇 번뿐입니다. 메모리를 할당하지 않고
+(`tests/metrics_no_alloc.rs`) 잠금도 쓰지 않습니다. 주체, IP 주소, 서비스, 자원을
+담는 레이블이 없으므로 시계열 개수가 고정됩니다. 예외는 TLS `name` 레이블 하나이며,
+그 값은 정해진 리스너·클라이언트 이름입니다.
+
+| 메트릭 | 형식 | 레이블 |
+| --- | --- | --- |
+| `pumgye_decisions_total` | counter | `context`(`permission`, `resource`, `workload_resource`, `human_resource`), `outcome`(`allow`, `deny`, `unavailable`), `reason`(판정 사유 코드, `unknown_resource`, `unknown_action`, `unavailable`) |
+| `pumgye_request_duration_seconds` | histogram | `transport`(`http`, `ppg1`, `grpc`, `sar`) |
+| `pumgye_policy_revision` | gauge | `model`(`v1`, `v2`) |
+| `pumgye_policy_v2_authoritative`, `pumgye_available` | gauge | — |
+| `pumgye_policy_publications_total` | counter | `model`, `outcome`(`applied`, `conflict` = If-Match CAS 충돌, `rejected`) |
+| `pumgye_shadow_decisions_total`, `pumgye_shadow_reason_drift_total` | counter | — |
+| `pumgye_shadow_mismatches_total` | counter | `explained`(`true`, `false`) |
+| `pumgye_shadow_window_start_timestamp_seconds` | gauge | — |
+| `pumgye_hopae_last_success_timestamp_seconds`, `pumgye_hopae_staleness_seconds` | gauge | `feed`(`projection`, `lifecycle`). 첫 동기화 전 staleness는 `-1` |
+| `pumgye_hopae_sync_failures_total`, `pumgye_hopae_cursor_expired_total` | counter | `feed` |
+| `pumgye_simulation_audit_rows` | gauge | —(보존된 행 수) |
+| `pumgye_simulation_audit_rows_appended_total` | counter | — |
+| `pumgye_observed_permits_total` | counter | `kind`(`service`, `workload`, `human`), `outcome`(`issued`, `permission_denied`, `unavailable`, `invalid_argument`, `unauthenticated`, `other`) |
+| `pumgye_tls_reloads_total`, `pumgye_tls_reload_failures_total` | counter | `name` |
+| `pumgye_tls_reload_failing` | gauge | `name` |
+| `pumgye_tls_leaf_expiry_seconds` | gauge | `name`(`notAfter`까지 남은 초. 만료되면 음수) |
+| `pumgye_kubernetes_credential_reloads_total` | counter | — |
+
+권장 경보:
+
+- `pumgye_tls_reload_failing == 1`
+- `pumgye_tls_leaf_expiry_seconds < 7 * 86400`
+- `pumgye_hopae_staleness_seconds`가 projection의 `max_staleness_secs`보다 클 때
+- `pumgye_shadow_mismatches_total{explained="false"}`가 늘어날 때
+- `pumgye_available == 0`

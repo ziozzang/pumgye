@@ -4,6 +4,21 @@
 
 ### Added
 
+- Prometheus `GET /metrics` on the HTTPS management listener, readable with the
+  administrator credential or an optional read-only scrape credential
+  (`--metrics-token-env`). It covers:
+  - decisions by context, outcome and reason
+  - per-transport latency histograms
+  - policy revision and publication CAS conflicts
+  - shadow v1/v2 mismatches
+  - Hopae owner freshness and `cursor_expired`
+  - simulation audit rows
+  - TLS reload counters and leaf expiry
+  - observed permit issuance and refusals
+
+  Recording is allocation-free, and no label carries a subject or IP.
+- The Kubernetes API source counts CA/token rotations, which it already re-reads on
+  every relist. A test now covers rotation without a restart.
 - TLS hot reload (`--tls-reload-interval-secs`, default 10 s, content polling,
   no inotify) for the HTTP, PPG1, gRPC and SAR listeners, the Sumunjang/Hopae
   live clients and the Hopae owner client. Invalid material keeps the previous
