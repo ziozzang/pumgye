@@ -28,6 +28,12 @@ pub const WARNING_CODES: &[&str] = &[
     "pumgye.warning.unsatisfiable_assurance",
     "pumgye.warning.legacy_workload_subject",
 ];
+/// Registered publication admission refusals (beyond compilation).
+pub const ADMISSION_CODES: &[&str] = &[
+    "pumgye.validation.reason_required",
+    "pumgye.validation.subject_deleted",
+    "pumgye.validation.subject_unresolved",
+];
 /// Registered converter review / unmigrated codes (also message keys).
 pub const MIGRATION_CODES: &[&str] = &[
     "pumgye.migration.class_not_downward_closed",

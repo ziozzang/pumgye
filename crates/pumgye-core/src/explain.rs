@@ -111,6 +111,8 @@ pub const ERROR_CODES: &[&str] = &[
     "pumgye.error.candidate_too_large",
     "pumgye.error.candidate_invalid",
     "pumgye.error.rate_limited",
+    "pumgye.error.shadow_gate_unsatisfied",
+    "pumgye.error.no_v2_document",
 ];
 /// Registered case refusal detail codes.
 pub const CASE_ERROR_CODES: &[&str] = &[
@@ -140,6 +142,7 @@ pub fn message_keys() -> Vec<String> {
     keys.push(crate::VALIDATION_SCHEMA.to_owned());
     keys.extend(crate::v2::WARNING_CODES.iter().map(|c| (*c).to_owned()));
     keys.extend(crate::v2::MIGRATION_CODES.iter().map(|c| (*c).to_owned()));
+    keys.extend(crate::v2::ADMISSION_CODES.iter().map(|c| (*c).to_owned()));
     keys.sort();
     keys.dedup();
     keys
