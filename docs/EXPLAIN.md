@@ -332,3 +332,11 @@ core-only and are not comparable with the mTLS request-chain figures in
 - Explain results are not signed (ADR 0019 open question 6).
 - Guard evidence is simulated input; explain does not query Sumunjang. Hangang's
   orchestrated simulation queries Sumunjang separately.
+
+## Policy model version 2
+
+`/v2/explain`, `/v2/explain/batch` and `/v2/candidates/diff` explain and diff the
+version 2 model with stages `catalog`, `principal`, `explicit_deny`, `allow_set`,
+`network_ceiling` and `clearance`, binding provenance, simulated time and
+hypothetical groups. Codes and keys share the catalogs above (`pumgye.explicit_denied`
+and the v2 `pumgye.detail.*` codes are registered). See [MODEL_V2.md](MODEL_V2.md).

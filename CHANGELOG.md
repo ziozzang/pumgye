@@ -4,6 +4,22 @@
 
 ### Added
 
+- Policy model version 2 (Hangang ADR 0021 P0): Hopae-owned principals and
+  GroupRefs, global role templates with per-service permission maps, allow and
+  explicit-deny bindings with validity windows and server-stamped metadata,
+  Catalog clearance labels (levels + compartments), Sumunjang zone imports with a
+  local CIDR fallback, allocation-free evaluator in the ADR order, explain v2 with
+  binding provenance, candidate diff, deterministic v1→v2 converter
+  (`--migrate-v1-to-v2`, `/v2/migration/preview`), JSON Schema and valid /
+  adversarial fixtures. See `docs/MODEL_V2.md` / `docs/MODEL_V2.ko.md`.
+- Hopae owners (`--hopae-owner`): signed membership projection verification and
+  application (pinned keys, strict Ed25519 with domain separation, vocabulary and
+  freshness binding, cursor/watermark continuity, 410 resnapshot) and the subject
+  lifecycle feed with orphan reconciliation.
+- Shadow evaluation of v2 beside v1 with persisted counters and explanations; the
+  zero-unexplained-mismatch cutover gate (`--shadow-window-days`), approved cutover,
+  rollback and model history; `--v2-production` reason requirement.
+
 - Administrative explain API (ADR 0019 D2, ADR 0020 simulator, ADR 0021 P0 explain
   and candidate diff): `POST /v1/explain`, `POST /v1/explain/batch`,
   `POST /v1/explain/diff` and `GET /v1/audit/simulations`, administrator
@@ -27,6 +43,10 @@
   by age and by the 100,000-row cap on every insert.
 
 ### Changed
+
+- v1 and v2 publications share one revision sequence: `PUT /v1/policy` issues the
+  next global revision, and the publication audit carries `document: v1|v2`.
+- `pumgye_core::Policy::compile` errors carry document-path context.
 
 - All evaluation entrypoints delegate to one evaluator generic over a trace sink;
   production uses the zero-sized `NoTrace`. Decisions are unchanged, the hot path
