@@ -8,6 +8,10 @@ policy. This is the Pumgye authority API that ADR 0019 (decision events,
 simulation), ADR 0020 (console simulator) and ADR 0021 (explain/candidate diff,
 P0) consume. Who-can/what-can queries are ADR 0021 P1 and are not implemented.
 
+Versioning: these `/v1/explain*` paths serve the policy version 1 model. The ADR 0021
+v2 model will add `/v2/...` explain paths with its own stages (groups, explicit deny,
+zones, clearance, validity); `/v1` remains for v1 documents.
+
 ## Guarantees
 
 - **Same function.** Every enforcement entrypoint (HTTP `/v1/decision`,
@@ -33,7 +37,9 @@ P0) consume. Who-can/what-can queries are ADR 0021 P1 and are not implemented.
   separate `simulation_audit` table (actor, optional delegated actor, operation,
   snapshot source/revision, candidate digest, request body SHA-256, counts) *before*
   the result is released. If the row cannot be written the request returns 503 and
-  no result; enforcement is not fenced. Rows are retained up to 100,000.
+  no result; enforcement is not fenced. Every insert trims rows older than
+  `--simulation-audit-retention-days` (default 30, range 1–3650) and keeps at most
+  the newest 100,000 rows. Publication audit is never trimmed.
 
 ## Authentication, admission and limits
 
@@ -54,11 +60,35 @@ compilation). An exhausted bucket returns 429 with `Retry-After: 1`.
 | Identifiers | 1–128 bytes of `[A-Za-z0-9_.:-]` (labels ≤ 64) | 400 |
 | `on_behalf_of` | 1–128 bytes of `[A-Za-z0-9_.:@-]` | 400 |
 
-Errors follow server convention: status code only, no body. 400 malformed request
-or case (unknown field, invalid name, ambiguous target, AAL > 3, unsupported
-kind/target combination), 401 credential, 409 revision pin or candidate base does
-not equal the current revision, 413 size, 415 non-JSON media type, 422 candidate
-does not parse/compile, 429 rate, 503 overload/audit storage failure.
+### Errors
+
+400, 409, 413, 422 and 429 from these endpoints carry a structured body (other
+Pumgye endpoints keep status-only errors). 401, 415 and 503 stay bare so they
+reveal nothing before authentication or about storage:
+
+```json
+{"error": {
+  "code": "pumgye.error.candidate_invalid",
+  "message_key": "pumgye.error.candidate_invalid",
+  "details": [{"path": "snapshot.policy.services.orders.users.u_reader",
+               "code": "pumgye.validation.unknown_assigned_role",
+               "message_key": "pumgye.validation.unknown_assigned_role"}],
+  "current_revision": 7
+}}
+```
+
+`current_revision` appears only on 409. `details` (≤ 32) locate the cause by
+request path; codes double as message keys and are in the en/ko catalogs.
+
+| Status | `code` | Detail codes / paths |
+| --- | --- | --- |
+| 400 | `pumgye.error.malformed_request` | JSON/schema error at the request path (`case.subject.kind`, `$` for the root) |
+| 400 | `pumgye.error.invalid_case` | every invalid case: `pumgye.case.{invalid_name, invalid_label, ambiguous_target, missing_network_evidence, unexpected_network_evidence, assurance_out_of_range, unsupported_combination, revision_out_of_range}` at `case.<field>` / `cases[i].<field>` |
+| 400 | `pumgye.error.invalid_delegated_actor`, `empty_batch`, `invalid_page`, `invalid_cursor` | `on_behalf_of`, `cases`, `limit`/`cursor`, `after_id` |
+| 409 | `pumgye.error.revision_conflict` | `snapshot.revision`, `snapshot.base_revision` or `base_revision`; reload `current_revision` and retry |
+| 413 | `pumgye.error.payload_too_large`, `batch_too_large`, `candidate_too_large` | body, `cases`, candidate document |
+| 422 | `pumgye.error.candidate_invalid` | the validator's failure: `pumgye.validation.schema` (unknown field, wrong type) or a compile code such as `unknown_assigned_role`, `role_cycle`, `network_host_bits`, `resource_permission` (`pumgye_core::VALIDATION_CODES`), at the most specific document path (`snapshot.policy.services.<s>.roles.<r>`, `….networks[i]`, `….resources.<r>.actions.<a>`) |
+| 429 | `pumgye.error.rate_limited` | — (`Retry-After: 1`) |
 
 ## Case
 
@@ -267,6 +297,31 @@ broker, never directly from the browser:
   with `snapshot.source` and `snapshot.revision`.
 - The broker records a Hangang `simulation` decision event (ADR 0019) referencing
   `audit_id`; Pumgye does not emit decision events itself.
+
+## Hot-path performance
+
+The trace-generic refactor was measured against `0409a7a` (the ADR 0021 regression
+floor) and `849ca90` (the parent of this change) with one standalone release build per
+revision of the same timed loop: `CompiledPolicy::evaluate` on one pinned core,
+65,536 users and 65,536 `/32` network rules, 20 M decisions per run; *allow* is
+all-allow, *mixed* rotates allow / permission / class / guard denials. Values are
+medians in ns per decision; the host was shared (load average ≈ 7 on 16 cores), so
+spread between runs was ±20 %.
+
+| Pattern | `0409a7a` | `849ca90` | this branch |
+| --- | --- | --- | --- |
+| sequential, allow (5 runs) | 367.6 | 283.2 | 282.1 |
+| sequential, mixed (5 runs) | 330.9 | 264.4 | 222.4 |
+| shuffled, allow (5 + 9 runs) | 1242.9 | 506.9 / 599.4 | 619.6 / 581.6 |
+| shuffled, mixed (5 + 9 runs) | 881.1 | 405.5 / 545.6 | 417.6 / 471.2 |
+
+No configuration is slower than `0409a7a`; against `849ca90` the differences are
+within run-to-run noise (the second shuffled series, 9 interleaved runs, has this
+branch faster on both medians and minimums: allow min 520 vs 529 ns, mixed 417 vs
+495 ns). The production instantiation is the same machine code path with the trace
+calls removed; `no_alloc.rs` remains the deterministic guard. These numbers are
+core-only and are not comparable with the mTLS request-chain figures in
+[PERFORMANCE.md](PERFORMANCE.md).
 
 ## Limitations
 

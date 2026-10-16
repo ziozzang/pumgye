@@ -19,6 +19,12 @@
 - `pumgye_core::Tracer`, `NoTrace`, `VecTrace` and `*_traced` evaluation
   entrypoints; `pumgye_core::explain` and `pumgye_core::diff`.
 - `simulation_queries` in `GET /v1/status`.
+- Structured, located errors (`{"error":{code,message_key,details[{path,code,message_key}],current_revision?}}`)
+  for 400/409/413/422/429 on the explain/batch/diff/audit-simulations endpoints only;
+  candidate validation reports the document path and a registered
+  `pumgye.validation.*` code (`Policy::compile_located`, `PolicyViolation`).
+- `--simulation-audit-retention-days` (default 30): simulation audit rows are trimmed
+  by age and by the 100,000-row cap on every insert.
 
 ### Changed
 
@@ -26,4 +32,6 @@
   production uses the zero-sized `NoTrace`. Decisions are unchanged, the hot path
   remains allocation-free (new allocation-counting test) and compiled network
   entries keep their size.
+- Policy compile errors now carry document-path context (`at services.<id>…`);
+  refusal behaviour is unchanged.
 - The SQLite schema gains an additive `simulation_audit` table (created on start).

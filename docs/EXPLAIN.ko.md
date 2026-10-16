@@ -7,6 +7,10 @@
 시뮬레이터), ADR 0021(explain·후보 diff, P0)이 사용하는 품계 권한 서버 API입니다.
 who-can/what-can 조회는 ADR 0021 P1이며 구현하지 않았습니다.
 
+버전: `/v1/explain*` 경로는 정책 버전 1 모델용입니다. ADR 0021 v2 모델은 자체 단계(그룹,
+명시적 거부, 존, clearance, 유효 기간)를 가진 `/v2/...` explain 경로를 추가하며, `/v1`은
+v1 문서용으로 유지합니다.
+
 ## 보장 사항
 
 - **같은 함수.** 모든 집행 진입점(HTTP `/v1/decision`·`/v1/resource/decision`, PPG1,
@@ -27,7 +31,9 @@ who-can/what-can 조회는 ADR 0021 P1이며 구현하지 않았습니다.
 - **감사.** 수락된 시뮬레이션마다 별도 `simulation_audit` 테이블에 `kind=simulation`
   행(행위자, 선택적 위임 행위자, 작업, 스냅샷 원천/리비전, 후보 digest, 요청 본문
   SHA-256, 집계)을 결과 반환 *전에* 기록합니다. 기록에 실패하면 결과 없이 503을
-  반환하며 집행은 차단하지 않습니다. 최대 100,000행을 보존합니다.
+  반환하며 집행은 차단하지 않습니다. 기록할 때마다 `--simulation-audit-retention-days`
+(기본 30, 범위 1–3650)보다 오래된 행을 지우고 최신 100,000행까지만 보존합니다. 게시 감사는
+지우지 않습니다.
 
 ## 인증·수용·제한
 
@@ -47,10 +53,34 @@ who-can/what-can 조회는 ADR 0021 P1이며 구현하지 않았습니다.
 | 식별자 | `[A-Za-z0-9_.:-]` 1–128바이트(label ≤ 64) | 400 |
 | `on_behalf_of` | `[A-Za-z0-9_.:@-]` 1–128바이트 | 400 |
 
-오류는 서버 관례대로 본문 없이 상태 코드만 반환합니다. 400 잘못된 요청/케이스(모르는
-필드, 잘못된 이름, 모호한 대상, AAL > 3, 지원하지 않는 종류/대상 조합), 401 자격,
-409 리비전 고정 또는 후보 기준 리비전이 현재와 다름, 413 크기, 415 JSON 아님,
-422 후보 파싱/컴파일 실패, 429 속도 제한, 503 과부하/감사 저장 실패.
+### 오류
+
+이 endpoint들의 400·409·413·422·429는 구조화된 본문을 반환합니다(다른 품계 endpoint는
+상태 코드만 유지). 401·415·503은 인증 전 정보나 저장소 정보를 드러내지 않도록 본문이 없습니다.
+
+```json
+{"error": {
+  "code": "pumgye.error.candidate_invalid",
+  "message_key": "pumgye.error.candidate_invalid",
+  "details": [{"path": "snapshot.policy.services.orders.users.u_reader",
+               "code": "pumgye.validation.unknown_assigned_role",
+               "message_key": "pumgye.validation.unknown_assigned_role"}],
+  "current_revision": 7
+}}
+```
+
+`current_revision`은 409에만 있습니다. `details`(최대 32개)는 요청 경로로 원인을 가리키며
+코드는 메시지 키이기도 하고 en/ko 카탈로그에 있습니다.
+
+| 상태 | `code` | 상세 코드 / 경로 |
+| --- | --- | --- |
+| 400 | `pumgye.error.malformed_request` | 요청 경로의 JSON/스키마 오류(`case.subject.kind`, 최상위는 `$`) |
+| 400 | `pumgye.error.invalid_case` | 잘못된 모든 케이스: `pumgye.case.*`, 경로 `case.<필드>` / `cases[i].<필드>` |
+| 400 | `pumgye.error.invalid_delegated_actor`, `empty_batch`, `invalid_page`, `invalid_cursor` | `on_behalf_of`, `cases`, `limit`/`cursor`, `after_id` |
+| 409 | `pumgye.error.revision_conflict` | `snapshot.revision`, `snapshot.base_revision`, `base_revision`. `current_revision`으로 다시 불러와 재시도 |
+| 413 | `pumgye.error.payload_too_large`, `batch_too_large`, `candidate_too_large` | 본문, `cases`, 후보 문서 |
+| 422 | `pumgye.error.candidate_invalid` | 검증기의 구체적 실패: `pumgye.validation.schema`(모르는 필드·형식 오류) 또는 `unknown_assigned_role`, `role_cycle`, `network_host_bits`, `resource_permission` 등 컴파일 코드(`pumgye_core::VALIDATION_CODES`)와 가장 구체적인 문서 경로 |
+| 429 | `pumgye.error.rate_limited` | — (`Retry-After: 1`) |
 
 ## 케이스
 
@@ -183,6 +213,26 @@ who-can/what-can 조회는 ADR 0021 P1이며 구현하지 않았습니다.
   *시뮬레이션* 표시를 붙입니다.
 - 브로커는 `audit_id`를 참조하는 한강 `simulation` 판정 이벤트(ADR 0019)를 기록합니다.
   품계는 판정 이벤트를 직접 발행하지 않습니다.
+
+## 핫 패스 성능
+
+추적 제네릭 리팩터링을 `0409a7a`(ADR 0021 회귀 기준)와 `849ca90`(이 변경의 부모)에 대해
+리비전별 release 빌드 1회씩, 같은 측정 루프로 비교했습니다. 단일 고정 코어에서 사용자
+65,536명과 `/32` 네트워크 규칙 65,536개로 `CompiledPolicy::evaluate`를 실행당 2천만 회
+호출했습니다. *allow*는 전부 허용, *mixed*는 허용/권한/등급/수문장 거부를 순환합니다. 값은
+판정당 ns 중앙값이며 공유 호스트(16코어에서 load average ≈ 7)라 실행 간 편차가 ±20 %였습니다.
+
+| 패턴 | `0409a7a` | `849ca90` | 이 브랜치 |
+| --- | --- | --- | --- |
+| sequential, allow (5회) | 367.6 | 283.2 | 282.1 |
+| sequential, mixed (5회) | 330.9 | 264.4 | 222.4 |
+| shuffled, allow (5 + 9회) | 1242.9 | 506.9 / 599.4 | 619.6 / 581.6 |
+| shuffled, mixed (5 + 9회) | 881.1 | 405.5 / 545.6 | 417.6 / 471.2 |
+
+모든 구성에서 `0409a7a`보다 느리지 않고, `849ca90` 대비 차이는 실행 간 잡음 범위입니다(교차
+실행 9회의 두 번째 shuffled 측정에서는 이 브랜치가 중앙값·최솟값 모두 빠름: allow 최소 520 vs
+529 ns, mixed 417 vs 495 ns). 결정적 보증은 `no_alloc.rs`가 유지합니다. 코어 단독 수치이며
+[PERFORMANCE.ko.md](PERFORMANCE.ko.md)의 mTLS 요청 체인 수치와 비교할 수 없습니다.
 
 ## 제약
 
