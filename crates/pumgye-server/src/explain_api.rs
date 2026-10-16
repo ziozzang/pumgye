@@ -62,7 +62,7 @@ impl Budget {
             retention_seconds: days.saturating_mul(86_400),
         }
     }
-    fn take(&self, cost: f64) -> bool {
+    pub(crate) fn take(&self, cost: f64) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
@@ -232,7 +232,7 @@ pub(crate) struct ErrorDetail {
     code: &'static str,
     message_key: &'static str,
 }
-fn detail(path: impl Into<String>, code: &'static str) -> ErrorDetail {
+pub(crate) fn detail(path: impl Into<String>, code: &'static str) -> ErrorDetail {
     ErrorDetail {
         path: path.into(),
         code,
@@ -251,7 +251,7 @@ pub(crate) struct ApiError {
 /// Maximum details reported per refusal.
 pub const MAX_ERROR_DETAILS: usize = 32;
 impl ApiError {
-    fn coded(status: StatusCode, code: &'static str) -> Self {
+    pub(crate) fn coded(status: StatusCode, code: &'static str) -> Self {
         Self {
             status,
             code: Some(code),
@@ -259,13 +259,13 @@ impl ApiError {
             current_revision: None,
         }
     }
-    fn with(mut self, detail: ErrorDetail) -> Self {
+    pub(crate) fn with(mut self, detail: ErrorDetail) -> Self {
         if self.details.len() < MAX_ERROR_DETAILS {
             self.details.push(detail);
         }
         self
     }
-    fn conflict(path: &str, current: u64) -> Self {
+    pub(crate) fn conflict(path: &str, current: u64) -> Self {
         let mut error = Self::coded(StatusCode::CONFLICT, "pumgye.error.revision_conflict")
             .with(detail(path, "pumgye.error.revision_conflict"));
         error.current_revision = Some(current);
@@ -386,7 +386,7 @@ fn resolve(a: &Authority, selector: Option<Selector>, prefix: &str) -> Result<Re
         candidate,
     })
 }
-fn delegated(value: &Option<String>) -> Result<(), ApiError> {
+pub(crate) fn delegated(value: &Option<String>) -> Result<(), ApiError> {
     match value {
         Some(v)
             if v.is_empty()
@@ -414,8 +414,8 @@ fn json_body(headers: &HeaderMap) -> bool {
         .and_then(|v| v.split(';').next())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
 }
-type Body = Result<Bytes, axum::extract::rejection::BytesRejection>;
-fn admit<T: for<'de> Deserialize<'de>>(
+pub(crate) type Body = Result<Bytes, axum::extract::rejection::BytesRejection>;
+pub(crate) fn admit<T: for<'de> Deserialize<'de>>(
     a: &Authority,
     headers: &HeaderMap,
     body: Body,
@@ -455,7 +455,7 @@ fn validate_cases<'a>(cases: impl IntoIterator<Item = (String, &'a Case)>) -> Re
         Err(error)
     }
 }
-fn rate_limited() -> ApiError {
+pub(crate) fn rate_limited() -> ApiError {
     ApiError::coded(StatusCode::TOO_MANY_REQUESTS, "pumgye.error.rate_limited")
 }
 struct Audit {
@@ -545,20 +545,20 @@ fn evaluate(
     }
     Ok((results, summary))
 }
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|_| ApiError::from(StatusCode::SERVICE_UNAVAILABLE))?
 }
-fn finish(value: Result<serde_json::Value, ApiError>) -> Response {
+pub(crate) fn finish(value: Result<serde_json::Value, ApiError>) -> Response {
     match value {
         Ok(value) => ([(header::CACHE_CONTROL, "no-store")], Json(value)).into_response(),
         Err(error) => error.into_response(),
     }
 }
-fn digest(body: &Bytes) -> String {
+pub(crate) fn digest(body: &Bytes) -> String {
     format!("{:x}", Sha256::digest(body))
 }
 fn json(value: serde_json::Value) -> Result<serde_json::Value, ApiError> {

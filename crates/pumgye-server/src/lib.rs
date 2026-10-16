@@ -3,6 +3,8 @@
 pub mod authentication;
 pub mod authentication_config;
 pub mod authorization;
+/// Hopae membership projection and subject lifecycle owners (policy model v2).
+pub mod hopae_owner;
 pub mod permit;
 pub mod permit_config;
 

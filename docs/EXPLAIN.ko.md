@@ -242,3 +242,10 @@ v1 문서용으로 유지합니다.
 - explain 결과에 서명하지 않습니다(ADR 0019 미결 질문 6).
 - 수문장 증거는 모의 입력이며 explain은 수문장을 조회하지 않습니다. 한강이 조율하는
   시뮬레이션이 수문장을 별도로 조회합니다.
+
+## 정책 모델 버전 2
+
+`/v2/explain`, `/v2/explain/batch`, `/v2/candidates/diff`는 `catalog`, `principal`,
+`explicit_deny`, `allow_set`, `network_ceiling`, `clearance` 단계와 바인딩 출처, 모의 시각,
+가정 그룹으로 버전 2 모델을 설명하고 비교합니다. 코드와 키는 위 카탈로그를 공유합니다
+(`pumgye.explicit_denied`와 v2 `pumgye.detail.*` 코드 등록). [MODEL_V2.ko.md](MODEL_V2.ko.md)를 참조하세요.
