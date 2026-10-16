@@ -375,6 +375,33 @@ pub struct Binding {
 // Compiled snapshot
 // ---------------------------------------------------------------------------
 
+/// FNV-1a for small, policy-defined vocabularies (services, permissions,
+/// labels, actions). Request strings only look these tables up; they cannot
+/// insert, and each table is bounded (≤ 4,096 services, ≤ 256 entries
+/// otherwise), so probe length stays bounded. Principal and resource tables
+/// keep the default SipHash.
+#[derive(Default)]
+pub struct Fnv(u64);
+impl std::hash::Hasher for Fnv {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = if self.0 == 0 {
+            0xcbf2_9ce4_8422_2325
+        } else {
+            self.0
+        };
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        self.0 = h;
+    }
+}
+pub(crate) type VocabMap<V> = HashMap<String, V, std::hash::BuildHasherDefault<Fnv>>;
 /// Permission bitset over a service vocabulary of up to 256 permissions.
 pub type PermMask = [u64; 4];
 #[inline(always)]
@@ -389,7 +416,7 @@ pub type GroupMask = [u64; 4];
 pub const ANY_ZONE: u64 = u64::MAX;
 pub const NO_EXPIRY: u64 = u64::MAX;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Grant {
     pub(crate) deny: bool,
     pub(crate) perms: PermMask,
@@ -408,16 +435,31 @@ impl Grant {
         self.not_before <= now && now < self.expires_at
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SliceEntry {
-    pub(crate) service: u16,
     pub(crate) start: u32,
+    pub(crate) service: u16,
     pub(crate) len: u16,
+}
+/// Compact summary of a principal's only grant on its first service, kept in
+/// the principal table entry so the common case needs no further memory loads.
+/// Used only for unconditional allows (no validity window, any zone).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FastGrant {
+    pub(crate) compartments: u64,
+    /// Index into `CompiledV2::masks`; `u32::MAX`: not applicable.
+    pub(crate) perms: u32,
+    pub(crate) level: u8,
+    pub(crate) min_aal: u8,
 }
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Slot {
     pub(crate) start: u32,
     pub(crate) len: u32,
+    /// The first service slice inline: most subjects are bound on one service,
+    /// so the hot path avoids the dependent slice-table load.
+    pub(crate) first: SliceEntry,
+    pub(crate) fast: FastGrant,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CeilingEntry {
@@ -435,9 +477,11 @@ pub(crate) struct CeilingSet {
 }
 pub(crate) struct CompiledServiceV2 {
     pub(crate) index: u16,
-    pub(crate) permissions: HashMap<String, u16>,
-    pub(crate) ceilings: PrefixTrie<CeilingSet>,
-    pub(crate) hosts: HashMap<IpAddr, CeilingSet>,
+    pub(crate) permissions: VocabMap<u16>,
+    /// Ceiling sets per rule; the trie and host table hold compact indexes.
+    pub(crate) ceiling_sets: Vec<CeilingSet>,
+    pub(crate) ceilings: PrefixTrie<u32>,
+    pub(crate) hosts: HashMap<IpAddr, u32>,
     pub(crate) require_guard: bool,
     pub(crate) context: AuthorizationContext,
 }
@@ -446,7 +490,7 @@ pub(crate) struct CompiledResourceV2 {
     pub(crate) level: u8,
     pub(crate) compartments: u64,
     pub(crate) min_aal: u8,
-    pub(crate) actions: HashMap<String, u16>,
+    pub(crate) actions: VocabMap<u16>,
 }
 /// Compile-time findings that do not refuse the document.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -455,12 +499,15 @@ pub struct Warning {
     pub path: String,
 }
 pub struct CompiledV2 {
-    pub(crate) services: HashMap<String, CompiledServiceV2>,
+    pub(crate) services: VocabMap<CompiledServiceV2>,
     /// Request label names (`information_class` on the permission path): a level
     /// name resolves to (level, ∅); a compartment name to (lowest level, {c}).
-    pub(crate) labels: HashMap<String, (u8, u64)>,
+    pub(crate) labels: VocabMap<(u8, u64)>,
     pub(crate) resources: HashMap<String, CompiledResourceV2>,
     pub(crate) zones: PrefixTrie<u64>,
+    pub(crate) zone_hosts: HashMap<IpAddr, u64>,
+    /// Deduplicated permission masks referenced by `FastGrant`.
+    pub(crate) masks: Vec<PermMask>,
     pub(crate) principals: [HashMap<String, Slot>; 3],
     pub(crate) groups: Vec<Slot>,
     pub(crate) group_refs: Vec<String>,
@@ -525,9 +572,9 @@ impl std::fmt::Display for At {
 fn at(path: impl Into<String>) -> At {
     At(path.into())
 }
-fn vocabulary(values: &[String], max: usize, _what: &str) -> Result<HashMap<String, u16>> {
+fn vocabulary(values: &[String], max: usize, _what: &str) -> Result<VocabMap<u16>> {
     ensure!(values.len() <= max, "vocabulary too large");
-    let mut out = HashMap::new();
+    let mut out = VocabMap::default();
     for (i, v) in values.iter().enumerate() {
         ensure!(
             name(v) && out.insert(v.clone(), i as u16).is_none(),
@@ -536,7 +583,7 @@ fn vocabulary(values: &[String], max: usize, _what: &str) -> Result<HashMap<Stri
     }
     Ok(out)
 }
-fn compartment_mask(values: &[String], vocab: &HashMap<String, u16>) -> Result<u64> {
+fn compartment_mask(values: &[String], vocab: &VocabMap<u16>) -> Result<u64> {
     let mut m = 0u64;
     for v in values {
         let bit = vocab
@@ -566,8 +613,8 @@ struct TemplateClosure {
 fn closure(
     id: &str,
     templates: &BTreeMap<String, RoleTemplate>,
-    levels: &HashMap<String, u8>,
-    compartments: &HashMap<String, u16>,
+    levels: &VocabMap<u8>,
+    compartments: &VocabMap<u16>,
     visiting: &mut BTreeSet<String>,
     done: &mut HashMap<String, std::rc::Rc<TemplateClosure>>,
 ) -> Result<std::rc::Rc<TemplateClosure>> {
@@ -577,8 +624,8 @@ fn closure(
 fn closure_inner(
     id: &str,
     templates: &BTreeMap<String, RoleTemplate>,
-    levels: &HashMap<String, u8>,
-    compartments: &HashMap<String, u16>,
+    levels: &VocabMap<u8>,
+    compartments: &VocabMap<u16>,
     visiting: &mut BTreeSet<String>,
     done: &mut HashMap<String, std::rc::Rc<TemplateClosure>>,
 ) -> Result<std::rc::Rc<TemplateClosure>> {
@@ -634,11 +681,7 @@ fn closure_inner(
     done.insert(id.to_owned(), c.clone());
     Ok(c)
 }
-fn resolve_for(
-    c: &TemplateClosure,
-    service: &ServicePolicy,
-    perms: &HashMap<String, u16>,
-) -> Resolved {
+fn resolve_for(c: &TemplateClosure, service: &ServicePolicy, perms: &VocabMap<u16>) -> Resolved {
     let mut mask = [0u64; 4];
     for p in &c.permissions {
         let mapped = service.permission_map.get(p).unwrap_or(p);
@@ -676,7 +719,7 @@ impl PolicyV2 {
         ensure!(self.bindings.len() <= limits::BINDINGS, "binding capacity");
         let mut warnings = Vec::new();
         // Catalog vocabulary
-        let levels: HashMap<String, u8> = (|| {
+        let levels: VocabMap<u8> = (|| {
             ensure!(!self.catalog.levels.is_empty(), "catalog levels required");
             Ok(vocabulary(&self.catalog.levels, limits::LEVELS, "level")?
                 .into_iter()
@@ -690,7 +733,7 @@ impl PolicyV2 {
             "compartment",
         )
         .with_context(|| at("catalog.compartments"))?;
-        let mut labels: HashMap<String, (u8, u64)> =
+        let mut labels: VocabMap<(u8, u64)> =
             levels.iter().map(|(k, v)| (k.clone(), (*v, 0))).collect();
         for (c, bit) in &compartments {
             if labels.insert(c.clone(), (0, 1u64 << bit)).is_some() {
@@ -704,6 +747,7 @@ impl PolicyV2 {
         ensure!(self.zones.zones.len() <= limits::ZONES, "zone capacity");
         let mut zone_index = HashMap::new();
         let mut zones = PrefixTrie::<u64>::default();
+        let mut zone_hosts: HashMap<IpAddr, u64> = HashMap::new();
         let mut zone_prefixes: BTreeMap<&String, Vec<IpNet>> = BTreeMap::new();
         let mut prefix_count = 0usize;
         for (i, (id, zone)) in self.zones.zones.iter().enumerate() {
@@ -716,8 +760,14 @@ impl PolicyV2 {
                 for p in &zone.prefixes {
                     ensure!(p.trunc() == *p, "network has host bits");
                     ensure!(seen.insert(*p), "duplicate network");
-                    let previous = zones.remove(*p).unwrap_or(0);
-                    zones.insert(*p, previous | (1u64 << i));
+                    let exact = matches!(p, IpNet::V4(n) if n.prefix_len() == 32)
+                        || matches!(p, IpNet::V6(n) if n.prefix_len() == 128);
+                    if exact {
+                        *zone_hosts.entry(p.addr().to_canonical()).or_insert(0) |= 1u64 << i;
+                    } else {
+                        let previous = zones.remove(*p).unwrap_or(0);
+                        zones.insert(*p, previous | (1u64 << i));
+                    }
                 }
                 Ok(())
             })()
@@ -751,7 +801,7 @@ impl PolicyV2 {
             let _ = t;
         }
         // Services
-        let mut services = HashMap::new();
+        let mut services = VocabMap::default();
         let mut service_names = Vec::new();
         for (i, (id, service)) in self.services.iter().enumerate() {
             let compiled = (|| {
@@ -775,6 +825,7 @@ impl PolicyV2 {
                 }
                 let mut ceilings = PrefixTrie::default();
                 let mut hosts = HashMap::new();
+                let mut ceiling_sets = Vec::with_capacity(service.network_ceiling.len());
                 for (rule, ceiling) in service.network_ceiling.iter().enumerate() {
                     (|| {
                         let prefixes = zone_prefixes
@@ -813,13 +864,15 @@ impl PolicyV2 {
                         for e in &mut set.entries[..set.len as usize] {
                             e.min_aal = aal;
                         }
+                        let index = ceiling_sets.len() as u32;
+                        ceiling_sets.push(set);
                         for p in prefixes {
                             let exact = matches!(p, IpNet::V4(n) if n.prefix_len() == 32)
                                 || matches!(p, IpNet::V6(n) if n.prefix_len() == 128);
                             let previous = if exact {
-                                hosts.insert(p.addr().to_canonical(), set)
+                                hosts.insert(p.addr().to_canonical(), index)
                             } else {
-                                ceilings.insert(*p, set)
+                                ceilings.insert(*p, index)
                             };
                             ensure!(previous.is_none(), "ambiguous ceiling prefix");
                         }
@@ -829,6 +882,7 @@ impl PolicyV2 {
                 }
                 Ok(CompiledServiceV2 {
                     index: i as u16,
+                    ceiling_sets,
                     permissions,
                     ceilings,
                     hosts,
@@ -862,7 +916,7 @@ impl PolicyV2 {
                     .get(&r.level)
                     .ok_or_else(|| anyhow::anyhow!("unknown resource class"))?;
                 let cmask = compartment_mask(&r.compartments, &compartments)?;
-                let mut actions = HashMap::new();
+                let mut actions = VocabMap::default();
                 for (action, permission) in &r.actions {
                     ensure!(name(action), "invalid resource action");
                     actions.insert(
@@ -1093,19 +1147,48 @@ impl PolicyV2 {
             .collect();
         let mut slices = Vec::new();
         let mut grants = Vec::new();
+        let mut masks: Vec<PermMask> = Vec::new();
+        let mut mask_index: HashMap<PermMask, u32> = HashMap::new();
         let mut principals: [HashMap<String, Slot>; 3] = Default::default();
         let mut groups = vec![Slot::default(); group_refs.len()];
         for ((kind, reference), by_service) in per_subject {
-            let slot = Slot {
+            let mut slot = Slot {
                 start: slices.len() as u32,
                 len: by_service.len() as u32,
+                first: SliceEntry::default(),
+                fast: FastGrant {
+                    perms: u32::MAX,
+                    ..Default::default()
+                },
             };
-            for (service, list) in by_service {
-                slices.push(SliceEntry {
+            for (n, (service, list)) in by_service.into_iter().enumerate() {
+                let entry = SliceEntry {
                     service,
                     start: grants.len() as u32,
                     len: list.len() as u16,
-                });
+                };
+                if n == 0 {
+                    slot.first = entry;
+                    let g = list[0];
+                    if list.len() == 1
+                        && !g.deny
+                        && g.zones == ANY_ZONE
+                        && g.not_before == 0
+                        && g.expires_at == NO_EXPIRY
+                    {
+                        let index = *mask_index.entry(g.perms).or_insert_with(|| {
+                            masks.push(g.perms);
+                            masks.len() as u32 - 1
+                        });
+                        slot.fast = FastGrant {
+                            compartments: g.compartments,
+                            perms: index,
+                            level: g.level,
+                            min_aal: g.min_aal,
+                        };
+                    }
+                }
+                slices.push(entry);
                 grants.extend(list);
             }
             if kind == u8::MAX {
@@ -1123,6 +1206,8 @@ impl PolicyV2 {
             labels,
             resources,
             zones,
+            zone_hosts,
+            masks,
             principals,
             groups,
             group_refs,
@@ -1330,6 +1415,8 @@ pub enum TraceV2Event {
     },
 }
 pub trait TracerV2 {
+    /// False for the production sink: trace-only work is skipped entirely.
+    const ENABLED: bool = true;
     fn event(&mut self, event: TraceV2Event);
     /// Each allow grant that survived validity and zone filtering (explain provenance).
     fn grant(&mut self, _binding: u32, _contributes: bool) {}
@@ -1337,6 +1424,7 @@ pub trait TracerV2 {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoTraceV2;
 impl TracerV2 for NoTraceV2 {
+    const ENABLED: bool = false;
     #[inline(always)]
     fn event(&mut self, _event: TraceV2Event) {}
     #[inline(always)]
@@ -1346,7 +1434,11 @@ const _: () = assert!(std::mem::size_of::<NoTraceV2>() == 0);
 
 impl CompiledV2 {
     #[inline(always)]
-    fn subject_grants(&self, slot: Slot, service: u16) -> &[Grant] {
+    fn subject_grants<'a>(&'a self, slot: &'a Slot, service: u16) -> &'a [Grant] {
+        if slot.len > 0 && slot.first.service == service {
+            let f = slot.first;
+            return &self.grants[f.start as usize..f.start as usize + f.len as usize];
+        }
         let slices = &self.slices[slot.start as usize..(slot.start + slot.len) as usize];
         for s in slices {
             if s.service == service {
@@ -1359,7 +1451,7 @@ impl CompiledV2 {
     #[inline(always)]
     fn for_each_grant(
         &self,
-        direct: Option<Slot>,
+        direct: Option<&Slot>,
         groups: &GroupMask,
         service: u16,
         mut f: impl FnMut(&Grant) -> bool,
@@ -1378,7 +1470,7 @@ impl CompiledV2 {
                 bits &= bits - 1;
                 let index = w * 64 + b;
                 if let Some(slot) = self.groups.get(index) {
-                    for g in self.subject_grants(*slot, service) {
+                    for g in self.subject_grants(slot, service) {
                         if !f(g) {
                             return;
                         }
@@ -1394,6 +1486,7 @@ impl CompiledV2 {
     }
     /// The one version 2 evaluation function (ADR 0021 order 2–12; fences are
     /// the caller's). Explain instantiates it with a recording tracer.
+    #[inline]
     pub fn evaluate_traced<T: TracerV2>(
         &self,
         membership: &MembershipIndex,
@@ -1472,14 +1565,15 @@ impl CompiledV2 {
                 (p, res.level, res.compartments, res.min_aal)
             }
         };
-        // 5. Principal: kind-keyed lookup; groups only from the verified projection.
-        let valid = principal_ref_valid(r.kind, r.subject);
-        let direct = if valid {
-            self.principals[r.kind.index()].get(r.subject).copied()
+        // 5. Principal: kind-keyed lookup (only refs valid for the kind were
+        // compiled); groups only from the verified projection, Humans only.
+        let valid = if T::ENABLED {
+            principal_ref_valid(r.kind, r.subject)
         } else {
-            None
+            true
         };
-        let groups = if valid && r.kind == PrincipalKind::Human {
+        let direct = self.principals[r.kind.index()].get(r.subject);
+        let groups = if r.kind == PrincipalKind::Human {
             membership
                 .members
                 .get(r.subject)
@@ -1496,37 +1590,116 @@ impl CompiledV2 {
         if direct.is_none() && groups.iter().all(|w| *w == 0) {
             return DecisionV2::Guest;
         }
-        let mut zones = 0u64;
-        self.zones.visit_matches(r.ip, |m| zones |= *m);
-        trace.event(TraceV2Event::ZoneSet { zones });
-        let zone_ok = |g: &Grant| g.zones == ANY_ZONE || g.zones & zones != 0;
-        // 6. Explicit deny overrides every allow.
-        let mut denied = None;
-        self.for_each_grant(direct, &groups, service.index, |g| {
-            if g.deny && g.live(r.now) && zone_ok(g) && has(&g.perms, permission) {
-                denied = Some(g.binding);
-                return false;
-            }
-            true
+        // Zone membership is computed only when a grant carries a zone condition.
+        let zones = std::cell::Cell::new(if T::ENABLED {
+            Some(self.zone_mask(r.ip))
+        } else {
+            None
         });
+        if let Some(z) = zones.get() {
+            trace.event(TraceV2Event::ZoneSet { zones: z });
+        }
+        let zone_ok = |g: &Grant| {
+            g.zones == ANY_ZONE
+                || g.zones
+                    & zones.get().unwrap_or_else(|| {
+                        let z = self.zone_mask(r.ip);
+                        zones.set(Some(z));
+                        z
+                    })
+                    != 0
+        };
+        // 8 (looked up early, applied in ADR order below). Most specific; exact hosts first.
+        let ceiling = service
+            .hosts
+            .get(&r.ip.to_canonical())
+            .map(|c| (&service.ceiling_sets[*c as usize], true))
+            .or_else(|| {
+                service
+                    .ceilings
+                    .longest(r.ip)
+                    .map(|c| (&service.ceiling_sets[*c as usize], false))
+            });
+        let entries: &[CeilingEntry] = ceiling.map_or(&[], |(c, _)| &c.entries[..c.len as usize]);
+        // One pass: 6 explicit deny, 7 allow set, 9–11 per (template, ceiling) pair.
+        let mut denied = None;
+        let (mut candidates, mut live, mut zoned) = (0u32, 0u32, 0u32);
+        let (mut permitted, mut cleared) = (false, false);
+        let mut required = u8::MAX;
+        // Production fast path: a principal whose only grant on this service is an
+        // unconditional allow and who has no groups. Same outcome as the loop below
+        // (explain always takes the loop; parity is tested over the corpus).
+        let fast = match direct {
+            Some(slot)
+                if !T::ENABLED
+                    && slot.len == 1
+                    && slot.first.service == service.index
+                    && slot.first.len == 1
+                    && slot.fast.perms != u32::MAX
+                    && groups.iter().all(|w| *w == 0) =>
+            {
+                Some(slot.fast)
+            }
+            _ => None,
+        };
+        if let Some(g) = fast {
+            (candidates, live, zoned) = (1, 1, 1);
+            if has(&self.masks[g.perms as usize], permission) {
+                for e in entries {
+                    if !has(&e.perms, permission) {
+                        continue;
+                    }
+                    permitted = true;
+                    let fits = |l: u8, c: u64| l != u8::MAX && level <= l && compartments & !c == 0;
+                    if fits(g.level, g.compartments) && fits(e.level, e.compartments) {
+                        cleared = true;
+                        required = required.min(g.min_aal.max(e.min_aal).max(resource_min));
+                    }
+                }
+            }
+        } else {
+            self.for_each_grant(direct, &groups, service.index, |g| {
+                let is_live = g.live(r.now);
+                if g.deny {
+                    if is_live && has(&g.perms, permission) && zone_ok(g) {
+                        denied = Some(g.binding);
+                        return false;
+                    }
+                    return true;
+                }
+                candidates += 1;
+                if !is_live {
+                    return true;
+                }
+                live += 1;
+                if !zone_ok(g) {
+                    return true;
+                }
+                zoned += 1;
+                if !has(&g.perms, permission) {
+                    return true;
+                }
+                let mut contributes = false;
+                for e in entries {
+                    if !has(&e.perms, permission) {
+                        continue;
+                    }
+                    permitted = true;
+                    let fits = |l: u8, c: u64| l != u8::MAX && level <= l && compartments & !c == 0;
+                    if fits(g.level, g.compartments) && fits(e.level, e.compartments) {
+                        cleared = true;
+                        contributes = true;
+                        required = required.min(g.min_aal.max(e.min_aal).max(resource_min));
+                    }
+                }
+                trace.grant(g.binding, contributes);
+                true
+            });
+        }
         if let Some(binding) = denied {
             trace.event(TraceV2Event::Deny { binding });
             return DecisionV2::ExplicitDenied;
         }
-        // 7. Allow set
-        let (mut candidates, mut live, mut zoned) = (0u32, 0u32, 0u32);
-        self.for_each_grant(direct, &groups, service.index, |g| {
-            if !g.deny {
-                candidates += 1;
-                if g.live(r.now) {
-                    live += 1;
-                    if zone_ok(g) {
-                        zoned += 1;
-                    }
-                }
-            }
-            true
-        });
         trace.event(TraceV2Event::AllowSet {
             candidates,
             live,
@@ -1538,43 +1711,13 @@ impl CompiledV2 {
         if zoned == 0 {
             return DecisionV2::NetworkGuest;
         }
-        // 8. Network ceiling (most specific; exact hosts first).
-        let ceiling = service
-            .hosts
-            .get(&r.ip.to_canonical())
-            .map(|c| (c, true))
-            .or_else(|| service.ceilings.longest(r.ip).map(|c| (c, false)));
         trace.event(TraceV2Event::Ceiling {
             rule: ceiling.map(|c| c.0.rule),
             exact_host: ceiling.is_some_and(|c| c.1),
         });
-        let Some((ceiling, _)) = ceiling else {
+        if ceiling.is_none() {
             return DecisionV2::NetworkGuest;
-        };
-        let entries = &ceiling.entries[..ceiling.len as usize];
-        // 9–11 per granting (template, ceiling) pair.
-        let (mut permitted, mut cleared) = (false, false);
-        let mut required = u8::MAX;
-        self.for_each_grant(direct, &groups, service.index, |g| {
-            if g.deny || !g.live(r.now) || !zone_ok(g) || !has(&g.perms, permission) {
-                return true;
-            }
-            let mut contributes = false;
-            for e in entries {
-                if !has(&e.perms, permission) {
-                    continue;
-                }
-                permitted = true;
-                let fits = |l: u8, c: u64| l != u8::MAX && level <= l && compartments & !c == 0;
-                if fits(g.level, g.compartments) && fits(e.level, e.compartments) {
-                    cleared = true;
-                    contributes = true;
-                    required = required.min(g.min_aal.max(e.min_aal).max(resource_min));
-                }
-            }
-            trace.grant(g.binding, contributes);
-            true
-        });
+        }
         trace.event(TraceV2Event::Permission { granted: permitted });
         if !permitted {
             return DecisionV2::PermissionDenied;
@@ -1591,5 +1734,16 @@ impl CompiledV2 {
             return DecisionV2::AssuranceDenied;
         }
         DecisionV2::Allow
+    }
+    /// Zones containing the address: exact host entries plus the prefix trie.
+    #[inline]
+    fn zone_mask(&self, ip: IpAddr) -> u64 {
+        let mut zones = self
+            .zone_hosts
+            .get(&ip.to_canonical())
+            .copied()
+            .unwrap_or(0);
+        self.zones.visit_matches(ip, |m| zones |= *m);
+        zones
     }
 }
