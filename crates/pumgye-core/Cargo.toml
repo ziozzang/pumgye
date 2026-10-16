@@ -9,6 +9,7 @@ description = "Bounded deterministic service and network authorization"
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 ipnet = { version = "2", features = ["serde"] }
+serde_json = "1"
 guard-core = { git = "https://github.com/ziozzang/sumunjang", rev = "ee34be662cb04fb4c199e977127338e0ea8247ec" }
 
 [dev-dependencies]

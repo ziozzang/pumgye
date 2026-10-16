@@ -3,6 +3,7 @@ pub mod diff;
 pub mod explain;
 pub mod kubernetes_authorization;
 mod trace;
+pub mod v2;
 use anyhow::{Context, Result, ensure};
 use guard_core::prefix::PrefixTrie;
 use ipnet::IpNet;
@@ -433,6 +434,126 @@ pub const VALIDATION_CODES: &[(&str, &str)] = &[
     (
         "unknown resource permission",
         "pumgye.validation.resource_permission",
+    ),
+    ("vocabulary too large", "pumgye.validation.vocabulary_size"),
+    (
+        "invalid version",
+        "pumgye.validation.version_or_service_count",
+    ),
+    ("service capacity", "pumgye.validation.service_capacity"),
+    ("template capacity", "pumgye.validation.template_capacity"),
+    ("binding capacity", "pumgye.validation.binding_capacity"),
+    ("principal capacity", "pumgye.validation.principal_capacity"),
+    (
+        "relevant group capacity",
+        "pumgye.validation.group_capacity",
+    ),
+    ("zone capacity", "pumgye.validation.zone_capacity"),
+    ("prefix capacity", "pumgye.validation.prefix_capacity"),
+    (
+        "catalog levels required",
+        "pumgye.validation.catalog_levels",
+    ),
+    ("invalid zone name", "pumgye.validation.zone_name"),
+    ("zone needs prefixes", "pumgye.validation.zone_prefixes"),
+    ("invalid template name", "pumgye.validation.template_name"),
+    ("template inheritance cycle", "pumgye.validation.role_cycle"),
+    ("unknown template", "pumgye.validation.unknown_template"),
+    (
+        "template permission count",
+        "pumgye.validation.template_permissions",
+    ),
+    (
+        "invalid or duplicate template permission",
+        "pumgye.validation.template_permission",
+    ),
+    (
+        "unknown clearance level",
+        "pumgye.validation.clearance_level",
+    ),
+    (
+        "unknown compartment",
+        "pumgye.validation.unknown_compartment",
+    ),
+    (
+        "duplicate compartment",
+        "pumgye.validation.duplicate_compartment",
+    ),
+    (
+        "invalid service name",
+        "pumgye.validation.service_name_or_role_count",
+    ),
+    (
+        "version 2 supports the network_and_guard context only",
+        "pumgye.validation.v2_context",
+    ),
+    (
+        "service permissions required",
+        "pumgye.validation.vocabulary_size",
+    ),
+    (
+        "unknown mapped permission",
+        "pumgye.validation.permission_map",
+    ),
+    ("unknown zone", "pumgye.validation.unknown_zone"),
+    (
+        "too many ceiling templates",
+        "pumgye.validation.ceiling_templates",
+    ),
+    (
+        "duplicate ceiling template",
+        "pumgye.validation.ceiling_templates",
+    ),
+    (
+        "ambiguous ceiling prefix",
+        "pumgye.validation.ambiguous_ceiling",
+    ),
+    (
+        "invalid or duplicate binding id",
+        "pumgye.validation.binding_id",
+    ),
+    (
+        "binding subject count",
+        "pumgye.validation.binding_subjects",
+    ),
+    ("empty validity window", "pumgye.validation.validity_window"),
+    (
+        "invalid binding metadata",
+        "pumgye.validation.binding_metadata",
+    ),
+    ("empty zone condition", "pumgye.validation.zone_condition"),
+    ("empty service scope", "pumgye.validation.binding_scope"),
+    (
+        "unknown or duplicate scoped service",
+        "pumgye.validation.binding_scope",
+    ),
+    (
+        "allow needs role only; deny needs permissions only",
+        "pumgye.validation.binding_effect",
+    ),
+    (
+        "duplicate binding subject",
+        "pumgye.validation.binding_subjects",
+    ),
+    (
+        "invalid principal reference",
+        "pumgye.validation.principal_reference",
+    ),
+    (
+        "invalid group reference",
+        "pumgye.validation.group_reference",
+    ),
+    (
+        "empty deny permissions",
+        "pumgye.validation.deny_permissions",
+    ),
+    (
+        "too many bindings for one subject on one service",
+        "pumgye.validation.subject_service_grants",
+    ),
+    (
+        "label names must be unique across levels and compartments",
+        "pumgye.validation.label_collision",
     ),
 ];
 /// Fallback for refusals without a dedicated code (for example Kubernetes mapping).
