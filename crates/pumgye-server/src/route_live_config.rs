@@ -31,7 +31,7 @@ fn read(path: &Path, limit: u64) -> Result<Zeroizing<Vec<u8>>, Refused> {
     Ok(bytes)
 }
 pub fn load(path: &Path, resolve: &dyn Fn(&str) -> Option<String>) -> Result<Client, Refused> {
-    load_with(path, resolve, Client::prepare)
+    load_with(path, resolve, "route_live", Client::prepare_tls)
 }
 pub fn load_plan(
     path: &Path,
@@ -40,16 +40,22 @@ pub fn load_plan(
     load_with(
         path,
         resolve,
-        |address, name, ca, certificate, key, token| {
-            crate::plan_live::Client::prepare(address, name, ca, certificate, key, token)
-                .map_err(|_| Refused)
+        "projection_live",
+        |address, name, tls, token| {
+            crate::plan_live::Client::prepare_tls(address, name, tls, token).map_err(|_| Refused)
         },
     )
 }
 fn load_with<T>(
     path: &Path,
     resolve: &dyn Fn(&str) -> Option<String>,
-    prepare: impl FnOnce(&str, &str, &[u8], &[u8], &[u8], &str) -> Result<T, Refused>,
+    label: &str,
+    prepare: impl FnOnce(
+        &str,
+        &str,
+        std::sync::Arc<crate::tls_reload::Reloading<rustls::ClientConfig>>,
+        &str,
+    ) -> Result<T, Refused>,
 ) -> Result<T, Refused> {
     let config: Configuration =
         serde_json::from_slice(&read(path, 16 * 1024)?).map_err(|_| Refused)?;
@@ -63,15 +69,12 @@ fn load_with<T>(
         return Err(Refused);
     }
     let token = Zeroizing::new(resolve(&config.token_env).ok_or(Refused)?);
-    let ca = read(&config.ca, 128 * 1024)?;
-    let certificate = read(&config.certificate, 128 * 1024)?;
-    let key = read(&config.key, 128 * 1024)?;
-    prepare(
-        &config.address,
-        &config.server_name,
-        &ca,
-        &certificate,
-        &key,
-        &token,
+    let tls = crate::authority_transport::file_tls(
+        &format!("{label} client"),
+        &config.ca,
+        &config.certificate,
+        &config.key,
     )
+    .map_err(|_| Refused)?;
+    prepare(&config.address, &config.server_name, tls, &token)
 }

@@ -7,6 +7,8 @@ pub mod authorization;
 pub mod hopae_owner;
 pub mod permit;
 pub mod permit_config;
+/// Polling TLS certificate/key/CA reload for listeners and outbound clients.
+pub mod tls_reload;
 
 pub mod authentication_live;
 

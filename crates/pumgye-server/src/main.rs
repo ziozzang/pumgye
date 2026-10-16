@@ -148,6 +148,10 @@ struct Args {
     /// or a bare policy) with its report, then exit without opening the database.
     #[arg(long, exclusive = true)]
     migrate_v1_to_v2: Option<PathBuf>,
+    /// Poll TLS certificate/key/CA files of every listener and outbound client and
+    /// swap rotated material without a restart (content digest; no inotify).
+    #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    tls_reload_interval_secs: u64,
     /// Shadow observation window before a v2 cutover may be approved.
     #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u64).range(1..=90))]
     shadow_window_days: u64,
@@ -816,6 +820,8 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "source_lease_remaining_ms":if a.kubernetes_owned {Some(remaining.unwrap_or(0))} else {None},
         "source_writable":!a.kubernetes_owned,
         "decision_queries":a.queries.load(Ordering::Relaxed),
+        "tls":pumgye_server::tls_reload::registry().statuses(),
+        "tls_reload_failing":pumgye_server::tls_reload::registry().failing(),
         "simulation_queries":a.simulation_budget.simulations.load(Ordering::Relaxed),"cache_ttl_ms":0
     }))
 }
@@ -1088,8 +1094,20 @@ async fn main() -> anyhow::Result<()> {
         (&args.tls_cert, &args.tls_key, &args.client_ca)
     {
         (
-            Some(transport::tls_config(cert, key, ca, &[b"h2", b"http/1.1"])?),
-            Some(transport::tls_config(cert, key, ca, &[b"ppg1"])?),
+            Some(pumgye_server::tls_reload::server(
+                "http listener",
+                cert,
+                key,
+                ca,
+                &[b"h2", b"http/1.1"],
+            )?),
+            Some(pumgye_server::tls_reload::server(
+                "ppg1 listener",
+                cert,
+                key,
+                ca,
+                &[b"ppg1"],
+            )?),
         )
     } else {
         (None, None)
@@ -1413,6 +1431,9 @@ async fn main() -> anyhow::Result<()> {
         model_v2::restore(&authority, &store)?;
     }
     tokio::spawn(model_v2::run_background(authority.clone()));
+    tokio::spawn(pumgye_server::tls_reload::run(
+        std::time::Duration::from_secs(args.tls_reload_interval_secs),
+    ));
     let health = authority.clone();
     let router = Router::new()
         .route(

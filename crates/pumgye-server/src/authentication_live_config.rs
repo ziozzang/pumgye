@@ -83,18 +83,14 @@ pub async fn load(
         return Err(Refused);
     }
     let token = Zeroizing::new(resolve(&config.token_env).ok_or(Refused)?);
-    let ca = read(&config.ca, 128 * 1024)?;
-    let certificate = read(&config.certificate, 128 * 1024)?;
-    let key = read(&config.key, 128 * 1024)?;
-    let client = Client::connect(
-        &config.address,
-        &config.server_name,
-        &ca,
-        &certificate,
-        &key,
-        &token,
+    let tls = crate::authority_transport::file_tls(
+        "authentication_live client",
+        &config.ca,
+        &config.certificate,
+        &config.key,
     )
-    .await?;
+    .map_err(|_| Refused)?;
+    let client = Client::connect_tls(&config.address, &config.server_name, tls, &token).await?;
     Ok(Configured {
         issuer: config.issuer_ref,
         client,

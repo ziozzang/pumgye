@@ -95,7 +95,7 @@ impl Server {
         };
         let mut tls = tokio::time::timeout(
             Duration::from_secs(3),
-            tokio_rustls::TlsAcceptor::from(self.config.tls.clone()).accept(gate),
+            tokio_rustls::TlsAcceptor::from(self.config.tls.current()).accept(gate),
         )
         .await
         .map_err(|_| io_error())??;

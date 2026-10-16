@@ -52,8 +52,19 @@ impl Client {
         key: &[u8],
         token: &str,
     ) -> Result<Self, Refused> {
+        let tls =
+            crate::authority_transport::static_tls(ca, certificate, key).map_err(|_| Refused)?;
+        Self::connect_tls(address, server_name, tls, token).await
+    }
+    /// As [`Self::connect`] with reloading TLS material (rotated files apply on reconnect).
+    pub async fn connect_tls(
+        address: &str,
+        server_name: &str,
+        tls: std::sync::Arc<crate::tls_reload::Reloading<rustls::ClientConfig>>,
+        token: &str,
+    ) -> Result<Self, Refused> {
         let (channel, credential) =
-            crate::authority_transport::connect(address, server_name, ca, certificate, key, token)
+            crate::authority_transport::connect(address, server_name, tls, token)
                 .await
                 .map_err(|_| Refused)?;
         Ok(Self {
