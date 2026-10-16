@@ -109,3 +109,20 @@ Clippy·실제 네 서버 native/gRPC 영속 요청 체인이 통과했습니다
 권한 발행은 아닙니다. 자원 gRPC·한강 UI/집행·서명 기반 자격 전달은 남아 있습니다.
 
 미릴리스 자원 endpoint는 `service_id`가 필수이며 다른 서비스의 자원을 거부합니다. 서비스 범위는 신뢰한 집행 문맥에서 얻으며 애플리케이션 주장을 사용하지 않습니다.
+
+## 관리자 설명 API (미릴리스)
+
+`POST /v1/explain`·`POST /v1/explain/batch`·`POST /v1/explain/diff`·
+`GET /v1/audit/simulations`는 관리자 자격이 필요하며(판정 자격 거부) 관리 수용 게이트를
+공유합니다. 집행 평가 함수를 추적 sink로 실행해 게시 스냅샷 또는 저장하지 않는 후보를
+평가하고, 등록된 `pumgye.*` 사유 코드와 en/ko 메시지 키가 있는 순서형 단계 추적을
+반환하며, 모든 호출을 읽기 전용 `simulation`으로 감사합니다. [설명 API 계약](EXPLAIN.ko.md)을
+참조하세요.
+
+## 정책 모델 버전 2 (미릴리스)
+
+`/v2/policy`, `/v2/status`, `/v2/explain*`, `/v2/candidates/diff`, `/v2/migration/preview`,
+`/v2/shadow*`, `/v2/cutover`, `/v2/rollback`, `/v2/model/history`는 관리자 자격이 필요합니다.
+버전 1·2 게시는 하나의 리비전 순서와 하나의 감사(`document: v1|v2`)를 공유하므로 v1
+`PUT /v1/policy`도 다음 전역 리비전을 발급합니다. 승인된 컷오버 전까지 판정은 v1이 합니다.
+[MODEL_V2.ko.md](MODEL_V2.ko.md)를 참조하세요.

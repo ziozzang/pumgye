@@ -128,7 +128,8 @@ impl Trust {
             .and_then(|a| a.get(&c.audience))
             .ok_or(Refused)?;
         if identity.kind != 1
-            || !matches!(identity.aal, 1 | 2)
+            // Hopae seals the presented level; AAL3 only for opted-in applications.
+            || !(1..=3).contains(&identity.aal)
             || issuer.key_epoch != c.key_epoch
             || epoch.authority != issuer.identity_epoch
             || epoch.source_scope_revision < scope.minimum_revision()
@@ -537,11 +538,15 @@ mod human_tests {
             bad.identity.as_mut().unwrap().kind = kind;
             assert!(trust.human_observed_scope(&bad).is_err());
         }
-        for aal in [0, 3, u32::MAX] {
+        for aal in [0, 4, u32::MAX] {
             let mut bad = base.clone();
             bad.identity.as_mut().unwrap().aal = aal;
             assert!(trust.human_observed_scope(&bad).is_err());
         }
+        // Hopae seals AAL3 for opted-in applications (ADR-0018 decision 11).
+        let mut high = base.clone();
+        high.identity.as_mut().unwrap().aal = 3;
+        trust.human_observed_scope(&high).unwrap();
         let mut bad = base;
         bad.identity_authority_epoch =
             hopae_grpc::human_epoch::encode("owned", 6, 1, "123456789abcdef0123456789abcdef0")

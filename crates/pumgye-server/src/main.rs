@@ -1,10 +1,12 @@
 //! Standalone Pumgye control/decision authority.
 mod authenticated_resource;
+mod explain_api;
 mod grpc;
 mod kubernetes;
 mod kubernetes_api;
 mod kubernetes_authority;
 mod kubernetes_mapping;
+mod model_v2;
 mod sar;
 mod store;
 mod transport;
@@ -133,6 +135,22 @@ struct Args {
     projection_live: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
+    /// Age bound for read-only simulation audit rows (also capped at 100,000 rows).
+    #[arg(long, default_value_t = explain_api::DEFAULT_RETENTION_DAYS, value_parser = clap::value_parser!(u64).range(1..=3650))]
+    simulation_audit_retention_days: u64,
+    /// Hopae admin owner (membership projection and subject lifecycle) for policy model v2.
+    #[arg(long, conflicts_with_all = ["inspect_kubernetes_rbac", "observe_kubernetes_rbac"])]
+    hopae_owner: Option<PathBuf>,
+    /// Require reasons on permanent v2 allow bindings (ADR 0021 production mode).
+    #[arg(long)]
+    v2_production: bool,
+    /// Print a deterministic v1→v2 conversion of a policy file (`{revision, policy}`
+    /// or a bare policy) with its report, then exit without opening the database.
+    #[arg(long, exclusive = true)]
+    migrate_v1_to_v2: Option<PathBuf>,
+    /// Shadow observation window before a v2 cutover may be approved.
+    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u64).range(1..=90))]
+    shadow_window_days: u64,
     #[arg(long, default_value = "PUMGYE_DECISION_TOKEN")]
     decision_token_env: String,
 }
@@ -207,6 +225,8 @@ struct Authority {
     publications: Arc<tokio::sync::Semaphore>,
     requests: Arc<tokio::sync::Semaphore>,
     management: Arc<tokio::sync::Semaphore>,
+    simulation_budget: explain_api::Budget,
+    v2: model_v2::Runtime,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -321,7 +341,7 @@ impl Authority {
                 && Arc::ptr_eq(&view, &self.view.load_full())
                 && self.source_remaining(&view).is_some()
         };
-        if !active() || view.document.revision < q.minimum_revision {
+        if !active() {
             return None;
         }
         let decision = view.compiled.evaluate_scoped_human_resource(
@@ -333,11 +353,18 @@ impl Authority {
             q.aal,
             q.guard,
         );
+        let (revision, decision, authoritative_v2) = self.select_resource(
+            q,
+            pumgye_core::v2::PrincipalKind::Human,
+            view.document.revision,
+            Some(decision),
+        );
         self.queries.fetch_add(1, Ordering::Relaxed);
-        if !active() {
+        if !active() || !self.v2_current(authoritative_v2.as_ref()) || revision < q.minimum_revision
+        {
             return None;
         }
-        Some((view.document.revision, decision))
+        Some((revision, decision?))
     }
     /// Signer output remains private until the exact allowing catalog is still
     /// current. The callback receives owner metadata, never caller classification.
@@ -360,7 +387,7 @@ impl Authority {
         let view = self.view.load();
         let active =
             || self.healthy.load(Ordering::Acquire) && self.source_remaining(&view).is_some();
-        if !active() || view.document.revision < q.minimum_revision {
+        if !active() {
             return Err(None);
         }
         let decision = if workload {
@@ -383,19 +410,93 @@ impl Authority {
                 q.guard,
             )
         };
+        let kind = if workload {
+            pumgye_core::v2::PrincipalKind::Workload
+        } else {
+            model_v2::kind_of(q.subject)
+        };
+        let (revision, decision, authoritative_v2) =
+            self.select_resource(q, kind, view.document.revision, Some(decision));
         self.queries.fetch_add(1, Ordering::Relaxed);
-        if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
+        let current = || {
+            active()
+                && Arc::ptr_eq(&view, &self.view.load())
+                && self.v2_current(authoritative_v2.as_ref())
+        };
+        if !current() || revision < q.minimum_revision {
             return Err(None);
         }
+        let Some(decision) = decision else {
+            return Err(None);
+        };
         if decision != pumgye_core::ResourceDecision::Decided(pumgye_core::Decision::Allow) {
-            return Err(Some((view.document.revision, decision)));
+            return Err(Some((revision, decision)));
         }
-        let metadata = view.compiled.resource_metadata(q.resource).ok_or(None)?;
-        let output = operation(view.document.revision, metadata);
-        if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
+        let metadata = match &authoritative_v2 {
+            Some(model) => model.resources_v1.get(q.resource),
+            None => view.compiled.resource_metadata(q.resource),
+        }
+        .ok_or(None)?;
+        let output = operation(revision, metadata);
+        if !current() {
             return Err(None);
         }
         Ok(output)
+    }
+    /// Shadow-compare a catalog decision with version 2 and select the
+    /// authoritative model's result and revision.
+    #[allow(clippy::type_complexity)]
+    fn select_resource(
+        &self,
+        q: &ResourceEvaluation<'_>,
+        kind: pumgye_core::v2::PrincipalKind,
+        v1_revision: u64,
+        v1: Option<pumgye_core::ResourceDecision>,
+    ) -> (
+        u64,
+        Option<pumgye_core::ResourceDecision>,
+        Option<Arc<model_v2::V2View>>,
+    ) {
+        let Some(model) = self.v2.view.load_full() else {
+            return (v1_revision, v1, None);
+        };
+        let now = model_v2::now_unix();
+        let request = pumgye_core::v2::RequestV2 {
+            service: q.service_id,
+            kind,
+            subject: q.subject,
+            target: pumgye_core::v2::TargetV2::Resource {
+                resource: q.resource,
+                action: q.action,
+            },
+            ip: q.ip,
+            aal: q.aal,
+            guard: q.guard,
+            now,
+        };
+        let d2 = self.v2.decide(&model, &request);
+        self.v2.shadow.record(q.service_id, q.subject, v1, d2, now);
+        if self.v2.v2_authoritative() {
+            let revision = model.document.revision;
+            (
+                revision,
+                d2.map(pumgye_core::v2::DecisionV2::to_v1),
+                Some(model),
+            )
+        } else {
+            (v1_revision, v1, None)
+        }
+    }
+    fn v2_current(&self, authoritative: Option<&Arc<model_v2::V2View>>) -> bool {
+        authoritative.is_none_or(|m| {
+            self.v2.v2_authoritative()
+                && self
+                    .v2
+                    .view
+                    .load()
+                    .as_ref()
+                    .is_some_and(|now| Arc::ptr_eq(m, now))
+        })
     }
     fn source_remaining(&self, view: &View) -> Option<std::time::Duration> {
         if !self.kubernetes_owned {
@@ -427,12 +528,12 @@ impl Authority {
         operation: impl FnOnce(u64) -> T,
     ) -> Result<T, pumgye_protocol::Reply> {
         let view = self.view.load();
+        let v2 = self.v2.view.load_full();
         let active =
             || self.healthy.load(Ordering::Acquire) && self.source_remaining(&view).is_some();
-        let decision = if !active() || view.document.revision < q.minimum_revision {
-            None
-        } else {
-            Some(view.compiled.evaluate(
+        let live = active();
+        let v1 = live.then(|| {
+            view.compiled.evaluate(
                 q.service_id,
                 q.subject,
                 q.ip,
@@ -440,22 +541,78 @@ impl Authority {
                 q.information_class,
                 q.aal,
                 q.guard,
-            ))
+            )
+        });
+        let (revision, mut decision, authoritative_v2) = match &v2 {
+            None => (view.document.revision, v1, None),
+            Some(model) => {
+                let now = model_v2::now_unix();
+                let request = pumgye_core::v2::RequestV2 {
+                    service: q.service_id,
+                    kind: model_v2::kind_of(q.subject),
+                    subject: q.subject,
+                    target: pumgye_core::v2::TargetV2::Permission {
+                        permission: q.permission,
+                        level: q.information_class,
+                    },
+                    ip: q.ip,
+                    aal: q.aal,
+                    guard: q.guard,
+                    now,
+                };
+                let d2 = if live {
+                    self.v2.decide(model, &request)
+                } else {
+                    None
+                };
+                self.v2.shadow.record(
+                    q.service_id,
+                    q.subject,
+                    v1.map(pumgye_core::ResourceDecision::Decided),
+                    d2,
+                    now,
+                );
+                if self.v2.v2_authoritative() {
+                    let d = d2.map(|d| match d.to_v1() {
+                        pumgye_core::ResourceDecision::Decided(d) => d,
+                        _ => pumgye_core::Decision::PermissionDenied,
+                    });
+                    (model.document.revision, d, Some(model.clone()))
+                } else {
+                    (view.document.revision, v1, None)
+                }
+            }
         };
+        if revision < q.minimum_revision {
+            decision = None;
+        }
         self.queries.fetch_add(1, Ordering::Relaxed);
         let refusal = |decision| pumgye_protocol::Reply {
             request_id: q.request_id,
-            revision: view.document.revision,
+            revision,
             decision,
         };
         if decision != Some(pumgye_core::Decision::Allow) {
             return Err(refusal(decision));
         }
-        if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
+        let current = || {
+            active()
+                && Arc::ptr_eq(&view, &self.view.load())
+                && authoritative_v2.as_ref().is_none_or(|m| {
+                    self.v2.v2_authoritative()
+                        && self
+                            .v2
+                            .view
+                            .load()
+                            .as_ref()
+                            .is_some_and(|now| Arc::ptr_eq(m, now))
+                })
+        };
+        if !current() {
             return Err(refusal(None));
         }
-        let output = operation(view.document.revision);
-        if !active() || !Arc::ptr_eq(&view, &self.view.load()) {
+        let output = operation(revision);
+        if !current() {
             return Err(refusal(None));
         }
         Ok(output)
@@ -467,8 +624,12 @@ async fn request_gate(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    let expected = match request.uri().path() {
-        "/v1/policy" | "/v1/status" | "/v1/audit" => Some(&a.admin),
+    let path = request.uri().path();
+    let administrative = matches!(path, "/v1/policy" | "/v1/status" | "/v1/audit")
+        || explain_api::ADMIN_PATHS.contains(&path)
+        || path.starts_with("/v2/");
+    let expected = match path {
+        _ if administrative => Some(&a.admin),
         "/v1/decision" | "/v1/resource/decision" => Some(&a.decision),
         _ => None,
     };
@@ -478,10 +639,7 @@ async fn request_gate(
     let Ok(_request) = a.requests.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let _management = if matches!(
-        request.uri().path(),
-        "/v1/policy" | "/v1/status" | "/v1/audit"
-    ) {
+    let _management = if administrative {
         match a.management.clone().try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -558,7 +716,12 @@ async fn publish(
         if a.view.load().document.revision != expected {
             return Err(StatusCode::CONFLICT);
         }
-        next.revision = expected
+        // One revision sequence across document versions (version 2 publications
+        // advance it too), so client revision floors stay monotonic at cutover.
+        next.revision = store
+            .global_revision()
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            .max(expected)
             .checked_add(1)
             .filter(|v| *v <= i64::MAX as u64)
             .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
@@ -571,6 +734,9 @@ async fn publish(
             compiled,
             source_lifetime: None,
         }));
+        let v2 = a.v2.view.load().as_ref().map_or(0, |v| v.document.revision);
+        a.v2.shadow
+            .ensure_window(next.revision, v2, model_v2::now_unix());
         Ok(Json(next))
     })
     .await
@@ -649,7 +815,8 @@ async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
         "authentication_trust_entries":a.authentication_trust.as_ref().map_or(0, |trust| trust.entries()),
         "source_lease_remaining_ms":if a.kubernetes_owned {Some(remaining.unwrap_or(0))} else {None},
         "source_writable":!a.kubernetes_owned,
-        "decision_queries":a.queries.load(Ordering::Relaxed),"cache_ttl_ms":0
+        "decision_queries":a.queries.load(Ordering::Relaxed),
+        "simulation_queries":a.simulation_budget.simulations.load(Ordering::Relaxed),"cache_ttl_ms":0
     }))
 }
 
@@ -761,6 +928,36 @@ fn resource_route() -> axum::routing::MethodRouter<Arc<Authority>> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(path) = &args.migrate_v1_to_v2 {
+        // Offline, deterministic conversion: no database, credentials or listeners.
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(store::MAX_POLICY_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() <= store::MAX_POLICY_BYTES,
+            "policy exceeds bound"
+        );
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        let policy: Policy = serde_json::from_value(value.get("policy").cloned().unwrap_or(value))?;
+        let mapping = std::collections::BTreeMap::new();
+        let conversion = pumgye_core::v2::convert::convert(
+            &policy,
+            &pumgye_core::v2::convert::ConvertOptions {
+                classify: &pumgye_core::v2::convert::classify_by_prefix,
+                workload_mapping: &mapping,
+            },
+        )?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "document": {"revision": 0, "policy": conversion.document},
+                "report": conversion.report
+            }))?
+        );
+        return Ok(());
+    }
     args.validate_native_owners()?;
     let sar_configuration = args
         .kubernetes_authorization_config
@@ -1028,6 +1225,15 @@ async fn main() -> anyhow::Result<()> {
             .map_or(&[], |trust| trust.revision_floors()),
     )?;
     let compiled = document.policy.compile()?;
+    let hopae_owner = args
+        .hopae_owner
+        .as_deref()
+        .map(|path| {
+            pumgye_server::hopae_owner::Client::load(path, &|name| std::env::var(name).ok())
+                .map_err(|_| anyhow::anyhow!("Hopae owner resources unavailable"))
+        })
+        .transpose()?
+        .map(Arc::new);
     let mut epoch = [0u8; 32];
     getrandom::fill(&mut epoch).map_err(|_| anyhow::anyhow!("authority epoch unavailable"))?;
     let authority_epoch =
@@ -1068,6 +1274,14 @@ async fn main() -> anyhow::Result<()> {
         publications: Arc::new(tokio::sync::Semaphore::new(4)),
         requests: Arc::new(tokio::sync::Semaphore::new(4096)),
         management: Arc::new(tokio::sync::Semaphore::new(4)),
+        simulation_budget: explain_api::Budget::with_retention_days(
+            args.simulation_audit_retention_days,
+        ),
+        v2: model_v2::Runtime::new(
+            hopae_owner,
+            args.v2_production,
+            args.shadow_window_days * 86_400,
+        ),
     });
     #[cfg(feature = "observed-authentication")]
     if args.observed_permits {
@@ -1191,6 +1405,14 @@ async fn main() -> anyhow::Result<()> {
             args.kubernetes_token.unwrap(),
         ));
     }
+    {
+        let store = authority
+            .store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("store unavailable"))?;
+        model_v2::restore(&authority, &store)?;
+    }
+    tokio::spawn(model_v2::run_background(authority.clone()));
     let health = authority.clone();
     let router = Router::new()
         .route(
@@ -1218,6 +1440,8 @@ async fn main() -> anyhow::Result<()> {
             "/v1/decision",
             post(decide).layer(axum::extract::DefaultBodyLimit::max(2048)),
         )
+        .merge(explain_api::routes())
+        .merge(model_v2::routes())
         .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024))
         .layer(axum::middleware::from_fn_with_state(
             authority.clone(),
@@ -1697,6 +1921,8 @@ mod tests {
             publications: Arc::new(tokio::sync::Semaphore::new(4)),
             requests: Arc::new(tokio::sync::Semaphore::new(4096)),
             management: Arc::new(tokio::sync::Semaphore::new(4)),
+            simulation_budget: Default::default(),
+            v2: model_v2::Runtime::new(None, false, 7 * 86_400),
         })
     }
     pub(super) fn headers() -> HeaderMap {

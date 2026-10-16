@@ -189,3 +189,89 @@ fn all_maps_share_assignment_capacity_and_network_assurance() {
     assert_eq!(eval(&p, H, 1), R::Decided(D::AssuranceDenied));
     assert_eq!(eval(&p, H, 2), R::Decided(D::Allow));
 }
+
+/// AAL3 is accepted only from Hopae-sealed evidence (Hopae ADR-0018 decision 11).
+#[test]
+fn aal3_requires_sealed_evidence() {
+    use pumgye_core::{Decision as D, GuardEvidence as G, ResourceDecision as R, SealedAssurance};
+    let subject = "human1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let p: pumgye_core::Policy = serde_json::from_value(serde_json::json!({
+     "version":1,"information_classes":["restricted"],
+     "services":{"vault":{"permissions":["read"],"require_guard":true,
+       "roles":{"keeper":{"permissions":["read"],"information_classes":["restricted"],"minimum_aal":3}},
+       "users":{},"human_users":{subject:["keeper"]},"networks":[{"cidr":"192.0.2.0/24","roles":["keeper"]}]}},
+     "resources":{"vault:secret":{"service":"vault","information_class":"restricted","actions":{"get":"read"},"minimum_aal":3}}}))
+    .unwrap();
+    let c = p.compile().unwrap();
+    let ip = "192.0.2.1".parse().unwrap();
+    let asserted = |aal| {
+        c.evaluate_scoped_human_resource(
+            "vault",
+            "vault:secret",
+            "get",
+            subject,
+            ip,
+            aal,
+            G::EnforcedAllow,
+        )
+    };
+    let sealed = |aal| {
+        c.evaluate_scoped_human_sealed_resource(
+            "vault",
+            "vault:secret",
+            "get",
+            subject,
+            ip,
+            SealedAssurance::from_verified_receipt(aal).unwrap(),
+            G::EnforcedAllow,
+        )
+    };
+    assert_eq!(
+        asserted(3),
+        R::Decided(D::AssuranceDenied),
+        "an adapter cannot assert AAL3"
+    );
+    assert_eq!(asserted(2), R::Decided(D::AssuranceDenied));
+    assert_eq!(
+        sealed(2),
+        R::Decided(D::AssuranceDenied),
+        "AAL2 does not meet a level-3 requirement"
+    );
+    assert_eq!(sealed(3), R::Decided(D::Allow));
+    assert!(
+        SealedAssurance::from_verified_receipt(0).is_none()
+            && SealedAssurance::from_verified_receipt(4).is_none()
+    );
+    // Explain: an adapter-asserted 3 is refused at the principal stage, sealed 3 allows.
+    let explain = |evidence: &str| {
+        let case: pumgye_core::explain::Case = serde_json::from_value(serde_json::json!({"subject":{"id":subject,"kind":"human"},"service":"vault",
+            "resource":"vault:secret","action":"get","ip":"192.0.2.1","aal":3,"guard":"enforced_allow","assurance_evidence":evidence})).unwrap();
+        pumgye_core::explain::explain(
+            pumgye_core::explain::Snapshot {
+                policy: &p,
+                compiled: &c,
+                revision: 1,
+                serving: true,
+            },
+            &case,
+            true,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        explain("asserted").outcome.detail_code,
+        "pumgye.detail.principal_assurance_invalid"
+    );
+    let e = explain("sealed");
+    assert!(e.outcome.allow);
+    let v = serde_json::to_value(&e).unwrap();
+    let last = v["trace"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|s| s["stage"] == "assurance")
+        .unwrap()
+        .clone();
+    assert_eq!(last["detail"]["presented"], 3);
+    assert_eq!(last["detail"]["required"], 3);
+}

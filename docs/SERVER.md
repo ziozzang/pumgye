@@ -122,3 +122,22 @@ unsigned decision API, not authentication-receipt verification or permission
 issuance; resource gRPC, Hangang UI/dispatch and signed projection remain open.
 
 The unreleased resource endpoint requires `service_id` and rejects a resource owned by another service. Service scope comes from trusted enforcement context, never an application claim.
+
+## Administrative explain API (unreleased)
+
+`POST /v1/explain`, `POST /v1/explain/batch`, `POST /v1/explain/diff` and
+`GET /v1/audit/simulations` require the administrator credential (the decision
+credential is refused) and share management admission. They run the enforcement
+evaluator with a trace sink against the published snapshot or an unpublished
+candidate (never stored), return an ordered stage trace with registered
+`pumgye.*` reason codes and en/ko message keys, and audit every call as a
+read-only `simulation`. See [the explain contract](EXPLAIN.md).
+
+## Policy model version 2 (unreleased)
+
+`/v2/policy`, `/v2/status`, `/v2/explain*`, `/v2/candidates/diff`,
+`/v2/migration/preview`, `/v2/shadow*`, `/v2/cutover`, `/v2/rollback` and
+`/v2/model/history` require the administrator credential. Version 1 and version 2
+publications share one revision sequence and one audit (`document: v1|v2`); the v1
+`PUT /v1/policy` therefore issues the next global revision. Decisions stay on v1 until
+an approved cutover. See [MODEL_V2.md](MODEL_V2.md).
