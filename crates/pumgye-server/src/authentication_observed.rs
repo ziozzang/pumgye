@@ -27,7 +27,8 @@ pub struct AuthenticationOwnerGeneration {
 /// Native startup policy and fixed owner routing, never incoming request data.
 pub struct Configuration<'a> {
     pub issuer_ref: &'a str,
-    pub endpoint: observed_client::EndpointConfig<'a>,
+    /// Fixed PEM (`EndpointConfig`) or reloadable TLS (`ReloadableEndpointConfig`).
+    pub endpoint: observed_client::ClientEndpoint<'a>,
     pub minimum_application_generation: u64,
     pub minimum_key_registry_revision: u64,
 }

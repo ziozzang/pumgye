@@ -141,3 +141,130 @@ read-only `simulation`. See [the explain contract](EXPLAIN.md).
 publications share one revision sequence and one audit (`document: v1|v2`); the v1
 `PUT /v1/policy` therefore issues the next global revision. Decisions stay on v1 until
 an approved cutover. See [MODEL_V2.md](MODEL_V2.md).
+
+## TLS certificate rotation (unreleased)
+
+Pumgye reloads mTLS material without a restart, so it keeps up with cert-manager
+renewals. Every `--tls-reload-interval-secs` seconds (default 10, range 1–3600)
+it reads the certificate, key and CA files of each TLS user and compares a
+SHA-256 digest of their contents. It does not use inotify, because host inotify
+watches are scarce. When the contents change, it builds a new rustls
+configuration and swaps it in atomically.
+
+Reloaded:
+
+- Listeners: HTTP (`http listener`), PPG1 (`ppg1 listener`), gRPC
+  (`grpc listener`) and SAR (`sar listener`). New handshakes use the new
+  certificate and CA. Established connections keep the configuration they were
+  accepted with until they close. gRPC TLS is terminated by Pumgye's own
+  acceptor, not by tonic, so that it can be swapped.
+- Outbound mTLS clients:
+  - Sumunjang/Hopae live clients: `route_live`, `projection_live`,
+    `network_live` and `authentication_live`. They use a reloading tonic
+    connector, so new HTTP/2 connections use the current client certificate and
+    CA, and existing channels keep their connection.
+  - The Hopae owner client (`hopae_owner client`). Its HTTP client is rebuilt
+    from the new material.
+
+When new material is invalid (unparsable PEM, or a key that doesn't match the
+certificate), the previous configuration stays in service. The
+listener or client then reports `failing: true` and `last_error`, and
+`GET /v1/status` sets `tls_reload_failing: true`. Alert on that field. Pumgye
+logs each rejected file content once and doesn't retry it until the files
+change again. Reverting to the served material also clears the alert. If files
+can't be read briefly, for example during a non-atomic write, Pumgye keeps
+serving and checks again on the next poll.
+
+`GET /v1/status` includes `tls`, a list with one entry per listener or client:
+`name`, `leaf.serial` (hex), `leaf.sha256` (DER fingerprint), `loaded_at`,
+`reloads`, `failures`, `failing` and `last_error`. Pumgye logs each change to
+stderr as a JSON line:
+
+```json
+{"event":"tls_reloaded","name":"grpc listener","serial":"1002","sha256":"…"}
+{"event":"tls_reload_refused","name":"grpc listener","error":"…","serving_serial":"1001"}
+```
+
+The Kubernetes API source (`--kubernetes-ca`, `--kubernetes-token`) reads its CA
+and token files again on every relist, so it does not use the poller. When the
+content of either file changes, Pumgye builds a new HTTP client and stops using
+the old trust pool. A CA that doesn't match the server's certificate fails
+closed: the source observation expires, and the next relist with valid material
+recovers it. The `pumgye_kubernetes_credential_reloads_total` metric counts
+these changes.
+
+The `observed-*` owners (observed authentication, workload and Human) also
+reload (`authentication_observed client`, `workload_observed client`,
+`human_observed client`). They pass the Hopae SDK a reloadable TLS source
+(`hopae-grpc` `ReloadableEndpointConfig`), and the SDK reads the current client
+configuration for every new connection.
+
+The `hopae-grpc` dependency is pinned to `1c23931`, the head of
+ziozzang/hopae#17 (`integrate/identity-platform-grpc-reload`, which folds #15
+into the identity platform integration). That pin must move to the merged
+`integrate/identity-platform` revision once #17 is merged.
+
+Limitation: the longest delay before new material is used is one polling
+interval.
+
+## Prometheus metrics (unreleased)
+
+`GET /metrics` serves the Prometheus text format (`text/plain; version=0.0.4`).
+It is on the main HTTPS management listener, so a scrape needs the listener's
+mTLS client certificate and a bearer credential:
+
+- the administrator credential, or
+- a dedicated read-only scrape credential, read from the environment variable
+  named by `--metrics-token-env` (default `PUMGYE_METRICS_TOKEN`). It must be
+  16–4096 visible ASCII characters and differ from the administrator and decision
+  credentials. It opens only `/metrics`.
+
+The plaintext readiness listener does not serve metrics. A Prometheus Operator
+`ServiceMonitor` endpoint looks like this:
+
+```yaml
+endpoints:
+  - port: management   # 9084, the HTTPS management listener
+    scheme: https
+    path: /metrics
+    bearerTokenSecret: {name: pumgye-metrics, key: token}
+    tlsConfig:
+      ca: {secret: {name: pumgye-tls, key: ca.crt}}
+      cert: {secret: {name: pumgye-scrape-client, key: tls.crt}}
+      keySecret: {name: pumgye-scrape-client, key: tls.key}
+      serverName: pumgye.pumgye.svc
+```
+
+Recording on the decision path is a few relaxed atomic increments. It doesn't
+allocate (`tests/metrics_no_alloc.rs`) and doesn't take locks. No label carries a
+subject, IP address, service or resource, so the number of series is fixed. The
+only exception is the TLS `name` label, whose values are the fixed listener and
+client names.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `pumgye_decisions_total` | counter | `context` (`permission`, `resource`, `workload_resource`, `human_resource`), `outcome` (`allow`, `deny`, `unavailable`), `reason` (decision reason code, `unknown_resource`, `unknown_action`, `unavailable`) |
+| `pumgye_request_duration_seconds` | histogram | `transport` (`http`, `ppg1`, `grpc`, `sar`) |
+| `pumgye_policy_revision` | gauge | `model` (`v1`, `v2`) |
+| `pumgye_policy_v2_authoritative`, `pumgye_available` | gauge | — |
+| `pumgye_policy_publications_total` | counter | `model`, `outcome` (`applied`, `conflict` = If-Match CAS conflict, `rejected`) |
+| `pumgye_shadow_decisions_total`, `pumgye_shadow_reason_drift_total` | counter | — |
+| `pumgye_shadow_mismatches_total` | counter | `explained` (`true`, `false`) |
+| `pumgye_shadow_window_start_timestamp_seconds` | gauge | — |
+| `pumgye_hopae_last_success_timestamp_seconds`, `pumgye_hopae_staleness_seconds` | gauge | `feed` (`projection`, `lifecycle`); staleness is `-1` before the first sync |
+| `pumgye_hopae_sync_failures_total`, `pumgye_hopae_cursor_expired_total` | counter | `feed` |
+| `pumgye_simulation_audit_rows` | gauge | — (retained rows) |
+| `pumgye_simulation_audit_rows_appended_total` | counter | — |
+| `pumgye_observed_permits_total` | counter | `kind` (`service`, `workload`, `human`), `outcome` (`issued`, `permission_denied`, `unavailable`, `invalid_argument`, `unauthenticated`, `other`) |
+| `pumgye_tls_reloads_total`, `pumgye_tls_reload_failures_total` | counter | `name` |
+| `pumgye_tls_reload_failing` | gauge | `name` |
+| `pumgye_tls_leaf_expiry_seconds` | gauge | `name` (seconds until `notAfter`; negative once expired) |
+| `pumgye_kubernetes_credential_reloads_total` | counter | — |
+
+Suggested alerts:
+
+- `pumgye_tls_reload_failing == 1`
+- `pumgye_tls_leaf_expiry_seconds < 7 * 86400`
+- `pumgye_hopae_staleness_seconds` above the projection's `max_staleness_secs`
+- an increase in `pumgye_shadow_mismatches_total{explained="false"}`
+- `pumgye_available == 0`

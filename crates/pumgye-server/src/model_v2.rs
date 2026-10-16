@@ -28,6 +28,7 @@ use pumgye_core::{
     },
 };
 use pumgye_server::hopae_owner;
+use pumgye_server::metrics::{Feed, METRICS};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -204,6 +205,65 @@ impl Default for Shadow {
     }
 }
 impl Shadow {
+    /// Prometheus samples for the shadow comparison window.
+    pub(crate) fn render_metrics(&self, out: &mut String) {
+        use pumgye_server::metrics::{header, sample};
+        let load = |v: &AtomicU64| v.load(Ordering::Relaxed);
+        header(
+            out,
+            "pumgye_shadow_decisions_total",
+            "counter",
+            "Decisions compared between policy model v1 and v2 in the current shadow window.",
+        );
+        sample(
+            out,
+            "pumgye_shadow_decisions_total",
+            "",
+            load(&self.decisions),
+        );
+        header(
+            out,
+            "pumgye_shadow_mismatches_total",
+            "counter",
+            "Allow/deny mismatches between v1 and v2 by whether a rule explains them.",
+        );
+        sample(
+            out,
+            "pumgye_shadow_mismatches_total",
+            "explained=\"true\"",
+            load(&self.explained),
+        );
+        sample(
+            out,
+            "pumgye_shadow_mismatches_total",
+            "explained=\"false\"",
+            load(&self.unexplained),
+        );
+        header(
+            out,
+            "pumgye_shadow_reason_drift_total",
+            "counter",
+            "Same allow/deny outcome with a different reason code.",
+        );
+        sample(
+            out,
+            "pumgye_shadow_reason_drift_total",
+            "",
+            load(&self.drift),
+        );
+        header(
+            out,
+            "pumgye_shadow_window_start_timestamp_seconds",
+            "gauge",
+            "Unix start of the shadow comparison window (0 = none).",
+        );
+        sample(
+            out,
+            "pumgye_shadow_window_start_timestamp_seconds",
+            "",
+            load(&self.started_unix),
+        );
+    }
     /// Allocation-free comparison of the two models' decisions for one request.
     #[inline]
     pub(crate) fn record(
@@ -659,13 +719,21 @@ async fn refresh_owners(
         let result = match current {
             Some(mut state) if !full => match client.lifecycle_follow(&mut state).await {
                 Err(hopae_owner::Refusal::CursorExpired) => {
+                    METRICS.hopae_cursor_expired(Feed::Lifecycle);
                     client.lifecycle_snapshot(seed.clone()).await
                 }
                 r => r.map(|_| state),
             },
             _ => client.lifecycle_snapshot(seed.clone()).await,
         };
+        if matches!(result, Err(hopae_owner::Refusal::CursorExpired)) {
+            METRICS.hopae_cursor_expired(Feed::Lifecycle);
+        }
+        if result.is_err() {
+            METRICS.hopae_failure(Feed::Lifecycle);
+        }
         if let Ok(state) = result {
+            METRICS.hopae_success(Feed::Lifecycle, now);
             if full {
                 *last_reconcile = now;
             }
@@ -704,14 +772,27 @@ async fn refresh_owners(
             let result = match current {
                 Some(mut p) => match client.follow(&mut p).await {
                     Ok(()) => Ok(p),
-                    Err(hopae_owner::Refusal::CursorExpired | hopae_owner::Refusal::Continuity) => {
+                    Err(
+                        e
+                        @ (hopae_owner::Refusal::CursorExpired | hopae_owner::Refusal::Continuity),
+                    ) => {
+                        if matches!(e, hopae_owner::Refusal::CursorExpired) {
+                            METRICS.hopae_cursor_expired(Feed::Projection);
+                        }
                         client.snapshot(&vocabulary).await
                     }
                     Err(e) => Err(e),
                 },
                 None => client.snapshot(&vocabulary).await,
             };
+            if matches!(result, Err(hopae_owner::Refusal::CursorExpired)) {
+                METRICS.hopae_cursor_expired(Feed::Projection);
+            }
+            if result.is_err() {
+                METRICS.hopae_failure(Feed::Projection);
+            }
             if let Ok(p) = result {
+                METRICS.hopae_success(Feed::Projection, now);
                 let aal_changed =
                     a.v2.projection
                         .lock()
@@ -920,7 +1001,12 @@ pub(crate) async fn publish(
     axum::Extension(peer): axum::Extension<PeerIdentity>,
     body: Body,
 ) -> Response {
-    finish(publish_inner(a, headers, peer, body).await)
+    let result = publish_inner(a, headers, peer, body).await;
+    crate::record_publication(
+        pumgye_server::metrics::Model::V2,
+        result.as_ref().err().map(ApiError::status),
+    );
+    finish(result)
 }
 async fn publish_inner(
     a: Arc<Authority>,

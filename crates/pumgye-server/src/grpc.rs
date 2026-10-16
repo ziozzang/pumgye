@@ -1,7 +1,14 @@
 //! Additional decision transport; all policy evaluation stays in Authority.
 use crate::Authority;
 use anyhow::Result;
-pub use hangang_runtime::configuration;
+/// Reloading mTLS configuration of the gRPC listener (ALPN `h2`).
+pub fn configuration(
+    cert: &std::path::Path,
+    key: &std::path::Path,
+    ca: &std::path::Path,
+) -> Result<Arc<pumgye_server::tls_reload::Reloading<rustls::ServerConfig>>> {
+    pumgye_server::tls_reload::server("grpc listener", cert, key, ca, &[b"h2"])
+}
 use hangang_runtime::unary_ingress::UnaryIngress;
 use pumgye_grpc::v1::{
     DecisionReply, DecisionRequest,
@@ -12,7 +19,7 @@ use std::{
     sync::Arc,
 };
 use tokio::net::TcpListener;
-use tonic::{Request, Response, Status, transport::ServerTlsConfig};
+use tonic::{Request, Response, Status};
 
 // A separate process-wide budget: 64 * estimated 64 KiB/request = 4 MiB.
 // See docs/GRPC.md for assumptions; handler admission remains independent.
@@ -641,15 +648,91 @@ impl pumgye_grpc::v1::human_observed_projection_permits_server::HumanObservedPro
             .map(Response::new)
     }
 }
+/// gRPC request latency (`pumgye_request_duration_seconds{transport="grpc"}`);
+/// a stack future, no per-request allocation.
+#[derive(Clone)]
+struct Timed<S>(S);
+#[derive(Clone, Copy)]
+struct TimedLayer;
+impl<S> tower::Layer<S> for TimedLayer {
+    type Service = Timed<S>;
+    fn layer(&self, inner: S) -> Timed<S> {
+        Timed(inner)
+    }
+}
+pin_project_lite::pin_project! {
+    struct TimedFuture<F> {
+        #[pin]
+        inner: F,
+        started: std::time::Instant,
+    }
+}
+impl<F: std::future::Future> std::future::Future for TimedFuture<F> {
+    type Output = F::Output;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let this = self.project();
+        let output = std::task::ready!(this.inner.poll(cx));
+        pumgye_server::metrics::METRICS
+            .observe(pumgye_server::metrics::Transport::Grpc, *this.started);
+        std::task::Poll::Ready(output)
+    }
+}
+impl<S: tower::Service<R>, R> tower::Service<R> for Timed<S> {
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = TimedFuture<S::Future>;
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), S::Error>> {
+        self.0.poll_ready(cx)
+    }
+    fn call(&mut self, request: R) -> Self::Future {
+        TimedFuture {
+            started: std::time::Instant::now(),
+            inner: self.0.call(request),
+        }
+    }
+}
 pub async fn serve(
     listener: TcpListener,
-    tls: ServerTlsConfig,
+    tls: Arc<pumgye_server::tls_reload::Reloading<rustls::ServerConfig>>,
     authority: Arc<Authority>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<()> {
-    let incoming = hangang_runtime::incoming(listener);
+    // TLS is terminated here (not by tonic) so each handshake uses the current,
+    // possibly reloaded configuration; accepted connections keep theirs.
+    let (accepted, incoming) = tokio::sync::mpsc::channel(64);
+    let acceptor = tokio::spawn(async move {
+        use tokio_stream::StreamExt;
+        let mut connections = std::pin::pin!(hangang_runtime::incoming(listener));
+        while let Some(connection) = connections.next().await {
+            let Ok(connection) = connection else {
+                continue;
+            };
+            let tls = tokio_rustls::TlsAcceptor::from(tls.current());
+            let accepted = accepted.clone();
+            tokio::spawn(async move {
+                if let Ok(Ok(stream)) =
+                    tokio::time::timeout(std::time::Duration::from_secs(3), tls.accept(connection))
+                        .await
+                {
+                    let _ = accepted.send(Ok::<_, std::io::Error>(stream)).await;
+                }
+            });
+        }
+    });
+    let incoming = tokio_stream::wrappers::ReceiverStream::new(incoming);
     let ingress = Arc::new(tokio::sync::Semaphore::new(UNARY_INGRESS_SLOTS));
-    let server = hangang_runtime::server(tls)?
+    let server = tonic::transport::Server::builder()
+        .layer(TimedLayer)
+        .concurrency_limit_per_connection(64)
+        .max_concurrent_streams(Some(64))
+        .http2_max_header_list_size(Some(8192))
+        .timeout(std::time::Duration::from_millis(1000))
         .add_service(authenticate_transport(
             UnaryIngress::new(AuthorizationServer::new(Service(authority.clone()))
                 .max_decoding_message_size(2048)
@@ -692,9 +775,11 @@ pub async fn serve(
             }
         )
     }));
-    server
+    let served = server
         .serve_with_incoming_shutdown(incoming, shutdown)
-        .await?;
+        .await;
+    acceptor.abort();
+    served?;
     Ok(())
 }
 

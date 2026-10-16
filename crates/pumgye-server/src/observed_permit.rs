@@ -151,7 +151,12 @@ impl Service {
         input: AuthenticatedResourceRequest,
         caller: &(dyn Fn() -> bool + Sync),
     ) -> Result<ObservedProjectionPermitReply, Status> {
-        let (permit, observation) = self.run(input, None, caller).await?;
+        let result = self.run(input, None, caller).await;
+        crate::metrics::METRICS.observed_permit(
+            crate::metrics::PermitKind::Service,
+            result.as_ref().err().map(Status::code),
+        );
+        let (permit, observation) = result?;
         Ok(ObservedProjectionPermitReply {
             permit: Some(permit),
             observation: Some(observation),
