@@ -109,3 +109,109 @@ fn production_paths_are_allocation_free_for_every_outcome() {
     // Every Decision variant was produced inside the measured region.
     assert!(outcomes.iter().all(|n| *n > 0), "{outcomes:?}");
 }
+
+#[test]
+fn version_2_evaluation_is_allocation_free_for_every_outcome() {
+    use pumgye_core::v2::{
+        DecisionV2, MembershipIndex, PolicyV2, PrincipalKind as K, RequestV2, TargetV2,
+    };
+    let policy: PolicyV2 =
+        serde_json::from_str(include_str!("../../../examples/v2/policy.json")).unwrap();
+    let compiled = policy.compile().unwrap();
+    let h1 = "human1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let h2 = "human1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let h4 = "human1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let s1 = "s_111111111111111111111111111111111111111111111111";
+    let eng: std::collections::BTreeSet<String> =
+        ["grp1:00000000000000000000000000".to_owned()].into();
+    let both: std::collections::BTreeSet<String> = [
+        "grp1:00000000000000000000000000".to_owned(),
+        "grp1:11111111111111111111111111".to_owned(),
+    ]
+    .into();
+    let ops: std::collections::BTreeSet<String> =
+        ["grp1:11111111111111111111111111".to_owned()].into();
+    let membership = MembershipIndex::build(&compiled, [(h1, &eng), (h2, &both), (h4, &ops)]);
+    let ips = [
+        "192.0.2.10",
+        "192.0.2.7",
+        "10.1.1.1",
+        "203.0.113.1",
+        "2001:db8::1",
+    ]
+    .map(|ip| ip.parse().unwrap());
+    let subjects = [
+        (K::Human, h1),
+        (K::Human, h2),
+        (K::Human, h4),
+        (K::Service, s1),
+        (K::Workload, s1),
+    ];
+    let targets = [
+        TargetV2::Permission {
+            permission: "write",
+            level: "internal",
+        },
+        TargetV2::Permission {
+            permission: "admin",
+            level: "restricted",
+        },
+        TargetV2::Permission {
+            permission: "view",
+            level: "public",
+        },
+        TargetV2::Permission {
+            permission: "read",
+            level: "secret",
+        },
+        TargetV2::Permission {
+            permission: "nope",
+            level: "public",
+        },
+        TargetV2::Resource {
+            resource: "db:payroll",
+            action: "select",
+        },
+        TargetV2::Resource {
+            resource: "db:orders",
+            action: "drop",
+        },
+        TargetV2::Resource {
+            resource: "db:x",
+            action: "select",
+        },
+    ];
+    let now = 1_792_108_800; // 2026-10-16
+    let mut seen = [0usize; 12];
+    let count = allocations(|| {
+        for service in ["orders", "reports", "billing"] {
+            for (kind, subject) in subjects {
+                for ip in ips {
+                    for guard in [G::EnforcedAllow, G::Deny, G::Observe] {
+                        for aal in 0..=4u8 {
+                            for target in targets {
+                                for at in [now, 1_768_435_200 /* 2026-01-15 */] {
+                                    let r = RequestV2 {
+                                        service,
+                                        kind,
+                                        subject,
+                                        target,
+                                        ip,
+                                        aal,
+                                        guard,
+                                        now: at,
+                                    };
+                                    let d = compiled.evaluate(&membership, &r);
+                                    seen[DecisionV2::ALL.iter().position(|x| *x == d).unwrap()] +=
+                                        1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    assert_eq!(count, 0, "version 2 evaluation allocated {count} times");
+    assert!(seen.iter().all(|n| *n > 0), "{seen:?}");
+}

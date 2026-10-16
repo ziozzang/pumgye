@@ -132,3 +132,12 @@ evaluator with a trace sink against the published snapshot or an unpublished
 candidate (never stored), return an ordered stage trace with registered
 `pumgye.*` reason codes and en/ko message keys, and audit every call as a
 read-only `simulation`. See [the explain contract](EXPLAIN.md).
+
+## Policy model version 2 (unreleased)
+
+`/v2/policy`, `/v2/status`, `/v2/explain*`, `/v2/candidates/diff`,
+`/v2/migration/preview`, `/v2/shadow*`, `/v2/cutover`, `/v2/rollback` and
+`/v2/model/history` require the administrator credential. Version 1 and version 2
+publications share one revision sequence and one audit (`document: v1|v2`); the v1
+`PUT /v1/policy` therefore issues the next global revision. Decisions stay on v1 until
+an approved cutover. See [MODEL_V2.md](MODEL_V2.md).

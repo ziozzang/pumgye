@@ -18,6 +18,8 @@ pub struct AuditRecord {
     pub at_unix: u64,
     pub actor: String,
     pub sha256: String,
+    /// `v1` (policy document) or `v2` (policy model version 2 document).
+    pub document: String,
 }
 /// Maximum retained read-only simulation audit rows (oldest pruned first); rows
 /// older than the configured age bound are also pruned on every insert.
@@ -47,6 +49,8 @@ pub struct SimulationRecord {
     pub unavailable: u64,
     pub changed: u64,
 }
+/// Shadow explanation row: id, created (Unix seconds), actor, rule JSON, reason.
+pub type Explanation = (u64, u64, String, String, String);
 pub struct Store {
     connection: Connection,
     _ownership: Ownership,
@@ -80,6 +84,21 @@ impl Store {
             CREATE TABLE IF NOT EXISTS policy (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, document TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS audit (revision INTEGER PRIMARY KEY, at_unix INTEGER NOT NULL, actor TEXT NOT NULL, sha256 TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS simulation_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at_unix INTEGER NOT NULL, kind TEXT NOT NULL CHECK(kind='simulation'), actor TEXT NOT NULL, on_behalf_of TEXT, operation TEXT NOT NULL, source TEXT NOT NULL, revision INTEGER NOT NULL, candidate_sha256 TEXT, request_sha256 TEXT NOT NULL, cases INTEGER NOT NULL, allowed INTEGER NOT NULL, denied INTEGER NOT NULL, unavailable INTEGER NOT NULL, changed INTEGER NOT NULL);")?;
+        // Additive v2 schema: one revision sequence and one publication audit for
+        // both document versions; authoritative model and shadow window persist.
+        let has_kind: bool = connection
+            .prepare("SELECT 1 FROM pragma_table_info('audit') WHERE name='document'")?
+            .exists([])?;
+        if !has_kind {
+            connection.execute_batch(
+                "ALTER TABLE audit ADD COLUMN document TEXT NOT NULL DEFAULT 'v1'",
+            )?;
+        }
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS policy_v2 (id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, document TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS authority_model (id INTEGER PRIMARY KEY CHECK(id=1), model TEXT NOT NULL CHECK(model IN ('v1','v2')));
+            CREATE TABLE IF NOT EXISTS model_history (id INTEGER PRIMARY KEY AUTOINCREMENT, at_unix INTEGER NOT NULL, model TEXT NOT NULL, revision INTEGER NOT NULL, actor TEXT NOT NULL, approval_ref TEXT, reason TEXT NOT NULL, gate TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS shadow_window (id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS shadow_explanations (id INTEGER PRIMARY KEY AUTOINCREMENT, at_unix INTEGER NOT NULL, actor TEXT NOT NULL, rule TEXT NOT NULL, reason TEXT NOT NULL, retired INTEGER NOT NULL DEFAULT 0);")?;
         let stored: Option<String> = connection
             .query_row("SELECT document FROM policy WHERE id=1", [], |r| r.get(0))
             .optional()?;
@@ -118,7 +137,7 @@ impl Store {
                 let bytes = serde_json::to_string(&document)?;
                 let transaction = connection.transaction()?;
                 transaction.execute("INSERT INTO policy VALUES(1,1,?1)", [&bytes])?;
-                audit(&transaction, 1, "bootstrap", &bytes)?;
+                audit(&transaction, 1, "bootstrap", &bytes, "v1")?;
                 transaction.commit()?;
                 document
             }
@@ -215,7 +234,7 @@ impl Store {
     }
     pub fn audit_after(&self, after: u64) -> Result<Vec<AuditRecord>> {
         ensure!(after <= i64::MAX as u64, "invalid audit cursor");
-        let mut statement=self.connection.prepare("SELECT revision,at_unix,actor,sha256 FROM audit WHERE revision>?1 ORDER BY revision LIMIT 100")?;
+        let mut statement=self.connection.prepare("SELECT revision,at_unix,actor,sha256,document FROM audit WHERE revision>?1 ORDER BY revision LIMIT 100")?;
         Ok(statement
             .query_map([after as i64], |row| {
                 Ok(AuditRecord {
@@ -223,6 +242,7 @@ impl Store {
                     at_unix: row.get::<_, i64>(1)? as u64,
                     actor: row.get(2)?,
                     sha256: row.get(3)?,
+                    document: row.get(4)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -312,8 +332,12 @@ impl Store {
     }
     /// One durable transaction binds the policy, revision and audit receipt.
     pub fn publish(&mut self, expected: u64, next: &Document, actor: &str) -> Result<()> {
+        // Revisions are one sequence across document versions: the next v1
+        // revision may skip numbers used by version 2 publications.
         ensure!(
-            expected < i64::MAX as u64 && next.revision == expected + 1,
+            expected < i64::MAX as u64
+                && next.revision > expected
+                && next.revision <= i64::MAX as u64,
             "invalid revision"
         );
         let bytes = serde_json::to_string(next)?;
@@ -326,25 +350,184 @@ impl Store {
             )? == 1,
             "durable revision conflict"
         );
-        audit(&transaction, next.revision, actor, &bytes)?;
+        audit(&transaction, next.revision, actor, &bytes, "v1")?;
         transaction.commit()?;
         Ok(())
     }
+    /// Highest revision issued in either document version.
+    pub fn global_revision(&self) -> Result<u64> {
+        let r: i64 = self.connection.query_row(
+            "SELECT max(coalesce((SELECT revision FROM policy WHERE id=1),0), coalesce((SELECT revision FROM policy_v2 WHERE id=1),0), coalesce((SELECT max(revision) FROM audit),0))",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(r as u64)
+    }
+    pub fn load_v2(&self) -> Result<Option<(u64, String)>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT revision, document FROM policy_v2 WHERE id=1",
+                [],
+                |r| Ok((r.get::<_, i64>(0)? as u64, r.get(1)?)),
+            )
+            .optional()?)
+    }
+    /// CAS publication of a version 2 document (`expected` 0: none yet). The
+    /// optional model switch commits in the same transaction (cutover).
+    pub fn publish_v2(
+        &mut self,
+        expected: u64,
+        revision: u64,
+        document: &str,
+        actor: &str,
+        model: Option<(&str, Option<&str>, &str, &str)>,
+    ) -> Result<()> {
+        ensure!(document.len() <= MAX_POLICY_BYTES, "policy exceeds bound");
+        ensure!(revision <= i64::MAX as u64, "invalid revision");
+        let transaction = self.connection.transaction()?;
+        let current: Option<i64> = transaction
+            .query_row("SELECT revision FROM policy_v2 WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        ensure!(
+            current.map_or(0, |r| r as u64) == expected,
+            "durable revision conflict"
+        );
+        transaction.execute(
+            "INSERT INTO policy_v2 VALUES(1,?1,?2) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision, document=excluded.document",
+            params![revision as i64, document],
+        )?;
+        audit(&transaction, revision, actor, document, "v2")?;
+        if let Some((model, approval, reason, gate)) = model {
+            set_model(&transaction, model, revision, actor, approval, reason, gate)?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+    /// Republish the retained v1 document at a new revision and switch the model
+    /// back to v1 in one transaction (ADR 0021 rollback).
+    pub fn rollback_v1(
+        &mut self,
+        expected: u64,
+        next: &Document,
+        actor: &str,
+        reason: &str,
+    ) -> Result<()> {
+        let bytes = serde_json::to_string(next)?;
+        let transaction = self.connection.transaction()?;
+        ensure!(
+            transaction.execute(
+                "UPDATE policy SET revision=?1, document=?2 WHERE id=1 AND revision=?3",
+                params![next.revision as i64, bytes, expected as i64]
+            )? == 1,
+            "durable revision conflict"
+        );
+        audit(&transaction, next.revision, actor, &bytes, "v1")?;
+        set_model(&transaction, "v1", next.revision, actor, None, reason, "{}")?;
+        transaction.commit()?;
+        Ok(())
+    }
+    pub fn model(&self) -> Result<String> {
+        Ok(self
+            .connection
+            .query_row("SELECT model FROM authority_model WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .unwrap_or_else(|| "v1".into()))
+    }
+    pub fn model_history(&self) -> Result<Vec<serde_json::Value>> {
+        let mut statement = self.connection.prepare("SELECT id,at_unix,model,revision,actor,approval_ref,reason,gate FROM model_history ORDER BY id DESC LIMIT 20")?;
+        Ok(statement
+            .query_map([], |r| {
+                Ok(serde_json::json!({"id": r.get::<_, i64>(0)?, "at_unix": r.get::<_, i64>(1)?, "model": r.get::<_, String>(2)?,
+                    "revision": r.get::<_, i64>(3)?, "actor": r.get::<_, String>(4)?, "approval_ref": r.get::<_, Option<String>>(5)?,
+                    "reason": r.get::<_, String>(6)?, "gate": serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(7)?).unwrap_or_default()}))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    pub fn save_shadow(&self, state: &str) -> Result<()> {
+        self.connection.execute(
+            "INSERT INTO shadow_window VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET state=excluded.state",
+            [state],
+        )?;
+        Ok(())
+    }
+    pub fn load_shadow(&self) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row("SELECT state FROM shadow_window WHERE id=1", [], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+    pub fn add_explanation(&self, actor: &str, rule: &str, reason: &str) -> Result<u64> {
+        let at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM shadow_explanations WHERE retired=0",
+            [],
+            |r| r.get(0),
+        )?;
+        ensure!(count < 64, "explanation capacity");
+        self.connection.execute(
+            "INSERT INTO shadow_explanations (at_unix,actor,rule,reason) VALUES(?1,?2,?3,?4)",
+            params![at as i64, actor, rule, reason],
+        )?;
+        Ok(self.connection.last_insert_rowid() as u64)
+    }
+    pub fn explanations(&self) -> Result<Vec<Explanation>> {
+        let mut statement = self.connection.prepare("SELECT id,at_unix,actor,rule,reason FROM shadow_explanations WHERE retired=0 ORDER BY id")?;
+        Ok(statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)? as u64,
+                    r.get::<_, i64>(1)? as u64,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+fn set_model(
+    transaction: &rusqlite::Transaction<'_>,
+    model: &str,
+    revision: u64,
+    actor: &str,
+    approval: Option<&str>,
+    reason: &str,
+    gate: &str,
+) -> Result<()> {
+    let at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    transaction.execute(
+        "INSERT INTO authority_model VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET model=excluded.model",
+        [model],
+    )?;
+    transaction.execute(
+        "INSERT INTO model_history (at_unix,model,revision,actor,approval_ref,reason,gate) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![at as i64, model, revision as i64, actor, approval, reason, gate],
+    )?;
+    Ok(())
 }
 fn audit(
     transaction: &rusqlite::Transaction<'_>,
     revision: u64,
     actor: &str,
     bytes: &str,
+    document: &str,
 ) -> Result<()> {
     let at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     transaction.execute(
-        "INSERT INTO audit VALUES(?1,?2,?3,?4)",
+        "INSERT INTO audit (revision,at_unix,actor,sha256,document) VALUES(?1,?2,?3,?4,?5)",
         params![
             revision as i64,
             at as i64,
             actor,
-            format!("{:x}", Sha256::digest(bytes.as_bytes()))
+            format!("{:x}", Sha256::digest(bytes.as_bytes())),
+            document
         ],
     )?;
     Ok(())

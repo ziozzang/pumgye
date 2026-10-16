@@ -1,0 +1,345 @@
+{
+  "expect": {
+    "path": "catalog.resources.db:payroll",
+    "code": "pumgye.validation.unknown_compartment"
+  },
+  "policy": {
+    "version": 2,
+    "catalog": {
+      "revision": 12,
+      "levels": [
+        "public",
+        "internal",
+        "confidential",
+        "restricted"
+      ],
+      "compartments": [
+        "finance",
+        "hr"
+      ],
+      "resources": {
+        "db:orders": {
+          "service": "orders",
+          "level": "internal",
+          "actions": {
+            "select": "read",
+            "update": "write"
+          },
+          "minimum_aal": 1
+        },
+        "db:payroll": {
+          "service": "orders",
+          "level": "confidential",
+          "compartments": [
+            "legal"
+          ],
+          "actions": {
+            "select": "read"
+          },
+          "minimum_aal": 2
+        }
+      }
+    },
+    "zones": {
+      "source": "sumunjang",
+      "revision": 418,
+      "zones": {
+        "anywhere": {
+          "prefixes": [
+            "0.0.0.0/0",
+            "::/0"
+          ]
+        },
+        "corp": {
+          "prefixes": [
+            "10.0.0.0/8"
+          ]
+        },
+        "office": {
+          "prefixes": [
+            "192.0.2.0/24"
+          ]
+        },
+        "vpn-admin": {
+          "prefixes": [
+            "192.0.2.7/32"
+          ]
+        }
+      }
+    },
+    "templates": {
+      "reader": {
+        "permissions": [
+          "read",
+          "list"
+        ],
+        "clearance_ceiling": {
+          "level": "internal"
+        }
+      },
+      "writer": {
+        "permissions": [
+          "write"
+        ],
+        "inherits": [
+          "reader"
+        ],
+        "clearance_ceiling": {
+          "level": "confidential",
+          "compartments": [
+            "finance"
+          ]
+        },
+        "minimum_aal": 2
+      },
+      "admin": {
+        "permissions": [
+          "admin"
+        ],
+        "inherits": [
+          "writer"
+        ],
+        "clearance_ceiling": {
+          "level": "restricted",
+          "compartments": [
+            "finance",
+            "hr"
+          ]
+        },
+        "minimum_aal": 2
+      },
+      "breakglass": {
+        "permissions": [
+          "admin"
+        ],
+        "clearance_ceiling": {
+          "level": "restricted",
+          "compartments": [
+            "finance",
+            "hr"
+          ]
+        },
+        "minimum_aal": 3
+      }
+    },
+    "services": {
+      "orders": {
+        "permissions": [
+          "read",
+          "list",
+          "write",
+          "admin"
+        ],
+        "network_ceiling": [
+          {
+            "zone": "anywhere",
+            "max": "reader"
+          },
+          {
+            "zone": "corp",
+            "max": "admin"
+          },
+          {
+            "zone": "office",
+            "max": [
+              "writer"
+            ]
+          },
+          {
+            "zone": "vpn-admin",
+            "max": "guest"
+          }
+        ]
+      },
+      "reports": {
+        "permissions": [
+          "view",
+          "export"
+        ],
+        "permission_map": {
+          "read": "view",
+          "list": "view"
+        },
+        "require_guard": false,
+        "network_ceiling": [
+          {
+            "zone": "anywhere",
+            "max": "reader"
+          }
+        ]
+      }
+    },
+    "bindings": [
+      {
+        "id": "bnd_alice_writer",
+        "effect": "allow",
+        "subjects": [
+          {
+            "kind": "human",
+            "ref": "human1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "role": "writer",
+        "scope": {
+          "services": [
+            "orders"
+          ]
+        },
+        "metadata": {
+          "reason": "order desk",
+          "granted_by": "mtls:fixture",
+          "approval_ref": "CHG-1001",
+          "source": "native",
+          "created_at": "2026-09-01T00:00:00Z",
+          "revision": 3
+        }
+      },
+      {
+        "id": "bnd_eng_reader",
+        "effect": "allow",
+        "subjects": [
+          {
+            "group": "grp1:00000000000000000000000000"
+          }
+        ],
+        "role": "reader",
+        "scope": {
+          "services": "all"
+        },
+        "metadata": {
+          "reason": "engineering read access"
+        }
+      },
+      {
+        "id": "bnd_ops_admin",
+        "effect": "allow",
+        "subjects": [
+          {
+            "group": "grp1:11111111111111111111111111"
+          }
+        ],
+        "role": "admin",
+        "scope": {
+          "services": [
+            "orders"
+          ]
+        },
+        "conditions": {
+          "zones": [
+            "corp"
+          ],
+          "minimum_aal": 2
+        },
+        "metadata": {
+          "reason": "operations"
+        }
+      },
+      {
+        "id": "bnd_svc_reader",
+        "effect": "allow",
+        "subjects": [
+          {
+            "kind": "service",
+            "ref": "s_111111111111111111111111111111111111111111111111"
+          }
+        ],
+        "role": "reader",
+        "scope": {
+          "services": [
+            "orders"
+          ]
+        },
+        "metadata": {
+          "reason": "batch export"
+        }
+      },
+      {
+        "id": "bnd_wk_reader",
+        "effect": "allow",
+        "subjects": [
+          {
+            "kind": "workload",
+            "ref": "wk2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+          }
+        ],
+        "role": "reader",
+        "scope": {
+          "services": [
+            "orders"
+          ]
+        },
+        "conditions": {
+          "expires_at": "2030-01-01T00:00:00Z"
+        },
+        "metadata": {
+          "reason": "migration job"
+        }
+      },
+      {
+        "id": "bnd_bob_temp_writer",
+        "effect": "allow",
+        "subjects": [
+          {
+            "kind": "human",
+            "ref": "human1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          }
+        ],
+        "role": "writer",
+        "scope": {
+          "services": [
+            "orders"
+          ]
+        },
+        "conditions": {
+          "not_before": "2026-01-01T00:00:00Z",
+          "expires_at": "2026-02-01T00:00:00Z"
+        },
+        "metadata": {
+          "reason": "quarter close",
+          "approval_ref": "CHG-1002"
+        }
+      },
+      {
+        "id": "bnd_incident_deny",
+        "effect": "deny",
+        "subjects": [
+          {
+            "group": "grp1:11111111111111111111111111"
+          }
+        ],
+        "permissions": "all",
+        "scope": {
+          "services": [
+            "reports"
+          ]
+        },
+        "metadata": {
+          "reason": "incident INC-77"
+        }
+      },
+      {
+        "id": "bnd_alice_breakglass",
+        "effect": "allow",
+        "subjects": [
+          {
+            "kind": "human",
+            "ref": "human1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "role": "breakglass",
+        "scope": {
+          "services": [
+            "orders"
+          ]
+        },
+        "conditions": {
+          "expires_at": "2027-01-01T00:00:00Z"
+        },
+        "metadata": {
+          "reason": "break-glass drill",
+          "approval_ref": "CHG-1003"
+        }
+      }
+    ]
+  }
+}

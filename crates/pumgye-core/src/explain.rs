@@ -37,6 +37,7 @@ pub const REASON_CODES: &[&str] = &[
     "pumgye.unknown_resource",
     "pumgye.unknown_action",
     "pumgye.unavailable",
+    "pumgye.explicit_denied",
 ];
 
 /// Registered stage detail codes; each code is also its own message key.
@@ -80,6 +81,20 @@ pub const DETAIL_CODES: &[&str] = &[
     "pumgye.detail.assurance_out_of_range",
     "pumgye.detail.assurance_below_required",
     "pumgye.detail.not_evaluated",
+    "pumgye.detail.membership_unavailable",
+    "pumgye.detail.catalog_resolved",
+    "pumgye.detail.principal_matched",
+    "pumgye.detail.principal_not_bound",
+    "pumgye.detail.explicit_deny_none",
+    "pumgye.detail.explicit_denied",
+    "pumgye.detail.allow_set_live",
+    "pumgye.detail.allow_set_none",
+    "pumgye.detail.allow_set_expired",
+    "pumgye.detail.allow_set_zone_mismatch",
+    "pumgye.detail.ceiling_matched",
+    "pumgye.detail.ceiling_no_match",
+    "pumgye.detail.clearance_granted",
+    "pumgye.detail.clearance_exceeded",
 ];
 
 /// Registered API error codes (`error.code`); each is its own message key.
@@ -96,6 +111,8 @@ pub const ERROR_CODES: &[&str] = &[
     "pumgye.error.candidate_too_large",
     "pumgye.error.candidate_invalid",
     "pumgye.error.rate_limited",
+    "pumgye.error.shadow_gate_unsatisfied",
+    "pumgye.error.no_v2_document",
 ];
 /// Registered case refusal detail codes.
 pub const CASE_ERROR_CODES: &[&str] = &[
@@ -123,7 +140,11 @@ pub fn message_keys() -> Vec<String> {
     keys.extend(crate::VALIDATION_CODES.iter().map(|(_, c)| (*c).to_owned()));
     keys.push(crate::VALIDATION_INVALID.to_owned());
     keys.push(crate::VALIDATION_SCHEMA.to_owned());
+    keys.extend(crate::v2::WARNING_CODES.iter().map(|c| (*c).to_owned()));
+    keys.extend(crate::v2::MIGRATION_CODES.iter().map(|c| (*c).to_owned()));
+    keys.extend(crate::v2::ADMISSION_CODES.iter().map(|c| (*c).to_owned()));
     keys.sort();
+    keys.dedup();
     keys
 }
 
@@ -161,6 +182,14 @@ pub fn decision_name(decision: ResourceDecision) -> &'static str {
         },
     }
 }
+/// Version 2 reasons: version 1 codes plus `pumgye.explicit_denied`.
+pub fn reason_v2(decision: crate::v2::DecisionV2) -> Reason {
+    match decision {
+        crate::v2::DecisionV2::ExplicitDenied => reason!("explicit_denied"),
+        other => reason(other.to_v1()),
+    }
+}
+pub(crate) const UNAVAILABLE_REASON: Reason = reason!("unavailable");
 pub fn reason(decision: ResourceDecision) -> Reason {
     match decision {
         ResourceDecision::UnknownResource => reason!("unknown_resource"),
@@ -202,9 +231,15 @@ pub enum Stage {
     Permission,
     InformationClass,
     Assurance,
+    Catalog,
+    Principal,
+    ExplicitDeny,
+    AllowSet,
+    NetworkCeiling,
+    Clearance,
 }
 impl Stage {
-    pub const ALL: [Stage; 15] = [
+    pub const ALL: [Stage; 21] = [
         Stage::Fence,
         Stage::Service,
         Stage::Resource,
@@ -220,6 +255,12 @@ impl Stage {
         Stage::Permission,
         Stage::InformationClass,
         Stage::Assurance,
+        Stage::Catalog,
+        Stage::Principal,
+        Stage::ExplicitDeny,
+        Stage::AllowSet,
+        Stage::NetworkCeiling,
+        Stage::Clearance,
     ];
     pub fn message_key(self) -> &'static str {
         match self {
@@ -238,6 +279,12 @@ impl Stage {
             Stage::Permission => "pumgye.stage.permission",
             Stage::InformationClass => "pumgye.stage.information_class",
             Stage::Assurance => "pumgye.stage.assurance",
+            Stage::Catalog => "pumgye.stage.catalog",
+            Stage::Principal => "pumgye.stage.principal",
+            Stage::ExplicitDeny => "pumgye.stage.explicit_deny",
+            Stage::AllowSet => "pumgye.stage.allow_set",
+            Stage::NetworkCeiling => "pumgye.stage.network_ceiling",
+            Stage::Clearance => "pumgye.stage.clearance",
         }
     }
 }
@@ -329,6 +376,16 @@ pub enum GuardInput {
     Deny,
     Observe,
     Unavailable,
+}
+impl GuardInput {
+    pub fn from_evidence(evidence: GuardEvidence) -> Self {
+        match evidence {
+            GuardEvidence::EnforcedAllow => GuardInput::EnforcedAllow,
+            GuardEvidence::Deny => GuardInput::Deny,
+            GuardEvidence::Observe => GuardInput::Observe,
+            GuardEvidence::Unavailable => GuardInput::Unavailable,
+        }
+    }
 }
 impl From<GuardInput> for GuardEvidence {
     fn from(value: GuardInput) -> Self {
