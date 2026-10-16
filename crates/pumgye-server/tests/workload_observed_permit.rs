@@ -435,7 +435,8 @@ async fn workload_native_policy_with_authenticated_peer_fixtures_and_postsign_re
                 certificate: &cert,
                 private_key: &key,
                 caller_key: CALLER,
-            },
+            }
+            .into(),
         },
         Arc::new(hangang_runtime::time::ReceiverClock::new([7; 16]).unwrap()),
         ClockRates::new(50, 50).unwrap(),

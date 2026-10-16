@@ -422,7 +422,8 @@ async fn actual_native_owners_issue_observe_and_postsign_retirement() {
                 certificate: &cert,
                 private_key: &key,
                 caller_key: CALLER,
-            },
+            }
+            .into(),
         },
         Arc::new(hangang_runtime::time::ReceiverClock::new([7; 16]).unwrap()),
         ClockRates::new(50, 50).unwrap(),

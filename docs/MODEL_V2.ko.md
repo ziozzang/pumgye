@@ -301,13 +301,15 @@ watermark 이전에 보고된 주체가 새 Hopae 프로세스가 다시 인증�
 나열해야 합니다(예: `/v1/subjects/lifecycle/snapshot`의 `include_workloads`, `principal`·
 `subject_ref`·`spiffe_id`·`status`). 그전까지는 feed 보존 기간을 품계의 최장 중단 시간보다 길게 두세요.
 
-**Hopae SDK에 필요한 것: 재적재되는 커넥터.** `observed-*` 소유자(관측 인증,
-workload, Human)는 `hopae-grpc`로 고정 PEM 바이트에서 mTLS 클라이언트를 만듭니다.
-그래서 품계의 TLS 핫 리로드에 참여하지 못하고, cert-manager가 클라이언트 인증서나
-CA를 교체하면 재시작해야 합니다. `hopae-grpc` 후속 작업에서 호출자가 넘기는
-커넥터를 받아야 합니다. 예를 들면 tonic `connect_with_connector` 훅이나
-`Fn() -> Arc<rustls::ClientConfig>`입니다. 그러면 품계는 네이티브 live 클라이언트와
-마찬가지로 재적재 설정(`tls_reload::Reloading<ClientConfig>`)을 넘길 수 있습니다.
+**호패 SDK의 재적재 TLS (ziozzang/hopae#15).** 이제 `hopae-grpc`는
+`ReloadableEndpointConfig`를 받습니다. 이 구성의
+`Arc<dyn Fn() -> Arc<rustls::ClientConfig>>`는 새 연결을 만들 때마다 읽습니다.
+`EndpointConfig` PEM 생성자는 이전과 같이 동작합니다. 품계의 `observed-*` 소유자는
+`tls_reload::Reloading<ClientConfig>`를 넘기므로 인증서를 교체한 뒤에 재시작할 필요가
+없습니다.
+
+품계는 `hopae-grpc`를 #15 커밋(`74bb829`, #14 `feat/live-reload` 기반)에 고정합니다.
+#14와 #15가 병합되면 고정을 병합된 `integrate/identity-platform` 리비전으로 옮기십시오.
 
 **Hopae #9와 #10 병합.** 두 브랜치는 추가 목록에서만 충돌합니다. 상호 운용 검증에 쓴 로컬 해결(푸시하지
 않음)은 양쪽을 모두 유지했습니다.

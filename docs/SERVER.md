@@ -193,12 +193,18 @@ closed: the source observation expires, and the next relist with valid material
 recovers it. The `pumgye_kubernetes_credential_reloads_total` metric counts
 these changes.
 
-Limitations: the longest delay before new material is used is one polling
-interval. The outbound clients of the `observed-*` features pass fixed PEM bytes
-to the Hopae gRPC SDK (`hopae-grpc`), so they still need a restart after
-rotation. Fixing this is a Hopae SDK follow-up: `hopae-grpc` needs an API that
-accepts a reloadable connector or client configuration (see
-`docs/MODEL_V2.md`, "Hopae dependencies").
+The `observed-*` owners (observed authentication, workload and Human) also
+reload (`authentication_observed client`, `workload_observed client`,
+`human_observed client`). They pass the Hopae SDK a reloadable TLS source
+(`hopae-grpc` `ReloadableEndpointConfig`), and the SDK reads the current client
+configuration for every new connection.
+
+The `hopae-grpc` dependency is pinned to the commit of ziozzang/hopae#15
+(`feat/grpc-reloadable-tls`, `74bb829`). That pin must move to the merged
+`integrate/identity-platform` revision once #14 and #15 land.
+
+Limitation: the longest delay before new material is used is one polling
+interval.
 
 ## Prometheus metrics (unreleased)
 

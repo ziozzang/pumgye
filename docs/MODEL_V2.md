@@ -397,15 +397,16 @@ example `include_workloads` on `/v1/subjects/lifecycle/snapshot`, with
 `principal`, `subject_ref`, `spiffe_id` and `status`). Until then, keep the feed's
 retention above the longest Pumgye outage.
 
-**Needed from the Hopae SDK: a reloadable connector.** The `observed-*` owners
-(observed authentication, workload and Human) build their mTLS clients with
-`hopae-grpc` from fixed PEM bytes. This means they can't take part in Pumgye's
-TLS hot reload, and they need a restart after cert-manager rotates their client
-certificate or CA. A follow-up in `hopae-grpc` should accept a caller-supplied
-connector, such as a tonic `connect_with_connector` hook or a
-`Fn() -> Arc<rustls::ClientConfig>`. Pumgye would then pass its reloading
-configuration (`tls_reload::Reloading<ClientConfig>`), as it already does for the
-native live clients.
+**Hopae SDK reloadable TLS (ziozzang/hopae#15).** `hopae-grpc` now accepts
+`ReloadableEndpointConfig`, whose `Arc<dyn Fn() -> Arc<rustls::ClientConfig>>` it
+reads for every new connection. The `EndpointConfig` PEM constructors still work
+as before. Pumgye's `observed-*` owners pass their
+`tls_reload::Reloading<ClientConfig>`, so they no longer need a restart after a
+rotation.
+
+Pumgye pins `hopae-grpc` to the #15 commit (`74bb829`, based on #14
+`feat/live-reload`). Move the pin to the merged `integrate/identity-platform`
+revision once #14 and #15 land.
 
 **Merging Hopae #9 and #10.** The two branches conflict only in additive lists.
 The local resolution used for the interop qualification (not pushed) kept both

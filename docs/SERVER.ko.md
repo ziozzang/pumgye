@@ -174,11 +174,17 @@ Kubernetes API 소스(`--kubernetes-ca`, `--kubernetes-token`)는 relist할 때�
 인증서로 다음 relist를 하면 회복합니다. 이런 변경 횟수는
 `pumgye_kubernetes_credential_reloads_total` 메트릭으로 셉니다.
 
-제약: 새 인증서가 반영되기까지 최대 폴링 주기 한 번만큼 걸립니다. `observed-*`
-기능의 외부 클라이언트는 호패 gRPC SDK(`hopae-grpc`)에 고정된 PEM 바이트를 넘기므로
-인증서를 교체한 뒤에도 재시작해야 합니다. 이 문제는 호패 SDK 후속 작업으로
-해결합니다. `hopae-grpc`에 재적재되는 커넥터나 클라이언트 설정을 받는 API가
-필요합니다(`docs/MODEL_V2.ko.md`의 "Hopae 의존성" 참고).
+`observed-*` 소유자(관측 인증, workload, Human)도 다시 읽습니다
+(`authentication_observed client`, `workload_observed client`,
+`human_observed client`). 이 소유자들은 호패 SDK에 재적재되는 TLS 소스
+(`hopae-grpc`의 `ReloadableEndpointConfig`)를 넘기고, SDK는 새 연결을 만들 때마다 현재
+클라이언트 설정을 읽습니다.
+
+`hopae-grpc` 의존성은 ziozzang/hopae#15(`feat/grpc-reloadable-tls`, `74bb829`) 커밋에
+고정되어 있습니다. #14와 #15가 병합되면 이 고정을 병합된 `integrate/identity-platform`
+리비전으로 옮겨야 합니다.
+
+제약: 새 인증서가 반영되기까지 최대 폴링 주기 한 번만큼 걸립니다.
 
 ## Prometheus 메트릭 (미릴리스)
 

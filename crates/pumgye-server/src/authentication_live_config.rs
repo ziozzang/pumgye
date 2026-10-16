@@ -130,23 +130,29 @@ pub fn load_observed(
         return Err(Refused);
     }
     let token = Zeroizing::new(resolve(&config.token_env).ok_or(Refused)?);
-    let ca = read(&config.ca, 128 * 1024).map_err(|_| Refused)?;
-    let cert = read(&config.certificate, 128 * 1024).map_err(|_| Refused)?;
-    let key = read(&config.key, 128 * 1024).map_err(|_| Refused)?;
+    // Reloading client TLS (cert-manager rotation without restart): the Hopae
+    // SDK reads the current configuration for every new connection.
+    let tls = crate::tls_reload::client(
+        "authentication_observed client",
+        &config.ca,
+        &config.certificate,
+        &config.key,
+        &[b"h2"],
+    )
+    .map_err(|_| Refused)?;
     let mut nonce = [0; 16];
     getrandom::fill(&mut nonce).map_err(|_| Refused)?;
     let owner = AuthenticationOwnerGeneration::new(
         trust,
         ObservedConfiguration {
             issuer_ref: &config.issuer_ref,
-            endpoint: hopae_grpc::observed_client::EndpointConfig {
+            endpoint: hopae_grpc::observed_client::ReloadableEndpointConfig {
                 address: &config.address,
                 server_name: &config.server_name,
-                ca: &ca,
-                certificate: &cert,
-                private_key: &key,
+                tls: std::sync::Arc::new(move || tls.current()),
                 caller_key: &token,
-            },
+            }
+            .into(),
             minimum_application_generation: 1,
             minimum_key_registry_revision: 1,
         },
@@ -203,23 +209,29 @@ pub fn load_workload_observed(
         return Err(Refused);
     }
     let token = Zeroizing::new(resolve(&config.token_env).ok_or(Refused)?);
-    let ca = read(&config.ca, 128 * 1024).map_err(|_| Refused)?;
-    let cert = read(&config.certificate, 128 * 1024).map_err(|_| Refused)?;
-    let key = read(&config.key, 128 * 1024).map_err(|_| Refused)?;
+    // Reloading client TLS (cert-manager rotation without restart): the Hopae
+    // SDK reads the current configuration for every new connection.
+    let tls = crate::tls_reload::client(
+        "workload_observed client",
+        &config.ca,
+        &config.certificate,
+        &config.key,
+        &[b"h2"],
+    )
+    .map_err(|_| Refused)?;
     let mut nonce = [0; 16];
     getrandom::fill(&mut nonce).map_err(|_| Refused)?;
     let owner = AuthenticationOwnerGeneration::new(
         trust,
         ObservedConfiguration {
             issuer_ref: &config.issuer_ref,
-            endpoint: hopae_grpc::observed_client::EndpointConfig {
+            endpoint: hopae_grpc::observed_client::ReloadableEndpointConfig {
                 address: &config.address,
                 server_name: &config.server_name,
-                ca: &ca,
-                certificate: &cert,
-                private_key: &key,
+                tls: std::sync::Arc::new(move || tls.current()),
                 caller_key: &token,
-            },
+            }
+            .into(),
             minimum_application_generation: 1,
             minimum_key_registry_revision: 1,
         },
@@ -285,6 +297,56 @@ mod observed_tests {
         let parsed: Configuration = serde_json::from_value(value).unwrap();
         let rates = parsed.observed_clock_rates.unwrap();
         assert_eq!((rates.source_ppm, rates.receiver_ppm), (500, 700));
+    }
+    /// The observed owner's Hopae SDK client takes a reloading TLS source: the
+    /// client certificate is registered with the poller and a rotation is
+    /// applied without rebuilding the owner (the SDK reads the source for every
+    /// new connection; see hopae-grpc `tests/reloadable_tls.rs`).
+    #[tokio::test]
+    async fn observed_owner_client_certificate_reloads_without_restart() {
+        let trust = std::sync::Arc::new(
+            crate::authentication_config::Trust::compile(crate::authentication_config::Document {
+                entries: vec![crate::authentication_config::Entry {
+                    issuer_ref: "hopae".into(),
+                    key_epoch: 1,
+                    identity_epoch: "owner".into(),
+                    service: "orders".into(),
+                    audience: "api".into(),
+                    minimum_revision: 1,
+                    public_key: base64::engine::general_purpose::STANDARD.encode(
+                        ed25519_dalek::SigningKey::from_bytes(&[7; 32])
+                            .verifying_key()
+                            .to_bytes(),
+                    ),
+                }],
+            })
+            .unwrap(),
+        );
+        let pki = crate::tls_reload::tests::pki();
+        pki.leaf("observed-client", "0b01");
+        let path = pki.path("live.json");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({"issuer_ref":"hopae","address":"https://hopae.test:443","server_name":"hopae.test","ca":pki.path("ca.pem"),"certificate":pki.path("observed-client.pem"),"key":pki.path("observed-client.key"),"token_env":"CALLER","observed_clock_rates":{"source_ppm":500,"receiver_ppm":700}})).unwrap(),
+        )
+        .unwrap();
+        let owner = load_observed(&path, trust, &|_| {
+            Some("observed-caller-credential-at-least-32-bytes".into())
+        })
+        .map_err(|_| ())
+        .unwrap();
+        let serial = || {
+            crate::tls_reload::registry()
+                .statuses()
+                .into_iter()
+                .find(|s| s.name == "authentication_observed client")
+                .map(|s| s.leaf.serial)
+        };
+        assert_eq!(serial().as_deref(), Some("0b01"));
+        pki.leaf("observed-client", "0b02");
+        crate::tls_reload::registry().poll_all();
+        assert_eq!(serial().as_deref(), Some("0b02"));
+        drop(owner);
     }
 }
 
@@ -356,9 +418,16 @@ pub fn load_human_observed(
         return Err(Refused);
     }
     let token = Zeroizing::new(resolve(&c.token_env).ok_or(Refused)?);
-    let ca = read(&c.ca, 128 * 1024).map_err(|_| Refused)?;
-    let cert = read(&c.certificate, 128 * 1024).map_err(|_| Refused)?;
-    let key = read(&c.key, 128 * 1024).map_err(|_| Refused)?;
+    // Reloading client TLS (cert-manager rotation without restart): the Hopae
+    // SDK reads the current configuration for every new connection.
+    let tls = crate::tls_reload::client(
+        "human_observed client",
+        &c.ca,
+        &c.certificate,
+        &c.key,
+        &[b"h2"],
+    )
+    .map_err(|_| Refused)?;
     let mut nonce = [0; 16];
     getrandom::fill(&mut nonce).map_err(|_| Refused)?;
     let scopes = human
@@ -380,14 +449,13 @@ pub fn load_human_observed(
         trust,
         crate::authentication_human_observed::Configuration {
             issuer_ref: &c.issuer_ref,
-            endpoint: hopae_grpc::human_observed_client::EndpointConfig {
+            endpoint: hopae_grpc::human_observed_client::ReloadableEndpointConfig {
                 address: &c.address,
                 server_name: &c.server_name,
-                ca: &ca,
-                certificate: &cert,
-                private_key: &key,
+                tls: std::sync::Arc::new(move || tls.current()),
                 caller_key: &token,
-            },
+            }
+            .into(),
             scopes,
             minimum_source_revision: human.minimum_source_revision,
             minimum_application_generation: human.minimum_application_generation,
