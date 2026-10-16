@@ -31,7 +31,7 @@ wire enums do not themselves verify those facts.
 Remote listeners require mTLS with an explicitly provisioned client CA, plus separate
 admin/decision credentials. Plaintext is limited to loopback. The native client pins
 an endpoint, server name and CA and presents its client certificate. See
-[server and protocol contracts](docs/SERVER.md).
+[server and protocol contracts](docs/SERVER.md). Administrators can troubleshoot decisions and preview drafts with the [explain / what-if / diff API](docs/EXPLAIN.md).
 
 ```sh
 cargo test --locked --workspace
