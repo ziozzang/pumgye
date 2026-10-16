@@ -726,6 +726,7 @@ pub fn explain(snapshot: Snapshot<'_>, case: &Case, trace: bool) -> Result<Expla
         target,
         subject_rights: None,
         network: None,
+        trace,
     };
     for event in sink.events() {
         match *event {
@@ -811,6 +812,8 @@ struct Renderer<'a> {
     target: Target<'a>,
     subject_rights: Option<RightsView>,
     network: Option<NetworkMatch>,
+    /// Detail is rendered only for traced explanations; codes are always derived.
+    trace: bool,
 }
 impl Renderer<'_> {
     fn service(&self) -> Option<&Service> {
@@ -1099,6 +1102,7 @@ impl Renderer<'_> {
             TraceEvent::Network { ip, matched } => {
                 let shadowed = self
                     .service()
+                    .filter(|_| self.trace)
                     .map(|s| {
                         let mut rules: Vec<_> = s
                             .networks
