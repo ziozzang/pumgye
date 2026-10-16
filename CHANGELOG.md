@@ -4,6 +4,29 @@
 
 ### Added
 
+- The `observed-*` owners reload their Hopae client certificate and CA without a
+  restart. They use the Hopae SDK reloadable endpoint (ziozzang/hopae#15).
+  `hopae-grpc` is pinned to `74bb829`; move the pin to the merged rev.
+- Prometheus `GET /metrics` on the HTTPS management listener, readable with the
+  administrator credential or an optional read-only scrape credential
+  (`--metrics-token-env`). It covers:
+  - decisions by context, outcome and reason
+  - per-transport latency histograms
+  - policy revision and publication CAS conflicts
+  - shadow v1/v2 mismatches
+  - Hopae owner freshness and `cursor_expired`
+  - simulation audit rows
+  - TLS reload counters and leaf expiry
+  - observed permit issuance and refusals
+
+  Recording is allocation-free, and no label carries a subject or IP.
+- The Kubernetes API source counts CA/token rotations, which it already re-reads on
+  every relist. A test now covers rotation without a restart.
+- TLS hot reload (`--tls-reload-interval-secs`, default 10 s, content polling,
+  no inotify) for the HTTP, PPG1, gRPC and SAR listeners, the Sumunjang/Hopae
+  live clients and the Hopae owner client. Invalid material keeps the previous
+  configuration and raises `tls_reload_failing` in `/v1/status`. See
+  `docs/SERVER.md`.
 - Policy model version 2 (Hangang ADR 0021 P0): Hopae-owned principals and
   GroupRefs, global role templates with per-service permission maps, allow and
   explicit-deny bindings with validity windows and server-stamped metadata,

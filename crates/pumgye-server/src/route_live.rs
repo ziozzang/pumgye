@@ -111,8 +111,32 @@ impl Client {
         {
             return Err(Refused);
         }
+        let tls =
+            crate::authority_transport::static_tls(ca, certificate, key).map_err(|_| Refused)?;
+        Self::prepare_tls(address, server_name, tls, token)
+    }
+    /// As [`Self::prepare`] with reloading TLS material (rotated files apply on reconnect).
+    pub fn prepare_tls(
+        address: &str,
+        server_name: &str,
+        tls: std::sync::Arc<crate::tls_reload::Reloading<rustls::ClientConfig>>,
+        token: &str,
+    ) -> Result<Self, Refused> {
+        let uri: tonic::codegen::http::Uri = address.parse().map_err(|_| Refused)?;
+        if token.len() > 256
+            || uri.scheme_str() != Some("https")
+            || uri
+                .authority()
+                .is_none_or(|authority| authority.as_str().contains('@'))
+            || uri
+                .path_and_query()
+                .is_some_and(|path| path.as_str() != "/")
+            || uri.port_u16() == Some(0)
+        {
+            return Err(Refused);
+        }
         let (channel, credential) =
-            crate::authority_transport::lazy(address, server_name, ca, certificate, key, token)
+            crate::authority_transport::lazy(address, server_name, tls, token)
                 .map_err(|_| Refused)?;
         Ok(Self {
             client: RouteOwnershipClient::new(channel)

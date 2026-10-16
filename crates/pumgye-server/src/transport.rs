@@ -21,7 +21,7 @@ use tokio_rustls::TlsAcceptor;
 pub use hangang_runtime::tls_config;
 pub async fn http(
     listener: TcpListener,
-    config: Option<Arc<ServerConfig>>,
+    config: Option<Arc<pumgye_server::tls_reload::Reloading<ServerConfig>>>,
     router: Router,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
@@ -36,7 +36,7 @@ pub async fn http(
                 if let Some(config) = config {
                     if let Ok(Ok(tls)) = timeout(
                         Duration::from_secs(3),
-                        TlsAcceptor::from(config).accept(stream),
+                        TlsAcceptor::from(config.current()).accept(stream),
                     )
                     .await
                     {
@@ -88,7 +88,7 @@ async fn serve_http<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
 }
 pub async fn native(
     listener: TcpListener,
-    config: Option<Arc<ServerConfig>>,
+    config: Option<Arc<pumgye_server::tls_reload::Reloading<ServerConfig>>>,
     authority: Arc<Authority>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> Result<()> {
@@ -103,7 +103,7 @@ pub async fn native(
                 if let Some(config) = config {
                     if let Ok(Ok(tls)) = timeout(
                         Duration::from_secs(3),
-                        TlsAcceptor::from(config).accept(stream),
+                        TlsAcceptor::from(config.current()).accept(stream),
                     )
                     .await
                         && tls.get_ref().1.alpn_protocol() == Some(b"ppg1")
@@ -158,8 +158,10 @@ async fn native_session<S: AsyncRead + AsyncWrite + Unpin>(
             "invalid native frame size"
         );
         timeout(Duration::from_secs(5), reader.read_exact(&mut query[..len])).await??;
+        let started = std::time::Instant::now();
         let q = pumgye_protocol::Query::decode(&query[..len])?;
         let reply = a.evaluate(&q).encode();
+        pumgye_server::metrics::METRICS.observe(pumgye_server::metrics::Transport::Ppg1, started);
         replies[pending..pending + reply.len()].copy_from_slice(&reply);
         pending += reply.len();
         if reader.buffer().is_empty() || pending == replies.len() {
@@ -258,5 +260,228 @@ mod tests {
                 .kind(),
             std::io::ErrorKind::UnexpectedEof
         );
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod reload_tests {
+    use super::*;
+    use std::path::Path;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A fresh EC P-256 test CA (`ca.pem`, `ca.key`) in `dir`.
+    pub(crate) fn ca(dir: &Path, name: &str) {
+        openssl(
+            &[
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+                "-nodes",
+                "-keyout",
+                "ca.key",
+                "-out",
+                "ca.pem",
+                "-days",
+                "2",
+                "-subj",
+                &format!("/CN={name}"),
+            ],
+            dir,
+        );
+    }
+    pub(crate) fn openssl(args: &[&str], dir: &Path) {
+        let out = std::process::Command::new("openssl")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    pub(crate) fn leaf(dir: &Path, name: &str, serial: &str) {
+        std::fs::write(
+            dir.join("ext.cnf"),
+            "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\n",
+        )
+        .unwrap();
+        openssl(
+            &[
+                "req",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+                "-nodes",
+                "-keyout",
+                &format!("{name}.key.new"),
+                "-out",
+                &format!("{name}.csr"),
+                "-subj",
+                &format!("/CN={name}"),
+            ],
+            dir,
+        );
+        openssl(
+            &[
+                "x509",
+                "-req",
+                "-in",
+                &format!("{name}.csr"),
+                "-CA",
+                "ca.pem",
+                "-CAkey",
+                "ca.key",
+                "-set_serial",
+                &format!("0x{serial}"),
+                "-days",
+                "1",
+                "-extfile",
+                "ext.cnf",
+                "-out",
+                &format!("{name}.pem.new"),
+            ],
+            dir,
+        );
+        std::fs::rename(
+            dir.join(format!("{name}.key.new")),
+            dir.join(format!("{name}.key")),
+        )
+        .unwrap();
+        std::fs::rename(
+            dir.join(format!("{name}.pem.new")),
+            dir.join(format!("{name}.pem")),
+        )
+        .unwrap();
+    }
+    fn serial_of(stream: &tokio_rustls::client::TlsStream<tokio::net::TcpStream>) -> String {
+        use base64::Engine;
+        let der = stream.get_ref().1.peer_certificates().unwrap()[0]
+            .as_ref()
+            .to_vec();
+        let pem = format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            base64::engine::general_purpose::STANDARD.encode(der)
+        );
+        pumgye_server::tls_reload::leaf_info(pem.as_bytes())
+            .unwrap()
+            .serial
+    }
+    async fn get(stream: &mut tokio_rustls::client::TlsStream<tokio::net::TcpStream>) -> String {
+        stream
+            .write_all(b"GET /x HTTP/1.1\r\nhost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = vec![0; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+
+    /// cert-manager style rotation: the listener presents the new certificate to
+    /// new connections without a restart; established connections keep working;
+    /// invalid material keeps the previous certificate and raises the alert.
+    #[tokio::test]
+    async fn listener_serves_rotated_certificate_without_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let d = root.path();
+        openssl(
+            &[
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+                "-nodes",
+                "-keyout",
+                "ca.key",
+                "-out",
+                "ca.pem",
+                "-days",
+                "2",
+                "-subj",
+                "/CN=listener-ca",
+            ],
+            d,
+        );
+        leaf(d, "server", "1001");
+        leaf(d, "client", "2002");
+        let reload = pumgye_server::tls_reload::server(
+            "test http listener",
+            &d.join("server.pem"),
+            &d.join("server.key"),
+            &d.join("ca.pem"),
+            &[b"http/1.1"],
+        )
+        .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().route("/x", axum::routing::get(|| async { "ok" }));
+        tokio::spawn(http(
+            listener,
+            Some(reload.clone()),
+            router,
+            std::future::pending(),
+        ));
+        let client = Arc::new(
+            pumgye_server::tls_reload::client_config(
+                &std::fs::read(d.join("ca.pem")).unwrap(),
+                &std::fs::read(d.join("client.pem")).unwrap(),
+                &std::fs::read(d.join("client.key")).unwrap(),
+                &[b"http/1.1"],
+            )
+            .unwrap(),
+        );
+        let connect = || {
+            let client = client.clone();
+            async move {
+                let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+                tokio_rustls::TlsConnector::from(client)
+                    .connect(
+                        rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                        tcp,
+                    )
+                    .await
+                    .unwrap()
+            }
+        };
+        let mut old = connect().await;
+        assert_eq!(serial_of(&old), "1001");
+        assert!(get(&mut old).await.contains("200 OK"));
+        leaf(d, "server", "1002");
+        assert_eq!(pumgye_server::tls_reload::registry().poll_all(), 1);
+        let mut new = connect().await;
+        assert_eq!(
+            serial_of(&new),
+            "1002",
+            "new handshakes use the rotated certificate"
+        );
+        assert!(get(&mut new).await.contains("200 OK"));
+        assert!(
+            get(&mut old).await.contains("200 OK"),
+            "established connections are unaffected"
+        );
+        std::fs::write(
+            d.join("server.pem"),
+            b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        pumgye_server::tls_reload::registry().poll_all();
+        assert_eq!(
+            serial_of(&connect().await),
+            "1002",
+            "invalid material keeps the previous certificate"
+        );
+        let status = pumgye_server::tls_reload::registry().statuses();
+        let mine = status
+            .iter()
+            .find(|s| s.name == "test http listener")
+            .unwrap();
+        assert!(mine.failing && mine.leaf.serial == "1002");
     }
 }

@@ -4,10 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 [dependencies]
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "e1dd9728e184eb4975fbe1ce8dae0505571f4ff1" }
+# Pinned to ziozzang/hopae#15 (feat/grpc-reloadable-tls, reloadable client TLS);
+# move this pin to the merged integrate/identity-platform rev once #14/#15 land.
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "74bb8298dc605cdea9ab8c854cef597e90db0949" }
 prost = "0.14"
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
 [build-dependencies]
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "e1dd9728e184eb4975fbe1ce8dae0505571f4ff1" }
+# Pinned to ziozzang/hopae#15 (feat/grpc-reloadable-tls, reloadable client TLS);
+# move this pin to the merged integrate/identity-platform rev once #14/#15 land.
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "74bb8298dc605cdea9ab8c854cef597e90db0949" }
 tonic-prost-build = "0.14.6"

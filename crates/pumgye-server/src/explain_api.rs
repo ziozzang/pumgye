@@ -251,6 +251,9 @@ pub(crate) struct ApiError {
 /// Maximum details reported per refusal.
 pub const MAX_ERROR_DETAILS: usize = 32;
 impl ApiError {
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
     pub(crate) fn coded(status: StatusCode, code: &'static str) -> Self {
         Self {
             status,

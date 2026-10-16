@@ -126,3 +126,123 @@ Clippy·실제 네 서버 native/gRPC 영속 요청 체인이 통과했습니다
 버전 1·2 게시는 하나의 리비전 순서와 하나의 감사(`document: v1|v2`)를 공유하므로 v1
 `PUT /v1/policy`도 다음 전역 리비전을 발급합니다. 승인된 컷오버 전까지 판정은 v1이 합니다.
 [MODEL_V2.ko.md](MODEL_V2.ko.md)를 참조하세요.
+
+## TLS 인증서 교체 (미릴리스)
+
+품계는 재시작하지 않고 mTLS 인증서를 다시 읽으므로 cert-manager 갱신을 그대로
+따라갑니다. `--tls-reload-interval-secs`초마다(기본 10초, 범위 1–3600) 각 TLS
+사용처의 인증서·키·CA 파일을 읽어 내용의 SHA-256 다이제스트를 비교합니다.
+호스트의 inotify 감시 개수가 부족하므로 inotify는 쓰지 않습니다. 내용이 바뀌면
+새 rustls 설정을 만들어 원자적으로 교체합니다.
+
+다시 읽는 대상:
+
+- 리스너: HTTP(`http listener`), PPG1(`ppg1 listener`), gRPC(`grpc listener`),
+  SAR(`sar listener`). 새 핸드셰이크부터 새 인증서와 CA를 씁니다. 이미 맺은
+  연결은 닫힐 때까지 수락 당시 설정을 그대로 씁니다. gRPC TLS를 교체할 수 있도록
+  tonic이 아니라 품계의 acceptor가 종료합니다.
+- 외부로 나가는 mTLS 클라이언트:
+  - 수문장/호패 live 클라이언트: `route_live`, `projection_live`,
+    `network_live`, `authentication_live`. 재적재되는 tonic 커넥터를 쓰므로 새
+    HTTP/2 연결은 현재 클라이언트 인증서와 CA를 쓰고, 기존 채널은 연결을
+    유지합니다.
+  - 호패 소유자 클라이언트(`hopae_owner client`). 새 인증서로 HTTP 클라이언트를
+    다시 만듭니다.
+
+새 인증서가 유효하지 않으면(PEM 파싱 실패, 인증서와 맞지 않는 키) 이전 설정을 계속
+씁니다. 이때 해당 리스너나 클라이언트는 `failing: true`와 `last_error`를 보고하고,
+`GET /v1/status`의 `tls_reload_failing`이 `true`가 됩니다. 이 필드에 경보를 거십시오.
+거부한 파일 내용은 한 번만 로그에 남기고, 파일이 다시 바뀔 때까지 재시도하지
+않습니다. 지금 쓰는 인증서로 되돌려도 경보가 풀립니다. 원자적이지 않은 쓰기
+도중처럼 파일을 잠시 읽을 수 없으면 계속 서비스하고 다음 폴링에서 다시
+확인합니다.
+
+`GET /v1/status`의 `tls`는 리스너와 클라이언트마다 항목 하나씩을 담은 목록입니다.
+각 항목에는 `name`, `leaf.serial`(16진수), `leaf.sha256`(DER 지문), `loaded_at`,
+`reloads`, `failures`, `failing`, `last_error`가 있습니다. 변경이 있을 때마다 stderr에
+JSON 한 줄을 남깁니다.
+
+```json
+{"event":"tls_reloaded","name":"grpc listener","serial":"1002","sha256":"…"}
+{"event":"tls_reload_refused","name":"grpc listener","error":"…","serving_serial":"1001"}
+```
+
+Kubernetes API 소스(`--kubernetes-ca`, `--kubernetes-token`)는 relist할 때마다 CA와
+토큰 파일을 다시 읽으므로 폴러를 쓰지 않습니다. 두 파일 중 하나라도 내용이
+바뀌면 HTTP 클라이언트를 새로 만들고 이전 신뢰 풀은 더 쓰지 않습니다. 서버
+인증서와 맞지 않는 CA는 닫힌 쪽으로 실패합니다. 소스 관측이 만료되고, 유효한
+인증서로 다음 relist를 하면 회복합니다. 이런 변경 횟수는
+`pumgye_kubernetes_credential_reloads_total` 메트릭으로 셉니다.
+
+`observed-*` 소유자(관측 인증, workload, Human)도 다시 읽습니다
+(`authentication_observed client`, `workload_observed client`,
+`human_observed client`). 이 소유자들은 호패 SDK에 재적재되는 TLS 소스
+(`hopae-grpc`의 `ReloadableEndpointConfig`)를 넘기고, SDK는 새 연결을 만들 때마다 현재
+클라이언트 설정을 읽습니다.
+
+`hopae-grpc` 의존성은 ziozzang/hopae#15(`feat/grpc-reloadable-tls`, `74bb829`) 커밋에
+고정되어 있습니다. #14와 #15가 병합되면 이 고정을 병합된 `integrate/identity-platform`
+리비전으로 옮겨야 합니다.
+
+제약: 새 인증서가 반영되기까지 최대 폴링 주기 한 번만큼 걸립니다.
+
+## Prometheus 메트릭 (미릴리스)
+
+`GET /metrics`는 Prometheus 텍스트 형식(`text/plain; version=0.0.4`)으로 응답합니다.
+주 HTTPS 관리 리스너에 있으므로 스크레이프하려면 리스너의 mTLS 클라이언트
+인증서와 bearer 자격 증명이 필요합니다.
+
+- 관리자 자격 증명, 또는
+- 읽기 전용 스크레이프 전용 자격 증명. `--metrics-token-env`(기본
+  `PUMGYE_METRICS_TOKEN`)가 가리키는 환경 변수에서 읽습니다. 16–4096자의 보이는
+  ASCII 문자여야 하고 관리자·판정 자격 증명과 달라야 합니다. 이 자격 증명으로는
+  `/metrics`만 열 수 있습니다.
+
+평문 readiness 리스너는 메트릭을 제공하지 않습니다. Prometheus Operator
+`ServiceMonitor` 엔드포인트 예시는 다음과 같습니다.
+
+```yaml
+endpoints:
+  - port: management   # 9084, HTTPS 관리 리스너
+    scheme: https
+    path: /metrics
+    bearerTokenSecret: {name: pumgye-metrics, key: token}
+    tlsConfig:
+      ca: {secret: {name: pumgye-tls, key: ca.crt}}
+      cert: {secret: {name: pumgye-scrape-client, key: tls.crt}}
+      keySecret: {name: pumgye-scrape-client, key: tls.key}
+      serverName: pumgye.pumgye.svc
+```
+
+판정 경로에서의 기록은 relaxed 원자 증가 몇 번뿐입니다. 메모리를 할당하지 않고
+(`tests/metrics_no_alloc.rs`) 잠금도 쓰지 않습니다. 주체, IP 주소, 서비스, 자원을
+담는 레이블이 없으므로 시계열 개수가 고정됩니다. 예외는 TLS `name` 레이블 하나이며,
+그 값은 정해진 리스너·클라이언트 이름입니다.
+
+| 메트릭 | 형식 | 레이블 |
+| --- | --- | --- |
+| `pumgye_decisions_total` | counter | `context`(`permission`, `resource`, `workload_resource`, `human_resource`), `outcome`(`allow`, `deny`, `unavailable`), `reason`(판정 사유 코드, `unknown_resource`, `unknown_action`, `unavailable`) |
+| `pumgye_request_duration_seconds` | histogram | `transport`(`http`, `ppg1`, `grpc`, `sar`) |
+| `pumgye_policy_revision` | gauge | `model`(`v1`, `v2`) |
+| `pumgye_policy_v2_authoritative`, `pumgye_available` | gauge | — |
+| `pumgye_policy_publications_total` | counter | `model`, `outcome`(`applied`, `conflict` = If-Match CAS 충돌, `rejected`) |
+| `pumgye_shadow_decisions_total`, `pumgye_shadow_reason_drift_total` | counter | — |
+| `pumgye_shadow_mismatches_total` | counter | `explained`(`true`, `false`) |
+| `pumgye_shadow_window_start_timestamp_seconds` | gauge | — |
+| `pumgye_hopae_last_success_timestamp_seconds`, `pumgye_hopae_staleness_seconds` | gauge | `feed`(`projection`, `lifecycle`). 첫 동기화 전 staleness는 `-1` |
+| `pumgye_hopae_sync_failures_total`, `pumgye_hopae_cursor_expired_total` | counter | `feed` |
+| `pumgye_simulation_audit_rows` | gauge | —(보존된 행 수) |
+| `pumgye_simulation_audit_rows_appended_total` | counter | — |
+| `pumgye_observed_permits_total` | counter | `kind`(`service`, `workload`, `human`), `outcome`(`issued`, `permission_denied`, `unavailable`, `invalid_argument`, `unauthenticated`, `other`) |
+| `pumgye_tls_reloads_total`, `pumgye_tls_reload_failures_total` | counter | `name` |
+| `pumgye_tls_reload_failing` | gauge | `name` |
+| `pumgye_tls_leaf_expiry_seconds` | gauge | `name`(`notAfter`까지 남은 초. 만료되면 음수) |
+| `pumgye_kubernetes_credential_reloads_total` | counter | — |
+
+권장 경보:
+
+- `pumgye_tls_reload_failing == 1`
+- `pumgye_tls_leaf_expiry_seconds < 7 * 86400`
+- `pumgye_hopae_staleness_seconds`가 projection의 `max_staleness_secs`보다 클 때
+- `pumgye_shadow_mismatches_total{explained="false"}`가 늘어날 때
+- `pumgye_available == 0`

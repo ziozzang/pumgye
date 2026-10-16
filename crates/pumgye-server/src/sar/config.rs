@@ -25,7 +25,7 @@ pub(crate) struct Configuration {
     pub(super) listen: SocketAddr,
     pub(super) cluster: String,
     pub(super) authority: String,
-    pub(super) tls: Arc<rustls::ServerConfig>,
+    pub(super) tls: Arc<pumgye_server::tls_reload::Reloading<rustls::ServerConfig>>,
     pub(super) fingerprints: Vec<[u8; 32]>,
     pub(super) token: Zeroizing<String>,
 }
@@ -111,12 +111,20 @@ pub(crate) fn load(
                 .all(|v| !crate::credential_matches(v.as_bytes(), token.as_bytes())),
         "distinct bounded SAR caller credential required"
     );
-    let mut tls =
-        crate::transport::tls_config(&w.certificate, &w.key, &w.client_ca, &[b"http/1.1"])?;
-    let inner = Arc::get_mut(&mut tls).expect("fresh TLS configuration");
-    inner.send_tls13_tickets = 0;
-    inner.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
-    inner.max_early_data_size = 0;
+    let (c, k, a) = (w.certificate.clone(), w.key.clone(), w.client_ca.clone());
+    let tls = pumgye_server::tls_reload::Reloading::new(
+        "sar listener",
+        vec![c.clone(), k.clone(), a.clone()],
+        Some(c.clone()),
+        move || {
+            let mut config =
+                Arc::unwrap_or_clone(crate::transport::tls_config(&c, &k, &a, &[b"http/1.1"])?);
+            config.send_tls13_tickets = 0;
+            config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+            config.max_early_data_size = 0;
+            Ok(config)
+        },
+    )?;
     // Default rustls ticketer is disabled; no custom resumable ticket provider.
     let _ = Budget::new(Duration::from_secs(1))?;
     Ok(Configuration {

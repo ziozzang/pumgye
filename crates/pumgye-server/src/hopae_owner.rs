@@ -551,7 +551,7 @@ pub struct Config {
     pub lifecycle: Option<LifecycleConfig>,
 }
 pub struct Client {
-    http: reqwest::Client,
+    http: std::sync::Arc<crate::tls_reload::Reloading<reqwest::Client>>,
     base: reqwest::Url,
     token: Option<zeroize::Zeroizing<String>>,
     audience: Option<String>,
@@ -592,22 +592,36 @@ impl Client {
             !(config.token_env.is_some() && config.token_file.is_some()),
             "one Hopae credential source"
         );
-        let mut identity = bounded(&config.certificate)?;
-        identity.extend_from_slice(&bounded(&config.key)?);
-        let builder = reqwest::Client::builder()
-            .https_only(true)
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(reqwest::Certificate::from_pem(&bounded(&config.ca)?)?)
-            .identity(reqwest::Identity::from_pem(&identity)?)
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(std::time::Duration::from_secs(2))
-            .timeout(std::time::Duration::from_secs(10));
-        let http = match (config.connect_address, base.host_str()) {
-            (Some(address), Some(host)) => builder.resolve(host, address),
-            _ => builder,
-        }
-        .build()?;
+        // Rebuilt when the CA, certificate or key files change (tls_reload polling).
+        let (ca, certificate, key) = (
+            config.ca.clone(),
+            config.certificate.clone(),
+            config.key.clone(),
+        );
+        let (connect, host) = (config.connect_address, base.host_str().map(str::to_owned));
+        let http = crate::tls_reload::Reloading::new(
+            "hopae_owner client",
+            vec![ca.clone(), certificate.clone(), key.clone()],
+            Some(certificate.clone()),
+            move || {
+                let mut identity = bounded(&certificate)?;
+                identity.extend_from_slice(&bounded(&key)?);
+                let builder = reqwest::Client::builder()
+                    .https_only(true)
+                    .tls_built_in_root_certs(false)
+                    .add_root_certificate(reqwest::Certificate::from_pem(&bounded(&ca)?)?)
+                    .identity(reqwest::Identity::from_pem(&identity)?)
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .connect_timeout(std::time::Duration::from_secs(2))
+                    .timeout(std::time::Duration::from_secs(10));
+                Ok(match (connect, host.as_deref()) {
+                    (Some(address), Some(host)) => builder.resolve(host, address),
+                    _ => builder,
+                }
+                .build()?)
+            },
+        )?;
         let token = match (&config.token_env, &config.token_file) {
             (Some(name), _) => {
                 Some(zeroize::Zeroizing::new(env(name).ok_or_else(|| {
@@ -661,6 +675,7 @@ impl Client {
         let url = self.base.join(path).map_err(|_| Refusal::Transport)?;
         let mut request = self
             .http
+            .current()
             .post(url)
             .header("content-type", "application/json")
             .header("x-hopae-admin-request", "1")
