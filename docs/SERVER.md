@@ -122,3 +122,13 @@ unsigned decision API, not authentication-receipt verification or permission
 issuance; resource gRPC, Hangang UI/dispatch and signed projection remain open.
 
 The unreleased resource endpoint requires `service_id` and rejects a resource owned by another service. Service scope comes from trusted enforcement context, never an application claim.
+
+## Administrative explain API (unreleased)
+
+`POST /v1/explain`, `POST /v1/explain/batch`, `POST /v1/explain/diff` and
+`GET /v1/audit/simulations` require the administrator credential (the decision
+credential is refused) and share management admission. They run the enforcement
+evaluator with a trace sink against the published snapshot or an unpublished
+candidate (never stored), return an ordered stage trace with registered
+`pumgye.*` reason codes and en/ko message keys, and audit every call as a
+read-only `simulation`. See [the explain contract](EXPLAIN.md).
