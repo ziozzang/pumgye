@@ -642,10 +642,20 @@ async fn refresh_owners(
         let current = a.v2.lifecycle.lock().ok().and_then(|l| l.clone());
         let full = current.as_ref().is_none_or(|c| !c.complete)
             || now.saturating_sub(*last_reconcile) >= config.reconcile_interval_secs;
-        let seed = current
+        // Workload principals exist only in the feed: before a reconcile snapshot
+        // (which restarts at a new watermark) drain the feed from the old cursor
+        // so no workload change between the two positions is skipped.
+        let before = current
             .as_ref()
             .map(|c| c.workloads.clone())
             .unwrap_or_default();
+        let mut seed = before.clone();
+        if full
+            && let Some(mut previous) = current.clone().filter(|c| c.complete)
+            && client.lifecycle_follow(&mut previous).await.is_ok()
+        {
+            seed = previous.workloads;
+        }
         let result = match current {
             Some(mut state) if !full => match client.lifecycle_follow(&mut state).await {
                 Err(hopae_owner::Refusal::CursorExpired) => {
@@ -659,7 +669,7 @@ async fn refresh_owners(
             if full {
                 *last_reconcile = now;
             }
-            let workloads_changed = state.workloads != seed;
+            let workloads_changed = state.workloads != before;
             if let Ok(mut slot) = a.v2.lifecycle.lock() {
                 recompile |= slot
                     .as_ref()

@@ -532,9 +532,19 @@ pub struct Config {
     pub ca: std::path::PathBuf,
     pub certificate: std::path::PathBuf,
     pub key: std::path::PathBuf,
-    /// Optional environment variable holding a bearer credential for Hopae.
+    /// Environment variable holding the Hopae service credential (`hsc1.<id>.<secret>`).
     #[serde(default)]
     pub token_env: Option<String>,
+    /// Private file holding the Hopae service credential (preferred).
+    #[serde(default)]
+    pub token_file: Option<std::path::PathBuf>,
+    /// Audience sent as `x-hopae-audience` (Hopae `admin.service_audience`).
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// Pin the address the console host resolves to (Host header and TLS
+    /// server name stay the console host of `address`).
+    #[serde(default)]
+    pub connect_address: Option<std::net::SocketAddr>,
     #[serde(default)]
     pub projection: Option<ProjectionConfig>,
     #[serde(default)]
@@ -544,6 +554,7 @@ pub struct Client {
     http: reqwest::Client,
     base: reqwest::Url,
     token: Option<zeroize::Zeroizing<String>>,
+    audience: Option<String>,
     pub keys: Vec<PinnedKey>,
     pub projection: Option<ProjectionConfig>,
     pub lifecycle: Option<LifecycleConfig>,
@@ -571,9 +582,19 @@ impl Client {
             base.scheme() == "https" && base.path() == "/",
             "Hopae owner address must be an https origin"
         );
+        anyhow::ensure!(
+            config.audience.as_deref().is_none_or(|a| !a.is_empty()
+                && a.len() <= 256
+                && a.bytes().all(|b| b.is_ascii_graphic())),
+            "invalid Hopae audience"
+        );
+        anyhow::ensure!(
+            !(config.token_env.is_some() && config.token_file.is_some()),
+            "one Hopae credential source"
+        );
         let mut identity = bounded(&config.certificate)?;
         identity.extend_from_slice(&bounded(&config.key)?);
-        let http = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .https_only(true)
             .tls_built_in_root_certs(false)
             .add_root_certificate(reqwest::Certificate::from_pem(&bounded(&config.ca)?)?)
@@ -581,16 +602,32 @@ impl Client {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(2))
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?;
-        let token = match &config.token_env {
-            Some(name) => {
+            .timeout(std::time::Duration::from_secs(10));
+        let http = match (config.connect_address, base.host_str()) {
+            (Some(address), Some(host)) => builder.resolve(host, address),
+            _ => builder,
+        }
+        .build()?;
+        let token = match (&config.token_env, &config.token_file) {
+            (Some(name), _) => {
                 Some(zeroize::Zeroizing::new(env(name).ok_or_else(|| {
                     anyhow::anyhow!("Hopae owner credential unavailable")
                 })?))
             }
-            None => None,
+            (None, Some(path)) => {
+                let bytes = zeroize::Zeroizing::new(bounded(path)?);
+                Some(zeroize::Zeroizing::new(
+                    std::str::from_utf8(&bytes)?.trim().to_owned(),
+                ))
+            }
+            (None, None) => None,
         };
+        anyhow::ensure!(
+            token.as_ref().is_none_or(|t| !t.is_empty()
+                && t.len() <= 512
+                && t.bytes().all(|b| b.is_ascii_graphic())),
+            "invalid Hopae owner credential"
+        );
         let mut keys = Vec::new();
         if let Some(p) = &config.projection {
             anyhow::ensure!(
@@ -614,6 +651,7 @@ impl Client {
             http,
             base,
             token,
+            audience: config.audience,
             keys,
             projection: config.projection,
             lifecycle: config.lifecycle,
@@ -629,6 +667,9 @@ impl Client {
             .body(body.to_string());
         if let Some(t) = &self.token {
             request = request.bearer_auth(t.as_str());
+        }
+        if let Some(audience) = &self.audience {
+            request = request.header("x-hopae-audience", audience);
         }
         let response = request.send().await.map_err(|_| Refusal::Transport)?;
         if response.status() == reqwest::StatusCode::GONE {

@@ -107,25 +107,33 @@ validity boundary.
 ## Hopae owners
 
 `--hopae-owner owner.json` configures one authenticated HTTPS client to Hopae's
-admin listener (pinned CA, client certificate, optional bearer from an
-environment variable, `x-hopae-admin-request: 1`):
+admin mTLS listener (pinned CA, client certificate, Hopae service credential,
+`x-hopae-audience`, `x-hopae-admin-request: 1`):
 
 ```json
-{"address": "https://hopae-admin.example.test:9443", "ca": "/etc/pumgye/hopae-ca.pem",
- "certificate": "/etc/pumgye/pumgye.pem", "key": "/etc/pumgye/pumgye.key", "token_env": "PUMGYE_HOPAE_TOKEN",
+{"address": "https://hopae-admin.example.test", "ca": "/etc/pumgye/hopae-ca.pem",
+ "certificate": "/etc/pumgye/pumgye.pem", "key": "/etc/pumgye/pumgye.key",
+ "token_file": "/run/secrets/pumgye-hopae-token", "audience": "https://hopae-admin.example.test",
  "projection": {"audience": "pumgye", "keys": [{"issuer_ref": "hopae-groups", "key_epoch": 1, "public_key": "<base64>"}],
                 "max_age_secs": 300, "max_staleness_secs": 900, "poll_interval_secs": 15},
  "lifecycle": {"poll_interval_secs": 30, "reconcile_interval_secs": 3600}}
 ```
 
-**Caller credential.** Pumgye authenticates to Hopae's admin listener with mTLS
-plus a scoped bearer (`token_env`). Use a **dedicated read-only Hopae credential
-limited to `/v1/groups/projection/snapshot`, `/v1/groups/projection/changes`,
-`/v1/subjects/lifecycle` and `/v1/subjects/lifecycle/snapshot`**; never an
-administrator session or a write-capable role. If Hopae cannot yet scope a
-credential to those routes, that route scoping is a Hopae-side prerequisite for
-production (until then use the narrowest read-only role Hopae offers and keep the
-credential in the private service environment).
+`token_file` (preferred) or `token_env` holds the credential; `audience` is sent as
+`x-hopae-audience`; optional `connect_address` pins the address the console host
+resolves to (the Host header and TLS server name stay the console host).
+
+**Caller credential.** Pumgye uses a Hopae **route-scoped, read-only service
+credential** (Hopae `docs/SERVICE_CREDENTIALS.md`): `Bearer hsc1.<id>.<secret>`,
+accepted only on Hopae's admin mTLS listener, only together with the client
+certificate it is pinned to (SPKI SHA-256 and/or SAN), only for Hopae's audience and
+only on the preset `pumgye-v2` routes (`/v1/groups/projection/snapshot`,
+`/v1/groups/projection/changes`, `/v1/subjects/lifecycle`,
+`/v1/subjects/lifecycle/snapshot`); Hopae refuses every write route with
+`403 service_route_forbidden`. Mint it with
+`hopae admin service-credentials create pumgye-v2 --preset pumgye-v2 --client-spki-sha256 <Pumgye cert SPKI> [--client-san <Pumgye SPIFFE ID>] --config …`,
+store the printed token in a private file, and rotate with `rotate` → deploy the next
+token → `promote`. Never use an administrator session or a delegation key.
 
 **Membership projection** (Hopae `docs/GROUPS.md`). Pumgye sends the relevant group
 vocabulary of the published snapshot and verifies every page exactly as the
@@ -154,6 +162,49 @@ republishes without it. Disabled principals are listed (`subject_disabled`) with
 rights change. With a complete lifecycle snapshot, publishing a new or changed
 binding that names a deleted or unknown Human is refused
 (`pumgye.validation.subject_deleted` / `subject_unresolved`).
+
+## Kubernetes workload principals (Hopae ServiceAccount identity)
+
+Hopae authenticates Kubernetes workloads as their **ServiceAccount** (Hopae
+`docs/KUBERNETES_WORKLOAD.md`): principal `wk2:<64 hex>` (one ServiceAccount UID
+incarnation), SPIFFE ID `spiffe://<trust-domain>/ns/<ns>/sa/<sa>` (the name) and the
+wire subject `s_<48 hex>` that enforcement carries. Version 2 bindings may name a
+workload `{kind: "workload", ref}` by `wk2:` principal (pinned to one UID) or by
+SPIFFE ID (survives re-creation by design); legacy Pod-bound `s_` subjects stay
+accepted with a deprecation warning.
+
+- Pumgye reads the lifecycle feed with `include_workloads: true`:
+  `workload_observed` adds the alias wire subject → (principal, SPIFFE ID),
+  `workload_retired` (ServiceAccount deleted or re-created) retires the principal for
+  good, `workload_legacy_mapped` records Pod-bound subject → principal. Workload
+  records are persisted (Hopae's snapshot omits them) and the feed is drained from
+  the old cursor before every reconcile snapshot.
+- Evaluation: a workload wire subject also carries the grants of its principal and
+  SPIFFE ID (an allocation-free alias index beside group membership). A caller named
+  directly by SPIFFE ID (Hangang SVID listeners) matches name bindings only, because
+  an SVID carries no UID. Retired principals and their wire subjects orphan their
+  bindings; publishing a new binding to a retired principal is refused
+  (`pumgye.validation.subject_retired`). Explain shows the alias.
+- Migration from Pod-bound grants: `GET /v2/workloads` lists principals, Hopae's
+  legacy mappings and **report-only re-grant proposals** (a copy of each binding that
+  names a mapped legacy subject, targeted at the ServiceAccount principal);
+  `POST /v2/workloads/regrants/apply {base_revision, proposals, reason, approval_ref?}`
+  applies chosen proposals as a CAS publication (`source: migrated:legacy-pod`,
+  stamped actor). Legacy bindings stay until retired explicitly. The migration
+  preview also reports observed mappings for v1 `workload_users`.
+
+## AAL3
+
+Hopae presents AAL3 only to opted-in applications and seals it in receipts (Hopae
+ADR-0018 decisions 3 and 11). Pumgye compares levels numerically and accepts a
+Human AAL3 **only from Hopae-sealed evidence**: verified authentication receipts,
+permission contexts and observed Human permits (`SealedAssurance`). Levels asserted
+by an adapter (the unsigned Human resource entrypoints) remain AAL1–2. Version 2
+templates, bindings and resources may require 3; until the projection advertises
+`max_aal ≥ 3` they compile with the unsatisfiable-assurance warning and are never
+downgraded. Explain reports `presented`/`required` and returns
+`obligations.required_aal: 3`; v1 explain cases take
+`assurance_evidence: "sealed"` to simulate a sealed AAL3.
 
 ## Sumunjang zone contract (CIDR fallback until Sumunjang exports zones)
 
@@ -288,33 +339,41 @@ or caching per-(principal, service, permission) results, both rejected for P0.
 | Adversarial fixtures (group spoofing via header, orphan, AAL3 unsatisfiable, class header mismatch) | Done: no group input exists on any request shape (unknown fields refused), projection forgeries refused; orphans; AAL3 warning without downgrade; client class is advisory on the permission path and never accepted on resource paths |
 | v1/v2 shadow parity on the qualification corpus | Done in tests; the 7-day production window is an operational gate |
 | Performance within 10 % of `0409a7a` | Met against the ADR floor; versus current v1, single paths +4–11 % and a cache-resident alternating mix +20–28 % (residual analysed above) |
-| Hopae membership projection + lifecycle consumption | Done: unit-tested with signed pages and qualified live against Hopae `integrate/identity-platform` (`60b3a60`) with the local interop tool (20/20) |
+| Hopae membership projection + lifecycle consumption | Done: unit-tested with signed pages and qualified live with the local interop tool through a Hopae service credential (31/31, including workload principals) |
 | Sumunjang `NetworkZone` export | Contract defined; local CIDR fallback until Sumunjang ships it |
 | Real four-component chain on the remote k3s (ADR 0022) | Not run in this change |
 
 ## Local interoperability qualification (opt-in)
 
-`tools/hopae_v2_interop.py` runs a real Hopae (`integrate/identity-platform`,
-groups + subject directory) and a real Pumgye as loopback processes, without a
-cluster or OIDC provider:
+`tools/hopae_v2_interop.py` runs a real Hopae and a real Pumgye as loopback
+processes, without a cluster or OIDC provider:
 
 ```sh
-python3 tools/hopae_v2_interop.py --hopae <hopae binary> --pumgye target/debug/pumgye [--workdir DIR] [--keep]
+python3 tools/hopae_v2_interop.py --hopae <hopae binary> --pumgye target/debug/pumgye [--workdir DIR] [--keep] [--skip-workloads]
 ```
 
 It configures Hopae with the projection key, the native Human receipt issuer
-(needed for `human1:` subjects, which requires Hopae's mTLS gRPC listener) and the
-unified delegation key; lays people down in Hopae's store with SQL as Hopae's own
-scenario tests do; creates groups, memberships and disables through Hopae's real
-admin API; and points Pumgye's `--hopae-owner` at a loopback mTLS relay that signs
-delegated requests and admits only the four projection/lifecycle read routes (the
-shape of the dedicated read-only credential above). Checks (20): signed snapshot
-and feed consumed; group-based allow; explicit deny precedence; feed removal
-revokes; Hopae unreachable → fail closed after `max_staleness_secs`, then recovery;
-disable → `subject_disabled` without rights change; store deletion → orphaned
-binding and refusal of new bindings to the deleted principal; journal pruned behind
-Pumgye's cursor → `410 cursor_expired` → resnapshot and convergence. Needs Python
-3.11+ and the `cryptography` package. Last run: 20/20 against Hopae `60b3a60`.
+(needed for `human1:` subjects, which requires Hopae's mTLS gRPC listener), the
+admin mTLS listener, `admin.service_audience`, a `kubernetes_workload` profile with a
+static JWKS, and the unified delegation key used by the tool for operator writes;
+lays people down in Hopae's store with SQL as Hopae's own scenario tests do; creates
+groups, memberships and disables through Hopae's real admin API; mints the Pumgye
+service credential with `hopae admin service-credentials create --preset pumgye-v2`;
+and points Pumgye's `--hopae-owner` **directly** at the admin mTLS listener through a
+transparent TCP fault injector (TLS passes through; used only to simulate outages).
+Checks (31): service credential refused on a write route, with another client
+certificate and with another audience; signed snapshot and feed consumed; group
+allow; explicit deny precedence; feed removal revokes; Hopae unreachable → fail
+closed after `max_staleness_secs`, then recovery; disable → `subject_disabled`;
+store deletion → orphaned binding and refusal of new bindings; journal pruned behind
+Pumgye's cursor → `410 cursor_expired` → resnapshot and convergence; a ServiceAccount
+token verified offline by Hopae (rollout keeps the principal) appears as
+`workload_observed`, the wire subject inherits the `wk2:` binding, a SPIFFE-name deny
+applies to it, and an SVID caller named by SPIFFE ID gets name bindings only. Needs
+Python 3.11+ and the `cryptography` package. Last run: 31/31 against a local,
+unpushed merge of Hopae `feat/scoped-service-credentials` (`b318922`) and
+`feat/k8s-workload-identity` (`c6fb27a`); `--skip-workloads` for builds without
+workload identity.
 
 ## Limitations
 
@@ -323,5 +382,9 @@ Pumgye's cursor → `410 cursor_expired` → resnapshot and convergence. Needs P
 - Permit owners in v2 mode receive v1-shaped Catalog metadata (level as the
   information class; compartments are not yet carried in permits).
 - Projection sharding beyond 256 relevant groups is P1.
-- Group grants for workloads (namespace/ServiceAccount principals, Hopae
-  `feat/k8s-workload-identity`) are P1.
+- Group grants for workloads are P1 (workload principals themselves are
+  supported, see below).
+- Workload principals are known only from Hopae's feed (not its snapshot): Pumgye
+  persists them; if the lifecycle cursor expires, changes before the new watermark
+  are only recovered when Hopae reports the principal again (next authentication by
+  a new Hopae process).
