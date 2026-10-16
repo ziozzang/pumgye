@@ -118,6 +118,15 @@ environment variable, `x-hopae-admin-request: 1`):
  "lifecycle": {"poll_interval_secs": 30, "reconcile_interval_secs": 3600}}
 ```
 
+**Caller credential.** Pumgye authenticates to Hopae's admin listener with mTLS
+plus a scoped bearer (`token_env`). Use a **dedicated read-only Hopae credential
+limited to `/v1/groups/projection/snapshot`, `/v1/groups/projection/changes`,
+`/v1/subjects/lifecycle` and `/v1/subjects/lifecycle/snapshot`**; never an
+administrator session or a write-capable role. If Hopae cannot yet scope a
+credential to those routes, that route scoping is a Hopae-side prerequisite for
+production (until then use the narrowest read-only role Hopae offers and keep the
+credential in the private service environment).
+
 **Membership projection** (Hopae `docs/GROUPS.md`). Pumgye sends the relevant group
 vocabulary of the published snapshot and verifies every page exactly as the
 contract requires: envelope format, pinned `(issuer_ref, key_epoch)` key (never one
@@ -246,13 +255,25 @@ host with load ≈ 5):
 | shuffled allow | 462–475 | 443–461 |
 | shuffled mixed | 351–355 | 357–371 |
 
-Single-path cases are within +5–8 % of v1 and faster than the ADR's `0409a7a`
+Single-path cases are within +4–11 % of v1 and faster than the ADR's `0409a7a`
 regression floor (≈ 368 ns sequential, ≈ 1,243 ns shuffled allow measured with the
-same loop on this host). A strictly alternating mix of four outcomes on sequential
-subjects measured +18–28 % (branch prediction on alternating paths); it is a core
-microbenchmark artefact of tens of nanoseconds, below 1 % of a measured request
-chain, and is listed as an open item. Evaluation is allocation-free
-(`tests/no_alloc.rs` covers every v2 outcome).
+same loop on this host). Evaluation is allocation-free (`tests/no_alloc.rs` covers
+every v2 outcome).
+
+**Residual (open).** A strictly alternating mix of four outcomes over *sequential*
+subjects (the whole working set cache-resident, ≈ 200 ns of pure CPU per decision)
+remains +20–28 % slower than v1 after a focused attempt (straight-line fast path for
+unconditional single grants with the general path out of line, combined
+ceiling/clearance loop, compact ceiling indexes, FNV vocabularies). Analysis: v2
+resolves the permission bit *and* the Catalog label for every request at stage 4
+(ADR order), and evaluates the ceiling and clearance per template, while v1 resolves
+the class lazily and stops at the first failing union check; with outcomes
+alternating every request, the extra hash lookup and the per-template clearance
+branches are not hidden by memory stalls. The absolute delta is ≈ 40 ns; on the
+cache-missing *shuffled* mix (65,536 principals) v2 is at parity (391–397 vs
+400–415 ns) and on the measured mTLS request chain (≈ 7 µs per decision) it is below
+1 %. Removing it would require dropping the ADR stage order (resolving labels lazily)
+or caching per-(principal, service, permission) results, both rejected for P0.
 
 ## ADR 0021 P0 acceptance status
 
@@ -266,7 +287,7 @@ chain, and is listed as an open item. Evaluation is allocation-free
 | Property tests (deny monotonicity, ceiling-only-reduces, no rights without binding, kind isolation, expiry) | Done (deterministic generators) |
 | Adversarial fixtures (group spoofing via header, orphan, AAL3 unsatisfiable, class header mismatch) | Done: no group input exists on any request shape (unknown fields refused), projection forgeries refused; orphans; AAL3 warning without downgrade; client class is advisory on the permission path and never accepted on resource paths |
 | v1/v2 shadow parity on the qualification corpus | Done in tests; the 7-day production window is an operational gate |
-| Performance within 10 % of `0409a7a` | Done for the ADR floor; see the mixed-pattern note above |
+| Performance within 10 % of `0409a7a` | Met against the ADR floor; versus current v1, single paths +4–11 % and a cache-resident alternating mix +20–28 % (residual analysed above) |
 | Hopae membership projection + lifecycle consumption | Done against the documented contract (unit-tested with signed pages); live interoperability with Hopae `feat/groups` not yet run |
 | Sumunjang `NetworkZone` export | Contract defined; local CIDR fallback until Sumunjang ships it |
 | Real four-component chain on the remote k3s (ADR 0022) | Not run in this change |
@@ -278,5 +299,5 @@ chain, and is listed as an open item. Evaluation is allocation-free
 - Permit owners in v2 mode receive v1-shaped Catalog metadata (level as the
   information class; compartments are not yet carried in permits).
 - Projection sharding beyond 256 relevant groups is P1.
-- The authenticated Hopae admin credential model for a Pumgye service caller
-  (`token_env` plus mTLS) must be confirmed with Hopae's admin listener policy.
+- Group grants for workloads (namespace/ServiceAccount principals, Hopae
+  `feat/k8s-workload-identity`) are P1.

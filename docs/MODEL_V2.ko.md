@@ -73,6 +73,13 @@ workload 케이스는 0이어야 합니다. projection `max_aal`보다 높은 AA
 설정합니다(고정 CA, 클라이언트 인증서, 선택적 bearer 환경 변수, `x-hopae-admin-request: 1`).
 설정 예시는 [영문 문서](MODEL_V2.md#hopae-owners)를 참조하세요.
 
+**호출자 자격.** 품계는 mTLS와 범위가 제한된 bearer(`token_env`)로 Hopae admin 리스너에
+인증합니다. **`/v1/groups/projection/snapshot`, `/v1/groups/projection/changes`,
+`/v1/subjects/lifecycle`, `/v1/subjects/lifecycle/snapshot`만 허용된 품계 전용 읽기 전용 Hopae
+자격**을 사용하고 관리자 세션이나 쓰기 가능한 역할은 절대 쓰지 마세요. Hopae가 아직 이 경로들로
+자격 범위를 제한하지 못하면 그 경로 범위 지정이 운영 전 Hopae 측 선행 조건입니다(그전까지는 Hopae가
+제공하는 가장 좁은 읽기 전용 역할을 쓰고 자격은 비공개 서비스 환경에 둡니다).
+
 **멤버십 projection**(Hopae `docs/GROUPS.md`). 게시된 스냅샷의 관련 그룹 어휘를 보내고
 계약대로 모든 페이지를 검증합니다: envelope 형식, 고정된 `(issuer_ref, key_epoch)` 키(envelope의
 키는 절대 사용하지 않음), 파싱 전에 `"hangang-zerotrust:hopae-membership-projection:v1\0" ||
@@ -181,11 +188,19 @@ release 빌드, 고정 코어 1개, 직접 바인딩이 하나씩 있는 service
 | shuffled allow | 462–475 | 443–461 |
 | shuffled mixed | 351–355 | 357–371 |
 
-단일 경로 케이스는 v1 대비 +5–8 % 이내이며 ADR의 `0409a7a` 회귀 기준(같은 루프·같은 호스트에서
-순차 allow ≈ 368 ns, shuffled allow ≈ 1,243 ns)보다 빠릅니다. 순차 주체에 네 결과를 엄격히 번갈아
-섞은 경우 +18–28 %(번갈아 바뀌는 경로의 분기 예측)가 측정되었습니다. 수십 ns 규모의 코어
-microbenchmark 현상으로 측정된 요청 체인의 1 % 미만이며 미결 항목으로 남깁니다. 평가는 할당이
-없습니다(`tests/no_alloc.rs`가 v2 모든 결과를 검사).
+단일 경로 케이스는 v1 대비 +4–11 % 이내이며 ADR의 `0409a7a` 회귀 기준(같은 루프·같은 호스트에서
+순차 allow ≈ 368 ns, shuffled allow ≈ 1,243 ns)보다 빠릅니다. 평가는 할당이 없습니다
+(`tests/no_alloc.rs`가 v2 모든 결과를 검사).
+
+**잔여 차이(미결).** *순차* 주체(작업 집합 전체가 캐시에 상주, 판정당 순수 CPU ≈ 200 ns)에서 네
+결과를 매 요청 번갈아 섞는 패턴은 집중 최적화(무조건 단일 grant용 직선 fast path와 일반 경로 분리,
+상한·clearance 통합 루프, 압축 상한 인덱스, FNV 어휘) 뒤에도 v1보다 +20–28 % 느립니다. 분석: v2는
+ADR 순서상 4단계에서 모든 요청의 권한 비트와 카탈로그 레이블을 모두 해석하고 템플릿별로 상한과
+clearance를 평가하는 반면, v1은 등급을 지연 해석하고 첫 합집합 검사 실패에서 멈춥니다. 결과가 매
+요청 바뀌면 추가 해시 조회와 템플릿별 clearance 분기가 메모리 대기 뒤에 숨지 않습니다. 절대 차이는
+≈ 40 ns이며, 캐시 미스가 나는 *shuffled* 혼합(주체 65,536)에서는 동등(391–397 vs 400–415 ns),
+측정된 mTLS 요청 체인(판정당 ≈ 7 µs)에서는 1 % 미만입니다. 이를 없애려면 ADR 단계 순서를 버리거나
+(레이블 지연 해석) (주체, 서비스, 권한)별 결과를 캐시해야 하며 둘 다 P0에서는 채택하지 않았습니다.
 
 ## ADR 0021 P0 수용 기준 상태
 
@@ -199,7 +214,7 @@ microbenchmark 현상으로 측정된 요청 체인의 1 % 미만이며 미결 �
 | 속성 테스트(거부 단조성, 상한은 줄이기만, 바인딩 없이 권한 없음, 종류 격리, 만료) | 완료(결정적 생성기) |
 | 적대적 fixture(헤더를 통한 그룹 위조, 고아, AAL3 충족 불가, 등급 헤더 불일치) | 완료: 어떤 요청에도 그룹 입력이 없고(모르는 필드 거부) projection 위조는 거부, 고아 처리, 낮추지 않는 AAL3 경고, 클라이언트 등급은 권한 경로에서 참고용이며 리소스 경로에서는 받지 않음 |
 | qualification 코퍼스에서 v1/v2 섀도 동등성 | 테스트로 완료, 운영 7일 관찰은 운영 게이트 |
-| `0409a7a` 대비 10 % 이내 성능 | ADR 기준 충족, 위 혼합 패턴 메모 참조 |
+| `0409a7a` 대비 10 % 이내 성능 | ADR 기준 충족. 현재 v1 대비 단일 경로 +4–11 %, 캐시 상주 교차 혼합 +20–28 %(위 잔여 분석) |
 | Hopae 멤버십 projection·수명 주기 소비 | 문서화된 계약 기준 완료(서명 페이지 단위 테스트), Hopae `feat/groups`와의 실제 상호 운용은 아직 실행하지 않음 |
 | 수문장 `NetworkZone` export | 계약 정의, 수문장 제공 전까지 로컬 CIDR 대체 |
 | 원격 k3s 실제 4개 구성 요소 체인(ADR 0022) | 이 변경에서 실행하지 않음 |
@@ -211,5 +226,4 @@ microbenchmark 현상으로 측정된 요청 체인의 1 % 미만이며 미결 �
 - v2 모드의 permit 소유자는 v1 형태 카탈로그 메타데이터를 받습니다(수준을 정보 등급으로 사용,
   compartment는 아직 permit에 싣지 않음).
 - 관련 그룹 256개를 넘는 projection 샤딩은 P1입니다.
-- 품계 서비스 호출자에 대한 Hopae admin 인증 모델(`token_env` + mTLS)은 Hopae admin 리스너
-  정책과 확인이 필요합니다.
+- workload 그룹 권한(네임스페이스/ServiceAccount 주체, Hopae `feat/k8s-workload-identity`)은 P1입니다.

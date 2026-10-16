@@ -1590,6 +1590,104 @@ impl CompiledV2 {
         if direct.is_none() && groups.iter().all(|w| *w == 0) {
             return DecisionV2::Guest;
         }
+        // Production fast path (straight-line): a principal without groups whose only
+        // grant on this service is an unconditional allow. Explain always takes the
+        // general path below; corpus parity tests compare both.
+        if !T::ENABLED
+            && let Some(slot) = direct
+            && slot.len == 1
+            && slot.first.service == service.index
+            && slot.first.len == 1
+            && slot.fast.perms != u32::MAX
+            && groups == [0; 4]
+        {
+            return self.decide_fast(
+                service,
+                slot.fast,
+                r,
+                permission,
+                level,
+                compartments,
+                resource_min,
+            );
+        }
+        self.decide_general(
+            service,
+            direct,
+            groups,
+            r,
+            permission,
+            level,
+            compartments,
+            resource_min,
+            trace,
+        )
+    }
+    /// Stages 8–11 for an unconditional single allow (stages 6–7 are trivially
+    /// satisfied: no deny, live, any zone).
+    #[allow(clippy::too_many_arguments)]
+    #[inline(always)]
+    fn decide_fast(
+        &self,
+        service: &CompiledServiceV2,
+        g: FastGrant,
+        r: &RequestV2<'_>,
+        permission: u16,
+        level: u8,
+        compartments: u64,
+        resource_min: u8,
+    ) -> DecisionV2 {
+        let index = match service.hosts.get(&r.ip.to_canonical()) {
+            Some(i) => *i,
+            None => match service.ceilings.longest(r.ip) {
+                Some(i) => *i,
+                None => return DecisionV2::NetworkGuest,
+            },
+        };
+        let set = &service.ceiling_sets[index as usize];
+        if !has(&self.masks[g.perms as usize], permission) {
+            return DecisionV2::PermissionDenied;
+        }
+        let grant_fits =
+            g.level != u8::MAX && level <= g.level && compartments & !g.compartments == 0;
+        let (mut permitted, mut required) = (false, u8::MAX);
+        for e in &set.entries[..set.len as usize] {
+            let p = has(&e.perms, permission);
+            permitted |= p;
+            let fits = p
+                && grant_fits
+                && e.level != u8::MAX
+                && level <= e.level
+                && compartments & !e.compartments == 0;
+            if fits {
+                required = required.min(g.min_aal.max(e.min_aal).max(resource_min));
+            }
+        }
+        if !permitted {
+            return DecisionV2::PermissionDenied;
+        }
+        if required == u8::MAX {
+            return DecisionV2::ClassDenied;
+        }
+        if r.aal > 3 || r.aal < required {
+            return DecisionV2::AssuranceDenied;
+        }
+        DecisionV2::Allow
+    }
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn decide_general<T: TracerV2>(
+        &self,
+        service: &CompiledServiceV2,
+        direct: Option<&Slot>,
+        groups: GroupMask,
+        r: &RequestV2<'_>,
+        permission: u16,
+        level: u8,
+        compartments: u64,
+        resource_min: u8,
+        trace: &mut T,
+    ) -> DecisionV2 {
         // Zone membership is computed only when a grant carries a zone condition.
         let zones = std::cell::Cell::new(if T::ENABLED {
             Some(self.zone_mask(r.ip))
@@ -1626,38 +1724,7 @@ impl CompiledV2 {
         let (mut candidates, mut live, mut zoned) = (0u32, 0u32, 0u32);
         let (mut permitted, mut cleared) = (false, false);
         let mut required = u8::MAX;
-        // Production fast path: a principal whose only grant on this service is an
-        // unconditional allow and who has no groups. Same outcome as the loop below
-        // (explain always takes the loop; parity is tested over the corpus).
-        let fast = match direct {
-            Some(slot)
-                if !T::ENABLED
-                    && slot.len == 1
-                    && slot.first.service == service.index
-                    && slot.first.len == 1
-                    && slot.fast.perms != u32::MAX
-                    && groups.iter().all(|w| *w == 0) =>
-            {
-                Some(slot.fast)
-            }
-            _ => None,
-        };
-        if let Some(g) = fast {
-            (candidates, live, zoned) = (1, 1, 1);
-            if has(&self.masks[g.perms as usize], permission) {
-                for e in entries {
-                    if !has(&e.perms, permission) {
-                        continue;
-                    }
-                    permitted = true;
-                    let fits = |l: u8, c: u64| l != u8::MAX && level <= l && compartments & !c == 0;
-                    if fits(g.level, g.compartments) && fits(e.level, e.compartments) {
-                        cleared = true;
-                        required = required.min(g.min_aal.max(e.min_aal).max(resource_min));
-                    }
-                }
-            }
-        } else {
+        {
             self.for_each_grant(direct, &groups, service.index, |g| {
                 let is_live = g.live(r.now);
                 if g.deny {
