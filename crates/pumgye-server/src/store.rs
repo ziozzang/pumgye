@@ -98,6 +98,7 @@ impl Store {
             CREATE TABLE IF NOT EXISTS authority_model (id INTEGER PRIMARY KEY CHECK(id=1), model TEXT NOT NULL CHECK(model IN ('v1','v2')));
             CREATE TABLE IF NOT EXISTS model_history (id INTEGER PRIMARY KEY AUTOINCREMENT, at_unix INTEGER NOT NULL, model TEXT NOT NULL, revision INTEGER NOT NULL, actor TEXT NOT NULL, approval_ref TEXT, reason TEXT NOT NULL, gate TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS shadow_window (id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS workload_principals (id INTEGER PRIMARY KEY CHECK(id=1), state TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS shadow_explanations (id INTEGER PRIMARY KEY AUTOINCREMENT, at_unix INTEGER NOT NULL, actor TEXT NOT NULL, rule TEXT NOT NULL, reason TEXT NOT NULL, retired INTEGER NOT NULL DEFAULT 0);")?;
         let stored: Option<String> = connection
             .query_row("SELECT document FROM policy WHERE id=1", [], |r| r.get(0))
@@ -454,6 +455,25 @@ impl Store {
             [state],
         )?;
         Ok(())
+    }
+    /// Workload principals from Hopae's feed (not in its snapshot).
+    pub fn save_workloads(&self, state: &str) -> Result<()> {
+        ensure!(state.len() <= 16 * 1024 * 1024, "workload state bound");
+        self.connection.execute(
+            "INSERT INTO workload_principals VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET state=excluded.state",
+            [state],
+        )?;
+        Ok(())
+    }
+    pub fn load_workloads(&self) -> Result<Option<String>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT state FROM workload_principals WHERE id=1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
     pub fn load_shadow(&self) -> Result<Option<String>> {
         Ok(self

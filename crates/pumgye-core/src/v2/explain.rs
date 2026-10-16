@@ -53,8 +53,10 @@ impl CaseV2 {
         {
             return Err((CaseError::InvalidLabel, "label"));
         }
+        let spiffe =
+            self.subject.kind == PrincipalKind::Workload && spiffe_workload(&self.subject.id);
         for (path, v) in [
-            ("subject.id", Some(&self.subject.id)),
+            ("subject.id", Some(&self.subject.id).filter(|_| !spiffe)),
             ("service", Some(&self.service)),
             ("resource", self.resource.as_ref()),
             ("action", self.action.as_ref()),
@@ -355,6 +357,7 @@ pub fn explain(
                 valid,
                 direct,
                 groups,
+                aliases,
             } => {
                 let code = if !failed {
                     "pumgye.detail.principal_matched"
@@ -374,6 +377,7 @@ pub fn explain(
                 entries.push(entry(Stage::Principal, failed, code, json!({
                     "kind": case.subject.kind, "id": case.subject.id, "direct_bindings": direct, "groups": names,
                     "membership": if case.hypothetical_groups.is_some() { "hypothetical" } else { "projection" },
+                    "workload_alias": membership.workload_alias(&case.subject.id).map(|(p, s)| json!({"principal": p, "spiffe_id": s, "bound": aliases})),
                 })));
             }
             TraceV2Event::ZoneSet { zones } => request_zones = zones,

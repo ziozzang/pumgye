@@ -69,16 +69,22 @@ workload 케이스는 0이어야 합니다. projection `max_aal`보다 높은 AA
 
 ## Hopae 소유자 입력
 
-`--hopae-owner owner.json`은 Hopae admin 리스너로 가는 인증된 HTTPS 클라이언트 하나를
-설정합니다(고정 CA, 클라이언트 인증서, 선택적 bearer 환경 변수, `x-hopae-admin-request: 1`).
-설정 예시는 [영문 문서](MODEL_V2.md#hopae-owners)를 참조하세요.
+`--hopae-owner owner.json`은 Hopae admin mTLS 리스너로 가는 인증된 HTTPS 클라이언트 하나를
+설정합니다(고정 CA, 클라이언트 인증서, Hopae 서비스 자격, `x-hopae-audience`,
+`x-hopae-admin-request: 1`). 설정 예시는 [영문 문서](MODEL_V2.md#hopae-owners)를 참조하세요.
+`token_file`(권장) 또는 `token_env`에 자격을 두고, `audience`는 `x-hopae-audience`로 보내며,
+선택적 `connect_address`는 콘솔 호스트가 해석될 주소를 고정합니다(Host 헤더와 TLS 서버 이름은
+그대로 콘솔 호스트).
 
-**호출자 자격.** 품계는 mTLS와 범위가 제한된 bearer(`token_env`)로 Hopae admin 리스너에
-인증합니다. **`/v1/groups/projection/snapshot`, `/v1/groups/projection/changes`,
-`/v1/subjects/lifecycle`, `/v1/subjects/lifecycle/snapshot`만 허용된 품계 전용 읽기 전용 Hopae
-자격**을 사용하고 관리자 세션이나 쓰기 가능한 역할은 절대 쓰지 마세요. Hopae가 아직 이 경로들로
-자격 범위를 제한하지 못하면 그 경로 범위 지정이 운영 전 Hopae 측 선행 조건입니다(그전까지는 Hopae가
-제공하는 가장 좁은 읽기 전용 역할을 쓰고 자격은 비공개 서비스 환경에 둡니다).
+**호출자 자격.** 품계는 Hopae의 **경로 범위가 제한된 읽기 전용 서비스 자격**(Hopae
+`docs/SERVICE_CREDENTIALS.md`)을 사용합니다: `Bearer hsc1.<id>.<secret>`이며 Hopae admin mTLS
+리스너에서만, 고정된 클라이언트 인증서(SPKI SHA-256 및/또는 SAN)와 함께, Hopae audience에 대해서만,
+preset `pumgye-v2` 경로(`/v1/groups/projection/snapshot`, `/v1/groups/projection/changes`,
+`/v1/subjects/lifecycle`, `/v1/subjects/lifecycle/snapshot`)에서만 받아들여지고 쓰기 경로는
+`403 service_route_forbidden`으로 거부됩니다. `hopae admin service-credentials create pumgye-v2
+--preset pumgye-v2 --client-spki-sha256 <품계 인증서 SPKI> [--client-san <품계 SPIFFE ID>] --config …`로
+발급해 출력된 토큰을 비공개 파일에 두고, `rotate` → 다음 토큰 배포 → `promote`로 교체합니다.
+관리자 세션이나 위임 키는 절대 쓰지 마세요.
 
 **멤버십 projection**(Hopae `docs/GROUPS.md`). 게시된 스냅샷의 관련 그룹 어휘를 보내고
 계약대로 모든 페이지를 검증합니다: envelope 형식, 고정된 `(issuer_ref, key_epoch)` 키(envelope의
@@ -100,6 +106,38 @@ payload 바이트`에 대한 엄격한 Ed25519 검증, 그다음 `kind`·issuer/
 다시 게시할 때까지 `/v2/status`에 표시됩니다. 비활성 주체는 권한 변경 없이 `subject_disabled`로
 표시됩니다. 수명 주기 snapshot이 완전하면 삭제되었거나 알 수 없는 Human을 지정하는 새·변경
 바인딩 게시는 거부됩니다(`pumgye.validation.subject_deleted` / `subject_unresolved`).
+
+## Kubernetes workload 주체(Hopae ServiceAccount 신원)
+
+Hopae는 Kubernetes workload를 **ServiceAccount**로 인증합니다(Hopae `docs/KUBERNETES_WORKLOAD.md`):
+주체 `wk2:<64 hex>`(ServiceAccount UID 한 세대), SPIFFE ID `spiffe://<trust-domain>/ns/<ns>/sa/<sa>`
+(이름), 집행이 싣는 wire 주체 `s_<48 hex>`. 버전 2 바인딩은 workload를 `{kind: "workload", ref}`로
+`wk2:` 주체(UID 고정) 또는 SPIFFE ID(설계상 재생성에도 유지)로 지정할 수 있으며, 레거시 Pod 기반
+`s_` 주체는 사용 중단 경고와 함께 계속 허용합니다.
+
+- 품계는 `include_workloads: true`로 수명 주기 feed를 읽습니다. `workload_observed`는 wire 주체 →
+  (주체, SPIFFE ID) 별칭을 추가하고, `workload_retired`(ServiceAccount 삭제 또는 재생성)는 주체를
+  영구 폐기하며, `workload_legacy_mapped`는 Pod 기반 주체 → 주체 매핑을 기록합니다. workload 기록은
+  저장되며(Hopae snapshot에는 없음) 매 reconcile snapshot 전에 이전 cursor부터 feed를 비웁니다.
+- 평가: workload wire 주체는 자기 주체와 SPIFFE ID의 권한도 가집니다(그룹 멤버십 옆의 할당 없는 별칭
+  인덱스). SPIFFE ID로 직접 지정된 호출자(한강 SVID 리스너)는 SVID에 UID가 없으므로 이름 바인딩만
+  적용됩니다. 폐기된 주체와 그 wire 주체는 바인딩을 고아로 만들고, 폐기된 주체에 대한 새 바인딩 게시는
+  거부됩니다(`pumgye.validation.subject_retired`). explain은 별칭을 보여 줍니다.
+- Pod 기반 권한 이전: `GET /v2/workloads`는 주체, Hopae 레거시 매핑, **보고 전용 재부여 제안**(매핑된
+  레거시 주체를 지정한 각 바인딩을 ServiceAccount 주체로 옮긴 사본)을 나열하고,
+  `POST /v2/workloads/regrants/apply {base_revision, proposals, reason, approval_ref?}`는 선택한 제안을
+  CAS 게시로 적용합니다(`source: migrated:legacy-pod`, 행위자 기록). 레거시 바인딩은 명시적으로
+  폐기할 때까지 남습니다. 이전 미리보기도 v1 `workload_users`의 관측된 매핑을 보고합니다.
+
+## AAL3
+
+Hopae는 opt-in 애플리케이션에만 AAL3을 표시하고 receipt에 봉인합니다(Hopae ADR-0018 결정 3, 11).
+품계는 수준을 숫자로 비교하고 Human AAL3을 **Hopae가 봉인한 증거에서만** 받아들입니다: 검증된 인증
+receipt, 권한 context, 관측 Human permit(`SealedAssurance`). 어댑터가 주장하는 수준(서명 없는 Human
+리소스 진입점)은 AAL1–2로 유지합니다. 버전 2 템플릿·바인딩·리소스는 3을 요구할 수 있고, projection이
+`max_aal ≥ 3`을 알리기 전까지 충족 불가 경고와 함께 컴파일되며 절대 낮춰지지 않습니다. explain은
+`presented`/`required`와 `obligations.required_aal: 3`을 보고하며, v1 explain 케이스는
+`assurance_evidence: "sealed"`로 봉인된 AAL3을 모의합니다.
 
 ## 수문장 존 계약(수문장이 존을 내보내기 전까지 CIDR 대체)
 
@@ -215,28 +253,34 @@ clearance를 평가하는 반면, v1은 등급을 지연 해석하고 첫 합집
 | 적대적 fixture(헤더를 통한 그룹 위조, 고아, AAL3 충족 불가, 등급 헤더 불일치) | 완료: 어떤 요청에도 그룹 입력이 없고(모르는 필드 거부) projection 위조는 거부, 고아 처리, 낮추지 않는 AAL3 경고, 클라이언트 등급은 권한 경로에서 참고용이며 리소스 경로에서는 받지 않음 |
 | qualification 코퍼스에서 v1/v2 섀도 동등성 | 테스트로 완료, 운영 7일 관찰은 운영 게이트 |
 | `0409a7a` 대비 10 % 이내 성능 | ADR 기준 충족. 현재 v1 대비 단일 경로 +4–11 %, 캐시 상주 교차 혼합 +20–28 %(위 잔여 분석) |
-| Hopae 멤버십 projection·수명 주기 소비 | 완료: 서명 페이지 단위 테스트와 로컬 상호 운용 도구로 Hopae `integrate/identity-platform`(`60b3a60`) 실제 검증(20/20) |
+| Hopae 멤버십 projection·수명 주기 소비 | 완료: 서명 페이지 단위 테스트와 Hopae 서비스 자격을 쓰는 로컬 상호 운용 도구로 실제 검증(workload 주체 포함 31/31) |
 | 수문장 `NetworkZone` export | 계약 정의, 수문장 제공 전까지 로컬 CIDR 대체 |
 | 원격 k3s 실제 4개 구성 요소 체인(ADR 0022) | 이 변경에서 실행하지 않음 |
 
 ## 로컬 상호 운용 검증(opt-in)
 
-`tools/hopae_v2_interop.py`는 클러스터나 OIDC 제공자 없이 실제 Hopae(`integrate/identity-platform`,
-그룹 + 주체 디렉터리)와 실제 품계를 루프백 프로세스로 실행합니다.
+`tools/hopae_v2_interop.py`는 클러스터나 OIDC 제공자 없이 실제 Hopae와 실제 품계를 루프백
+프로세스로 실행합니다.
 
 ```sh
-python3 tools/hopae_v2_interop.py --hopae <hopae 바이너리> --pumgye target/debug/pumgye [--workdir DIR] [--keep]
+python3 tools/hopae_v2_interop.py --hopae <hopae 바이너리> --pumgye target/debug/pumgye [--workdir DIR] [--keep] [--skip-workloads]
 ```
 
 Hopae에 projection 키, `human1:` 주체에 필요한 네이티브 Human receipt 발급자(Hopae mTLS gRPC
-리스너 필요), unified 위임 키를 설정하고, Hopae 시나리오 테스트처럼 사람을 SQL로 저장소에 넣은 뒤
-그룹·멤버십·비활성화는 Hopae의 실제 admin API로 수행합니다. 품계의 `--hopae-owner`는 위임 요청에
-서명하고 projection/수명 주기 읽기 경로 4개만 허용하는 루프백 mTLS relay(위 전용 읽기 전용 자격의
-형태)를 가리킵니다. 검사(20): 서명된 snapshot과 feed 소비, 그룹 기반 허용, 명시적 거부 우선,
-feed 제거에 의한 회수, Hopae 접근 불가 시 `max_staleness_secs` 뒤 fail closed와 복구, 비활성화 →
-권한 변경 없는 `subject_disabled`, 저장소 삭제 → 고아 바인딩과 삭제된 주체에 대한 새 바인딩 거부,
-품계 cursor 뒤로 journal 정리 → `410 cursor_expired` → 재snapshot과 수렴. Python 3.11+와
-`cryptography` 패키지가 필요합니다. 마지막 실행: Hopae `60b3a60` 대상 20/20.
+리스너 필요), admin mTLS 리스너, `admin.service_audience`, 정적 JWKS를 쓰는 `kubernetes_workload`
+프로필, 도구의 운영자 쓰기용 unified 위임 키를 설정하고, Hopae 시나리오 테스트처럼 사람을 SQL로
+저장소에 넣은 뒤 그룹·멤버십·비활성화는 Hopae의 실제 admin API로 수행합니다. 품계 서비스 자격은
+`hopae admin service-credentials create --preset pumgye-v2`로 발급하고, 품계의 `--hopae-owner`는
+투명한 TCP 장애 주입기(TLS는 그대로 통과, 장애 모의 전용)를 거쳐 admin mTLS 리스너를 **직접**
+호출합니다. 검사(31): 서비스 자격의 쓰기 경로·다른 클라이언트 인증서·다른 audience 거부, 서명된
+snapshot과 feed 소비, 그룹 허용, 명시적 거부 우선, feed 제거 회수, Hopae 접근 불가 시 fail closed와
+복구, 비활성화 → `subject_disabled`, 저장소 삭제 → 고아 바인딩과 새 바인딩 거부, journal 정리 →
+`410 cursor_expired` → 재snapshot과 수렴, Hopae가 오프라인 검증한 ServiceAccount 토큰(rollout에도
+같은 주체)이 `workload_observed`로 들어오고 wire 주체가 `wk2:` 바인딩을 상속하며 SPIFFE 이름 거부가
+적용되고 SPIFFE ID로 지정된 SVID 호출자는 이름 바인딩만 받음. Python 3.11+와 `cryptography`
+패키지가 필요합니다. 마지막 실행: Hopae `feat/scoped-service-credentials`(`b318922`)와
+`feat/k8s-workload-identity`(`c6fb27a`)의 로컬 병합(푸시하지 않음) 대상 31/31. workload 신원이 없는
+빌드는 `--skip-workloads`를 사용합니다.
 
 ## 제약
 
@@ -245,4 +289,7 @@ feed 제거에 의한 회수, Hopae 접근 불가 시 `max_staleness_secs` 뒤 f
 - v2 모드의 permit 소유자는 v1 형태 카탈로그 메타데이터를 받습니다(수준을 정보 등급으로 사용,
   compartment는 아직 permit에 싣지 않음).
 - 관련 그룹 256개를 넘는 projection 샤딩은 P1입니다.
-- workload 그룹 권한(네임스페이스/ServiceAccount 주체, Hopae `feat/k8s-workload-identity`)은 P1입니다.
+- workload 그룹 권한은 P1입니다(workload 주체 자체는 아래처럼 지원).
+- workload 주체는 Hopae feed에서만 알 수 있으므로(snapshot에는 없음) 품계가 저장합니다. 수명 주기
+  cursor가 만료되면 새 watermark 이전 변경은 Hopae가 그 주체를 다시 보고할 때(새 Hopae 프로세스의
+  다음 인증)만 복구됩니다.

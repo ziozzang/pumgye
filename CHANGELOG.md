@@ -16,7 +16,15 @@
   application (pinned keys, strict Ed25519 with domain separation, vocabulary and
   freshness binding, cursor/watermark continuity, 410 resnapshot) and the subject
   lifecycle feed with orphan reconciliation.
-- Opt-in local Hopae interop qualification (`tools/hopae_v2_interop.py`).
+- Opt-in local Hopae interop qualification (`tools/hopae_v2_interop.py`): direct
+  Hopae service credential (`hsc1`, preset `pumgye-v2`), workload principals.
+- Kubernetes workload principals: v2 bindings by `wk2:` principal or SPIFFE ID,
+  wire-subject aliases from Hopae `include_workloads` lifecycle events, retirement
+  orphans, `GET /v2/workloads` and reasoned `POST /v2/workloads/regrants/apply`.
+- AAL3 from Hopae-sealed evidence (receipts, permission contexts, observed Human
+  permits); `SealedAssurance`; explain `assurance_evidence`.
+- Hopae owner client: `token_file`, `audience` (`x-hopae-audience`) and
+  `connect_address` for Hopae route-scoped service credentials.
 - Shadow evaluation of v2 beside v1 with persisted counters and explanations; the
   zero-unexplained-mismatch cutover gate (`--shadow-window-days`), approved cutover,
   rollback and model history; `--v2-production` reason requirement.

@@ -338,13 +338,17 @@ impl Service {
         ) {
             return Err(unavailable());
         }
-        let decision = policy.compiled().evaluate_scoped_human_resource(
+        // The receipt is verified: its sealed level (AAL3 only for opted-in
+        // applications, Hopae ADR-0018) is evidence, not an adapter assertion.
+        let sealed = pumgye_core::SealedAssurance::from_verified_receipt(auth.aal())
+            .ok_or_else(unavailable)?;
+        let decision = policy.compiled().evaluate_scoped_human_sealed_resource(
             &context.service,
             &input.resource,
             &input.action,
             auth.subject(),
             ip,
-            auth.aal(),
+            sealed,
             GuardEvidence::EnforcedAllow,
         );
         if decision != ResourceDecision::Decided(Decision::Allow) {

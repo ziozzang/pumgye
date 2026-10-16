@@ -322,11 +322,118 @@ pub struct Lifecycle {
     pub cursor: Option<String>,
     /// A complete reconcile snapshot has been applied.
     pub complete: bool,
+    /// Kubernetes workload principals (`wk2:`) from `include_workloads` feed
+    /// changes. Not in Hopae's snapshot: kept across resnapshots and persisted.
+    pub workloads: Workloads,
+}
+/// One ServiceAccount principal as Hopae reported it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Workload {
+    pub principal: String,
+    pub subject_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spiffe_id: Option<String>,
+    pub cluster: String,
+    pub namespace: String,
+    pub service_account: String,
+    pub service_account_uid: String,
+    /// `active` or `retired`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Workloads {
+    /// principal → record
+    pub principals: BTreeMap<String, Workload>,
+    /// Pod-bound legacy `s_` subject → ServiceAccount principal (migration).
+    pub legacy: BTreeMap<String, String>,
+}
+impl Workloads {
+    fn apply(&mut self, change: &str, w: &Value) -> Result<(), Refusal> {
+        let text = |k: &str| w[k].as_str().map(str::to_owned);
+        let principal = text("principal").ok_or(Refusal::Malformed)?;
+        let subject_ref = text("subject_ref").ok_or(Refusal::Malformed)?;
+        let spiffe_id = text("spiffe_id");
+        if !principal.starts_with("wk2:")
+            || !pumgye_core::v2::principal_ref_valid(
+                pumgye_core::v2::PrincipalKind::Workload,
+                &principal,
+            )
+            || !pumgye_core::v2::legacy_workload(&subject_ref)
+            || spiffe_id
+                .as_deref()
+                .is_some_and(|s| !pumgye_core::v2::spiffe_workload(s))
+        {
+            return Err(Refusal::Malformed);
+        }
+        let record = Workload {
+            principal: principal.clone(),
+            subject_ref,
+            spiffe_id,
+            cluster: text("cluster").unwrap_or_default(),
+            namespace: text("namespace").unwrap_or_default(),
+            service_account: text("service_account").unwrap_or_default(),
+            service_account_uid: text("service_account_uid").unwrap_or_default(),
+            status: if change == "workload_retired" {
+                "retired".into()
+            } else {
+                "active".into()
+            },
+            cause: text("cause"),
+            replacement: text("replacement"),
+        };
+        match change {
+            // A retired principal never becomes active again (UIDs are never reused).
+            "workload_observed" | "workload_legacy_mapped"
+                if self
+                    .principals
+                    .get(&principal)
+                    .is_some_and(|p| p.status == "retired") => {}
+            "workload_observed" => {
+                self.principals.insert(principal, record);
+            }
+            "workload_retired" => {
+                self.principals.insert(principal, record);
+            }
+            "workload_legacy_mapped" => {
+                let legacy = text("legacy_subject_ref")
+                    .filter(|l| pumgye_core::v2::legacy_workload(l))
+                    .ok_or(Refusal::Malformed)?;
+                self.legacy.insert(legacy, principal.clone());
+                self.principals.entry(principal).or_insert(record);
+            }
+            _ => return Err(Refusal::Malformed),
+        }
+        Ok(())
+    }
+    /// Active `(subject_ref, principal, spiffe_id)` aliases.
+    pub fn active(&self) -> impl Iterator<Item = (&str, &str, Option<&str>)> {
+        self.principals
+            .values()
+            .filter(|w| w.status == "active")
+            .map(|w| {
+                (
+                    w.subject_ref.as_str(),
+                    w.principal.as_str(),
+                    w.spiffe_id.as_deref(),
+                )
+            })
+    }
 }
 impl Lifecycle {
     /// Apply snapshot items (`human_subject`, `status`) or feed changes (same fields).
     pub fn apply(&mut self, items: &Value) -> Result<(), Refusal> {
         for item in items.as_array().ok_or(Refusal::Malformed)? {
+            if let Some(change) = item["change"]
+                .as_str()
+                .filter(|c| c.starts_with("workload_"))
+            {
+                self.workloads.apply(change, &item["workload"])?;
+                continue;
+            }
             let status = item["status"].as_str().ok_or(Refusal::Malformed)?;
             if !matches!(status, "active" | "disabled" | "deleted") {
                 return Err(Refusal::Malformed);
@@ -346,6 +453,15 @@ impl Lifecycle {
     }
     pub fn view(&self) -> pumgye_core::v2::Lifecycle {
         let mut l = pumgye_core::v2::Lifecycle::default();
+        for w in self
+            .workloads
+            .principals
+            .values()
+            .filter(|w| w.status == "retired")
+        {
+            l.deleted.insert(w.principal.clone());
+            l.deleted.insert(w.subject_ref.clone());
+        }
         for (s, status) in &self.statuses {
             match status.as_str() {
                 "deleted" => {
@@ -416,9 +532,19 @@ pub struct Config {
     pub ca: std::path::PathBuf,
     pub certificate: std::path::PathBuf,
     pub key: std::path::PathBuf,
-    /// Optional environment variable holding a bearer credential for Hopae.
+    /// Environment variable holding the Hopae service credential (`hsc1.<id>.<secret>`).
     #[serde(default)]
     pub token_env: Option<String>,
+    /// Private file holding the Hopae service credential (preferred).
+    #[serde(default)]
+    pub token_file: Option<std::path::PathBuf>,
+    /// Audience sent as `x-hopae-audience` (Hopae `admin.service_audience`).
+    #[serde(default)]
+    pub audience: Option<String>,
+    /// Pin the address the console host resolves to (Host header and TLS
+    /// server name stay the console host of `address`).
+    #[serde(default)]
+    pub connect_address: Option<std::net::SocketAddr>,
     #[serde(default)]
     pub projection: Option<ProjectionConfig>,
     #[serde(default)]
@@ -428,6 +554,7 @@ pub struct Client {
     http: reqwest::Client,
     base: reqwest::Url,
     token: Option<zeroize::Zeroizing<String>>,
+    audience: Option<String>,
     pub keys: Vec<PinnedKey>,
     pub projection: Option<ProjectionConfig>,
     pub lifecycle: Option<LifecycleConfig>,
@@ -455,9 +582,19 @@ impl Client {
             base.scheme() == "https" && base.path() == "/",
             "Hopae owner address must be an https origin"
         );
+        anyhow::ensure!(
+            config.audience.as_deref().is_none_or(|a| !a.is_empty()
+                && a.len() <= 256
+                && a.bytes().all(|b| b.is_ascii_graphic())),
+            "invalid Hopae audience"
+        );
+        anyhow::ensure!(
+            !(config.token_env.is_some() && config.token_file.is_some()),
+            "one Hopae credential source"
+        );
         let mut identity = bounded(&config.certificate)?;
         identity.extend_from_slice(&bounded(&config.key)?);
-        let http = reqwest::Client::builder()
+        let builder = reqwest::Client::builder()
             .https_only(true)
             .tls_built_in_root_certs(false)
             .add_root_certificate(reqwest::Certificate::from_pem(&bounded(&config.ca)?)?)
@@ -465,16 +602,32 @@ impl Client {
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(std::time::Duration::from_secs(2))
-            .timeout(std::time::Duration::from_secs(10))
-            .build()?;
-        let token = match &config.token_env {
-            Some(name) => {
+            .timeout(std::time::Duration::from_secs(10));
+        let http = match (config.connect_address, base.host_str()) {
+            (Some(address), Some(host)) => builder.resolve(host, address),
+            _ => builder,
+        }
+        .build()?;
+        let token = match (&config.token_env, &config.token_file) {
+            (Some(name), _) => {
                 Some(zeroize::Zeroizing::new(env(name).ok_or_else(|| {
                     anyhow::anyhow!("Hopae owner credential unavailable")
                 })?))
             }
-            None => None,
+            (None, Some(path)) => {
+                let bytes = zeroize::Zeroizing::new(bounded(path)?);
+                Some(zeroize::Zeroizing::new(
+                    std::str::from_utf8(&bytes)?.trim().to_owned(),
+                ))
+            }
+            (None, None) => None,
         };
+        anyhow::ensure!(
+            token.as_ref().is_none_or(|t| !t.is_empty()
+                && t.len() <= 512
+                && t.bytes().all(|b| b.is_ascii_graphic())),
+            "invalid Hopae owner credential"
+        );
         let mut keys = Vec::new();
         if let Some(p) = &config.projection {
             anyhow::ensure!(
@@ -498,6 +651,7 @@ impl Client {
             http,
             base,
             token,
+            audience: config.audience,
             keys,
             projection: config.projection,
             lifecycle: config.lifecycle,
@@ -513,6 +667,9 @@ impl Client {
             .body(body.to_string());
         if let Some(t) = &self.token {
             request = request.bearer_auth(t.as_str());
+        }
+        if let Some(audience) = &self.audience {
+            request = request.header("x-hopae-audience", audience);
         }
         let response = request.send().await.map_err(|_| Refusal::Transport)?;
         if response.status() == reqwest::StatusCode::GONE {
@@ -594,8 +751,12 @@ impl Client {
         Err(Refusal::Continuity)
     }
     /// Reconcile snapshot followed by the feed.
-    pub async fn lifecycle_snapshot(&self) -> Result<Lifecycle, Refusal> {
-        let mut state = Lifecycle::default();
+    /// `seed` carries the workload principals, which Hopae's snapshot omits.
+    pub async fn lifecycle_snapshot(&self, seed: Workloads) -> Result<Lifecycle, Refusal> {
+        let mut state = Lifecycle {
+            workloads: seed,
+            ..Default::default()
+        };
         let mut cursor: Option<String> = None;
         let mut watermark = None;
         for _ in 0..MAX_PAGES {
@@ -627,7 +788,7 @@ impl Client {
             let text = self
                 .post(
                     "/v1/subjects/lifecycle",
-                    &serde_json::json!({"cursor": state.cursor, "limit": 100}),
+                    &serde_json::json!({"cursor": state.cursor, "limit": 100, "include_workloads": true}),
                 )
                 .await?;
             let page: Value = serde_json::from_str(&text).map_err(|_| Refusal::Malformed)?;
@@ -887,5 +1048,51 @@ pub(crate) mod tests {
             l.apply(&json!([{"human_subject":H1,"status":"merged"}]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn workload_lifecycle_aliases_retirement_and_legacy_mappings() {
+        let wk = format!("wk2:{}", "e".repeat(64));
+        let next = format!("wk2:{}", "f".repeat(64));
+        let wire = format!("s_{}", "9".repeat(48));
+        let legacy = format!("s_{}", "1".repeat(48));
+        let spiffe = "spiffe://cluster.example.test/ns/blue/sa/worker";
+        let w = |principal: &str, extra: Value| {
+            let mut v = json!({"principal": principal, "subject_ref": wire, "spiffe_id": spiffe, "cluster": "c", "namespace": "blue",
+                "service_account": "worker", "service_account_uid": "uid-1", "service": "orders"});
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let mut l = Lifecycle::default();
+        l.apply(&json!([
+            {"change": "workload_observed", "user_id": null, "status": "active", "workload": w(&wk, json!({}))},
+            {"change": "workload_legacy_mapped", "user_id": null, "status": "active", "workload": w(&wk, json!({"legacy_subject_ref": legacy}))},
+        ])).unwrap();
+        assert_eq!(
+            l.workloads.active().collect::<Vec<_>>(),
+            [(wire.as_str(), wk.as_str(), Some(spiffe))]
+        );
+        assert_eq!(l.workloads.legacy[&legacy], wk);
+        l.apply(
+            &json!([{"change": "workload_retired", "user_id": null, "status": "retired",
+            "workload": w(&wk, json!({"cause": "uid_changed", "replacement": next}))}]),
+        )
+        .unwrap();
+        assert_eq!(l.workloads.active().count(), 0);
+        assert!(l.view().deleted.contains(&wk));
+        // Retirement is final; a late observation cannot revive it.
+        l.apply(&json!([{"change": "workload_observed", "user_id": null, "status": "active", "workload": w(&wk, json!({}))}])).unwrap();
+        assert_eq!(l.workloads.principals[&wk].status, "retired");
+        for bad in [
+            json!({"principal": "wk2:short", "subject_ref": wire}),
+            w(&wk, json!({"spiffe_id": "spiffe://Bad/ns/x/sa/y"})),
+        ] {
+            assert!(
+                l.apply(&json!([{"change": "workload_observed", "workload": bad}]))
+                    .is_err()
+            );
+        }
     }
 }
