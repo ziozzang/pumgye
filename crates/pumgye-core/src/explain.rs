@@ -431,6 +431,22 @@ pub struct Case {
     pub guard: Option<GuardInput>,
     #[serde(default)]
     pub minimum_revision: u64,
+    /// Human only: whether the simulated AAL comes from Hopae-sealed evidence
+    /// (receipt / permission context; required for AAL3) or an adapter.
+    #[serde(default, skip_serializing_if = "AssuranceEvidence::is_asserted")]
+    pub assurance_evidence: AssuranceEvidence,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssuranceEvidence {
+    #[default]
+    Asserted,
+    Sealed,
+}
+impl AssuranceEvidence {
+    fn is_asserted(&self) -> bool {
+        *self == AssuranceEvidence::Asserted
+    }
 }
 /// Validation refusal of a case; never a decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -519,6 +535,11 @@ impl Case {
         }
         if self.minimum_revision > i64::MAX as u64 {
             return Err(CaseError::RevisionOutOfRange);
+        }
+        if self.assurance_evidence == AssuranceEvidence::Sealed
+            && self.subject.kind != SubjectKind::Human
+        {
+            return Err(CaseError::UnsupportedCombination);
         }
         let names = [
             Some(&self.subject.id),
@@ -838,13 +859,21 @@ pub fn explain(snapshot: Snapshot<'_>, case: &Case, trace: bool) -> Result<Expla
                 &mut sink,
             ),
         (SubjectKind::Human, Target::Resource { resource, action }) => compiled
-            .evaluate_scoped_human_resource_traced(
+            .evaluate_scoped_human_assurance_traced(
                 &case.service,
                 resource,
                 action,
                 subject,
                 ip,
-                case.aal,
+                match case.assurance_evidence {
+                    AssuranceEvidence::Asserted => crate::HumanAssurance::Asserted(case.aal),
+                    AssuranceEvidence::Sealed => {
+                        crate::SealedAssurance::from_verified_receipt(case.aal).map_or(
+                            crate::HumanAssurance::Asserted(case.aal),
+                            crate::HumanAssurance::Sealed,
+                        )
+                    }
+                },
                 guard,
                 &mut sink,
             ),
