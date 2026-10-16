@@ -33,6 +33,7 @@ pub const ADMISSION_CODES: &[&str] = &[
     "pumgye.validation.reason_required",
     "pumgye.validation.subject_deleted",
     "pumgye.validation.subject_unresolved",
+    "pumgye.validation.subject_retired",
 ];
 /// Registered converter review / unmigrated codes (also message keys).
 pub const MIGRATION_CODES: &[&str] = &[
@@ -245,8 +246,44 @@ pub fn principal_ref_valid(kind: PrincipalKind, reference: &str) -> bool {
                 .strip_prefix("wk2:")
                 .is_some_and(|d| lower_hex(d, 64))
                 || legacy_workload(reference)
+                || spiffe_workload(reference)
         }
     }
+}
+/// Kubernetes ServiceAccount SPIFFE ID `spiffe://<trust-domain>/ns/<namespace>/sa/<name>`
+/// (Hopae `docs/KUBERNETES_WORKLOAD.md`): names the ServiceAccount, not one UID
+/// incarnation, so bindings by SPIFFE ID survive re-creation by design.
+pub fn spiffe_workload(reference: &str) -> bool {
+    let Some(rest) = reference.strip_prefix("spiffe://") else {
+        return false;
+    };
+    let mut parts = rest.split('/');
+    let (Some(td), Some("ns"), Some(ns), Some("sa"), Some(sa), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    let dns_label = |v: &str, max: usize| {
+        !v.is_empty()
+            && v.len() <= max
+            && v.bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+            && !v.starts_with(['-', '.'])
+            && !v.ends_with(['-', '.'])
+    };
+    reference.len() <= 512
+        && !td.is_empty()
+        && td.len() <= 255
+        && td
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+        && dns_label(ns, 63)
+        && dns_label(sa, 253)
 }
 /// Legacy Pod-bound workload subjects (`s_` form) kept by the converter; deprecated.
 pub fn legacy_workload(reference: &str) -> bool {
@@ -1229,6 +1266,11 @@ impl PolicyV2 {
 #[derive(Clone, Debug, Default)]
 pub struct MembershipIndex {
     members: HashMap<String, GroupMask>,
+    /// Workload wire subject (`s_`) → slots bound to its `wk2:` principal and
+    /// its SPIFFE ID (from Hopae lifecycle `workload_observed`).
+    workloads: HashMap<String, [Option<Slot>; 2]>,
+    /// Alias names for explain/status (cold).
+    workload_names: HashMap<String, (String, Option<String>)>,
 }
 impl MembershipIndex {
     /// Build from `principal → GroupRefs`; GroupRefs outside the vocabulary are ignored.
@@ -1254,7 +1296,46 @@ impl MembershipIndex {
                 members.insert(principal.to_owned(), mask);
             }
         }
-        Self { members }
+        Self {
+            members,
+            workloads: HashMap::new(),
+            workload_names: HashMap::new(),
+        }
+    }
+    /// Add active workload aliases `(subject_ref s_, principal wk2:, spiffe_id)`.
+    pub fn with_workloads<'a>(
+        mut self,
+        compiled: &CompiledV2,
+        workloads: impl IntoIterator<Item = (&'a str, &'a str, Option<&'a str>)>,
+    ) -> Self {
+        let table = &compiled.principals[PrincipalKind::Workload.index()];
+        for (subject, principal, spiffe) in workloads {
+            if !legacy_workload(subject) || !principal_ref_valid(PrincipalKind::Workload, principal)
+            {
+                continue;
+            }
+            self.workload_names.insert(
+                subject.to_owned(),
+                (principal.to_owned(), spiffe.map(str::to_owned)),
+            );
+            let slots = [
+                table.get(principal).copied(),
+                spiffe
+                    .filter(|s| spiffe_workload(s))
+                    .and_then(|s| table.get(s).copied()),
+            ];
+            if slots.iter().any(Option::is_some) {
+                self.workloads.insert(subject.to_owned(), slots);
+            }
+        }
+        self
+    }
+    /// The `wk2:` principal and SPIFFE ID Hopae reported for a wire subject.
+    pub fn workload_alias(&self, subject: &str) -> Option<&(String, Option<String>)> {
+        self.workload_names.get(subject)
+    }
+    pub fn workload_aliases(&self) -> usize {
+        self.workload_names.len()
     }
     pub fn len(&self) -> usize {
         self.members.len()
@@ -1384,6 +1465,7 @@ pub enum TraceV2Event {
         resource_min_aal: u8,
     },
     Principal {
+        aliases: bool,
         valid: bool,
         direct: bool,
         groups: GroupMask,
@@ -1452,11 +1534,19 @@ impl CompiledV2 {
     fn for_each_grant(
         &self,
         direct: Option<&Slot>,
+        aliases: Option<&[Option<Slot>; 2]>,
         groups: &GroupMask,
         service: u16,
         mut f: impl FnMut(&Grant) -> bool,
     ) {
         if let Some(slot) = direct {
+            for g in self.subject_grants(slot, service) {
+                if !f(g) {
+                    return;
+                }
+            }
+        }
+        for slot in aliases.into_iter().flatten().flatten() {
             for g in self.subject_grants(slot, service) {
                 if !f(g) {
                     return;
@@ -1582,12 +1672,20 @@ impl CompiledV2 {
         } else {
             [0; 4]
         };
+        // Workload wire subjects (`s_`) also carry the grants of their `wk2:`
+        // principal and SPIFFE ID, as reported by Hopae's lifecycle feed.
+        let aliases = if r.kind == PrincipalKind::Workload {
+            membership.workloads.get(r.subject)
+        } else {
+            None
+        };
         trace.event(TraceV2Event::Principal {
             valid,
             direct: direct.is_some(),
             groups,
+            aliases: aliases.is_some(),
         });
-        if direct.is_none() && groups.iter().all(|w| *w == 0) {
+        if direct.is_none() && aliases.is_none() && groups.iter().all(|w| *w == 0) {
             return DecisionV2::Guest;
         }
         // Production fast path (straight-line): a principal without groups whose only
@@ -1600,6 +1698,7 @@ impl CompiledV2 {
             && slot.first.len == 1
             && slot.fast.perms != u32::MAX
             && groups == [0; 4]
+            && aliases.is_none()
         {
             return self.decide_fast(
                 service,
@@ -1614,6 +1713,7 @@ impl CompiledV2 {
         self.decide_general(
             service,
             direct,
+            aliases,
             groups,
             r,
             permission,
@@ -1680,6 +1780,7 @@ impl CompiledV2 {
         &self,
         service: &CompiledServiceV2,
         direct: Option<&Slot>,
+        aliases: Option<&[Option<Slot>; 2]>,
         groups: GroupMask,
         r: &RequestV2<'_>,
         permission: u16,
@@ -1725,7 +1826,7 @@ impl CompiledV2 {
         let (mut permitted, mut cleared) = (false, false);
         let mut required = u8::MAX;
         {
-            self.for_each_grant(direct, &groups, service.index, |g| {
+            self.for_each_grant(direct, aliases, &groups, service.index, |g| {
                 let is_live = g.live(r.now);
                 if g.deny {
                     if is_live && has(&g.perms, permission) && zone_ok(g) {

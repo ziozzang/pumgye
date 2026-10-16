@@ -1400,3 +1400,193 @@ fn compartment_conversion_preserves_unordered_v1_classes() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Kubernetes workload principals (Hopae ServiceAccount identity) and AAL3
+// ---------------------------------------------------------------------------
+
+const WK: &str = "wk2:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+const WK_WIRE: &str = "s_999999999999999999999999999999999999999999999999";
+const SPIFFE: &str = "spiffe://cluster.example.test/ns/blue/sa/worker";
+
+#[test]
+fn spiffe_ids_are_canonical_serviceaccount_names() {
+    use pumgye_core::v2::spiffe_workload as ok;
+    assert!(ok(SPIFFE));
+    assert!(ok("spiffe://td_1.example/ns/a-b/sa/x.y"));
+    for bad in [
+        "spiffe://Cluster/ns/blue/sa/worker",
+        "spiffe://td/ns/blue/sa/worker/extra",
+        "spiffe://td/ns/Blue/sa/worker",
+        "spiffe://td/ns//sa/worker",
+        "spiffe://td/sa/worker/ns/blue",
+        "spiffe:/td/ns/blue/sa/worker",
+        "spiffe://td/ns/-blue/sa/worker",
+    ] {
+        assert!(!ok(bad), "{bad}");
+    }
+}
+
+fn workload_doc() -> Value {
+    let mut doc = document();
+    doc["bindings"] = json!([
+        {"id":"bnd_wk2","effect":"allow","subjects":[{"kind":"workload","ref":WK}],"role":"reader","scope":{"services":["orders"]}},
+        {"id":"bnd_spiffe","effect":"allow","subjects":[{"kind":"workload","ref":SPIFFE}],"role":"writer","scope":{"services":["orders"]},
+         "conditions":{"minimum_aal":0}},
+    ]);
+    // Machine principals present AAL0: drop template AAL minimums for this fixture.
+    for t in ["reader", "writer", "admin"] {
+        doc["templates"][t]["minimum_aal"] = json!(0);
+    }
+    doc
+}
+
+#[test]
+fn workload_wire_subjects_inherit_principal_and_spiffe_bindings() {
+    let p: PolicyV2 = serde_json::from_value(workload_doc()).unwrap();
+    let c = p.compile().unwrap();
+    let r = |subject, permission| {
+        req(
+            "orders",
+            K::Workload,
+            subject,
+            perm(permission, "internal"),
+            "192.0.2.10",
+            0,
+            E,
+            now(),
+        )
+    };
+    let none = MembershipIndex::default();
+    assert_eq!(
+        c.evaluate(&none, &r(WK_WIRE, "read")),
+        D::Guest,
+        "no alias known yet"
+    );
+    let m = MembershipIndex::default().with_workloads(&c, [(WK_WIRE, WK, Some(SPIFFE))]);
+    assert_eq!(c.evaluate(&m, &r(WK_WIRE, "read")), D::Allow);
+    assert_eq!(
+        c.evaluate(&m, &r(WK_WIRE, "write")),
+        D::Allow,
+        "SPIFFE-name binding applies"
+    );
+    // Hangang SVID callers are named by SPIFFE ID: name bindings apply, wk2 pins do not.
+    assert_eq!(c.evaluate(&m, &r(SPIFFE, "write")), D::Allow);
+    assert_eq!(
+        c.evaluate(
+            &m,
+            &req(
+                "orders",
+                K::Workload,
+                SPIFFE,
+                perm("read", "internal"),
+                "192.0.2.10",
+                0,
+                E,
+                now()
+            )
+        ),
+        D::Allow
+    );
+    // Aliases never apply to another kind.
+    assert_eq!(
+        c.evaluate(
+            &m,
+            &req(
+                "orders",
+                K::Service,
+                WK_WIRE,
+                perm("read", "internal"),
+                "192.0.2.10",
+                0,
+                E,
+                now()
+            )
+        ),
+        D::Guest
+    );
+    // A retired principal's bindings are orphaned; the name binding survives re-creation.
+    let mut lifecycle = Lifecycle::default();
+    lifecycle.deleted.insert(WK.to_owned());
+    let c2 = p
+        .compile_with(&CompileOptions {
+            lifecycle: Some(&lifecycle),
+            max_issued_aal: 2,
+            now: now(),
+        })
+        .unwrap();
+    assert_eq!(c2.orphaned, ["bnd_wk2"]);
+    let m2 = MembershipIndex::default().with_workloads(&c2, [(WK_WIRE, WK, Some(SPIFFE))]);
+    assert_eq!(c2.evaluate(&m2, &r(WK_WIRE, "write")), D::Allow);
+    // Explain names the aliases.
+    let snapshot = SnapshotV2 {
+        policy: &p,
+        compiled: &c,
+        membership: &m,
+        revision: 1,
+        serving: true,
+        membership_fresh: true,
+        now: now(),
+    };
+    let case: CaseV2 = serde_json::from_value(json!({"subject":{"kind":"workload","id":WK_WIRE},"service":"orders","permission":"read","information_class":"internal","ip":"192.0.2.10","guard":"enforced_allow"})).unwrap();
+    let e = explain(snapshot, &case, true).unwrap();
+    let principal = e.value["trace"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["stage"] == "principal")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        principal["detail"]["workload_alias"],
+        json!({"principal": WK, "spiffe_id": SPIFFE, "bound": true})
+    );
+    let case: CaseV2 = serde_json::from_value(json!({"subject":{"kind":"workload","id":SPIFFE},"service":"orders","permission":"write","information_class":"internal","ip":"192.0.2.10","guard":"enforced_allow"})).unwrap();
+    assert_eq!(
+        explain(snapshot, &case, false).unwrap().decision,
+        Some(D::Allow)
+    );
+}
+
+#[test]
+fn aal3_is_evaluated_numerically_and_explained() {
+    let f = fixture();
+    let snapshot = SnapshotV2 {
+        policy: &f.policy,
+        compiled: &f.compiled,
+        membership: &f.membership,
+        revision: 1,
+        serving: true,
+        membership_fresh: true,
+        now: now(),
+    };
+    let case = |aal: u8| -> CaseV2 {
+        serde_json::from_value(json!({"subject":{"kind":"human","id":H1},"service":"orders","permission":"admin","information_class":"internal","ip":"10.1.1.1","aal":aal,"guard":"enforced_allow"})).unwrap()
+    };
+    let e = explain(snapshot, &case(2), true).unwrap();
+    assert_eq!(e.decision, Some(D::AssuranceDenied));
+    assert_eq!(e.value["obligations"]["required_aal"], 3);
+    let last = e.value["trace"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|s| s["result"] != "not_evaluated")
+        .unwrap()
+        .clone();
+    assert_eq!(last["detail"], json!({"presented": 2, "required": 3}));
+    let e = explain(snapshot, &case(3), true).unwrap();
+    assert_eq!(e.decision, Some(D::Allow));
+    let last = e.value["trace"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rfind(|s| s["stage"] == "assurance")
+        .unwrap()
+        .clone();
+    assert_eq!(last["detail"], json!({"presented": 3, "required": 3}));
+    // Machines cannot present AAL3 (or any human level).
+    let bad: Result<CaseV2, _> = serde_json::from_value(
+        json!({"subject":{"kind":"workload","id":W1},"service":"orders","permission":"read","information_class":"internal","ip":"10.1.1.1","aal":3,"guard":"enforced_allow"}),
+    );
+    assert!(bad.unwrap().validate().is_err());
+}

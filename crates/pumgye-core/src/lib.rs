@@ -203,6 +203,41 @@ struct CompiledService {
     require_guard: bool,
     authorization_context: AuthorizationContext,
 }
+/// AAL presented by Hopae-signed evidence (receipt or permission context) that
+/// the caller has verified. Only this form may carry AAL3.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SealedAssurance(u8);
+impl SealedAssurance {
+    /// Human AAL from a verified Hopae receipt: 1..=3.
+    pub fn from_verified_receipt(aal: u8) -> Option<Self> {
+        (1..=3).contains(&aal).then_some(Self(aal))
+    }
+    pub fn level(self) -> u8 {
+        self.0
+    }
+}
+/// Source of a Human assurance level.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HumanAssurance {
+    /// Supplied by a trusted adapter without Hopae-signed evidence: AAL1/2 only.
+    Asserted(u8),
+    /// Verified Hopae evidence: AAL1–3 (AAL3 only for opted-in applications).
+    Sealed(SealedAssurance),
+}
+impl HumanAssurance {
+    pub fn level(self) -> u8 {
+        match self {
+            HumanAssurance::Asserted(a) => a,
+            HumanAssurance::Sealed(s) => s.0,
+        }
+    }
+    fn in_range(self) -> bool {
+        match self {
+            HumanAssurance::Asserted(a) => matches!(a, 1 | 2),
+            HumanAssurance::Sealed(_) => true,
+        }
+    }
+}
 /// Canonical Human subject metadata, never authentication or permission evidence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HumanSubject<'a>(&'a str);
@@ -1165,6 +1200,56 @@ impl CompiledPolicy {
         guard: GuardEvidence,
         trace: &mut T,
     ) -> ResourceDecision {
+        self.evaluate_scoped_human_assurance_traced(
+            service,
+            resource,
+            action,
+            subject,
+            ip,
+            HumanAssurance::Asserted(aal),
+            guard,
+            trace,
+        )
+    }
+    /// Human evaluation with assurance from Hopae-sealed evidence: AAL3 is only
+    /// accepted from a verified receipt or permission context (Hopae ADR-0018
+    /// decision 11), never from an adapter-asserted level.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scoped_human_sealed_resource(
+        &self,
+        service: &str,
+        resource: &str,
+        action: &str,
+        subject: &str,
+        ip: IpAddr,
+        aal: SealedAssurance,
+        guard: GuardEvidence,
+    ) -> ResourceDecision {
+        self.evaluate_scoped_human_assurance_traced(
+            service,
+            resource,
+            action,
+            subject,
+            ip,
+            HumanAssurance::Sealed(aal),
+            guard,
+            &mut NoTrace,
+        )
+    }
+    /// The one Human evaluation function for both assurance sources.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_scoped_human_assurance_traced<'a, T: Tracer<'a>>(
+        &'a self,
+        service: &'a str,
+        resource: &'a str,
+        action: &'a str,
+        subject: &'a str,
+        ip: IpAddr,
+        assurance: HumanAssurance,
+        guard: GuardEvidence,
+        trace: &mut T,
+    ) -> ResourceDecision {
+        let aal = assurance.level();
         let resource = match self.resource_scope(service, resource, trace) {
             Ok(resource) => resource,
             Err(decision) => return decision,
@@ -1183,7 +1268,7 @@ impl CompiledPolicy {
             return ResourceDecision::Decided(Decision::Guest);
         }
         trace.event(TraceEvent::PrincipalAssurance { aal });
-        if !matches!(aal, 1 | 2) {
+        if !assurance.in_range() {
             return ResourceDecision::Decided(Decision::AssuranceDenied);
         }
         self.evaluate_catalog_entry(
