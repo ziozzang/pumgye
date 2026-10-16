@@ -308,8 +308,9 @@ watermark 이전에 보고된 주체가 새 Hopae 프로세스가 다시 인증�
 `tls_reload::Reloading<ClientConfig>`를 넘기므로 인증서를 교체한 뒤에 재시작할 필요가
 없습니다.
 
-품계는 `hopae-grpc`를 #15 커밋(`74bb829`, #14 `feat/live-reload` 기반)에 고정합니다.
-#14와 #15가 병합되면 고정을 병합된 `integrate/identity-platform` 리비전으로 옮기십시오.
+품계는 `hopae-grpc`를 #17(#15를 `integrate/identity-platform`에 합친 브랜치)의 head 커밋
+`1c23931`에 고정합니다. #17이 병합되면 고정을 병합된 `integrate/identity-platform` 리비전으로
+옮기십시오.
 
 **Hopae #9와 #10 병합.** 두 브랜치는 추가 목록에서만 충돌합니다. 상호 운용 검증에 쓴 로컬 해결(푸시하지
 않음)은 양쪽을 모두 유지했습니다.

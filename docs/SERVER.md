@@ -199,9 +199,10 @@ reload (`authentication_observed client`, `workload_observed client`,
 (`hopae-grpc` `ReloadableEndpointConfig`), and the SDK reads the current client
 configuration for every new connection.
 
-The `hopae-grpc` dependency is pinned to the commit of ziozzang/hopae#15
-(`feat/grpc-reloadable-tls`, `74bb829`). That pin must move to the merged
-`integrate/identity-platform` revision once #14 and #15 land.
+The `hopae-grpc` dependency is pinned to `1c23931`, the head of
+ziozzang/hopae#17 (`integrate/identity-platform-grpc-reload`, which folds #15
+into the identity platform integration). That pin must move to the merged
+`integrate/identity-platform` revision once #17 is merged.
 
 Limitation: the longest delay before new material is used is one polling
 interval.

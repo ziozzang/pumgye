@@ -404,9 +404,9 @@ as before. Pumgye's `observed-*` owners pass their
 `tls_reload::Reloading<ClientConfig>`, so they no longer need a restart after a
 rotation.
 
-Pumgye pins `hopae-grpc` to the #15 commit (`74bb829`, based on #14
-`feat/live-reload`). Move the pin to the merged `integrate/identity-platform`
-revision once #14 and #15 land.
+Pumgye pins `hopae-grpc` to `1c23931`, the head of #17, which folds #15 into
+`integrate/identity-platform`. Move the pin to the merged
+`integrate/identity-platform` revision once #17 is merged.
 
 **Merging Hopae #9 and #10.** The two branches conflict only in additive lists.
 The local resolution used for the interop qualification (not pushed) kept both

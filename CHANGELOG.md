@@ -6,7 +6,8 @@
 
 - The `observed-*` owners reload their Hopae client certificate and CA without a
   restart. They use the Hopae SDK reloadable endpoint (ziozzang/hopae#15).
-  `hopae-grpc` is pinned to `74bb829`; move the pin to the merged rev.
+  `hopae-grpc` is pinned to `1c23931` (ziozzang/hopae#17); move the pin to
+  the merged rev.
 - Prometheus `GET /metrics` on the HTTPS management listener, readable with the
   administrator credential or an optional read-only scrape credential
   (`--metrics-token-env`). It covers:

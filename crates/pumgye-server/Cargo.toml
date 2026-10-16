@@ -17,9 +17,9 @@ observed-authentication = ["hopae-grpc/native-client"]
 [dependencies]
 hangang-route-grpc = { git = "https://github.com/ziozzang/hangang", rev = "dfc099ea763650f98b31110f0720cf3d9042f3ec" }
 guard-grpc = { git = "https://github.com/ziozzang/sumunjang", rev = "1f70428e9481654845a696cf30cdb917a6aef009" }
-# Pinned to ziozzang/hopae#15 (feat/grpc-reloadable-tls, reloadable client TLS);
-# move this pin to the merged integrate/identity-platform rev once #14/#15 land.
-hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "74bb8298dc605cdea9ab8c854cef597e90db0949" }
+# Pinned to ziozzang/hopae#17 (integrate/identity-platform-grpc-reload: #15 folded);
+# move this pin to the merged integrate/identity-platform rev once ziozzang/hopae#17 is merged.
+hopae-grpc = { git = "https://github.com/ziozzang/hopae", rev = "1c2393176b69ccef0e767b2476be128f81263900" }
 ed25519-dalek = { version = "2.2.0", default-features = false, features = ["std", "zeroize"] }
 getrandom = "0.3"
 base64 = "0.22"

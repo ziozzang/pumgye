@@ -180,9 +180,9 @@ Kubernetes API 소스(`--kubernetes-ca`, `--kubernetes-token`)는 relist할 때�
 (`hopae-grpc`의 `ReloadableEndpointConfig`)를 넘기고, SDK는 새 연결을 만들 때마다 현재
 클라이언트 설정을 읽습니다.
 
-`hopae-grpc` 의존성은 ziozzang/hopae#15(`feat/grpc-reloadable-tls`, `74bb829`) 커밋에
-고정되어 있습니다. #14와 #15가 병합되면 이 고정을 병합된 `integrate/identity-platform`
-리비전으로 옮겨야 합니다.
+`hopae-grpc` 의존성은 ziozzang/hopae#17(`integrate/identity-platform-grpc-reload`, #15를
+identity platform 통합에 합친 브랜치)의 `1c23931` 커밋에 고정되어 있습니다. #17이
+병합되면 이 고정을 병합된 `integrate/identity-platform` 리비전으로 옮겨야 합니다.
 
 제약: 새 인증서가 반영되기까지 최대 폴링 주기 한 번만큼 걸립니다.
 
