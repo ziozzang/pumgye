@@ -3,7 +3,7 @@ pub mod diff;
 pub mod explain;
 pub mod kubernetes_authorization;
 mod trace;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use guard_core::prefix::PrefixTrie;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -328,17 +328,156 @@ fn assignment(ids: &[String], roles: &HashMap<String, Rights>) -> Result<Rights>
     }
     Ok(rights)
 }
+/// Document location of a compile failure, attached as anyhow context.
+#[derive(Debug)]
+struct PolicyPath(String);
+impl std::fmt::Display for PolicyPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "at {}", self.0)
+    }
+}
+fn at(path: impl Into<String>) -> PolicyPath {
+    PolicyPath(path.into())
+}
+/// Registered validator failure codes (`pumgye.validation.*`), keyed by the
+/// compiler's fixed refusal text. Unlisted refusals map to `invalid`.
+pub const VALIDATION_CODES: &[(&str, &str)] = &[
+    (
+        "invalid version or service count",
+        "pumgye.validation.version_or_service_count",
+    ),
+    (
+        "vocabulary must contain 1..64 entries",
+        "pumgye.validation.vocabulary_size",
+    ),
+    (
+        "invalid or duplicate vocabulary",
+        "pumgye.validation.vocabulary_entry",
+    ),
+    (
+        "invalid service or role count",
+        "pumgye.validation.service_name_or_role_count",
+    ),
+    (
+        "Kubernetes API context forbids network/guard requirements and typed assignments",
+        "pumgye.validation.kubernetes_context",
+    ),
+    (
+        "Kubernetes API context requires namespaced API subjects",
+        "pumgye.validation.kubernetes_subject",
+    ),
+    (
+        "policy assignment limit",
+        "pumgye.validation.assignment_limit",
+    ),
+    ("guest is reserved", "pumgye.validation.guest_reserved"),
+    ("invalid role name", "pumgye.validation.role_name"),
+    ("role inheritance cycle", "pumgye.validation.role_cycle"),
+    ("unknown role", "pumgye.validation.unknown_role"),
+    (
+        "invalid inheritance or assurance",
+        "pumgye.validation.role_inheritance_or_assurance",
+    ),
+    ("too many rights", "pumgye.validation.too_many_rights"),
+    ("duplicate right", "pumgye.validation.duplicate_right"),
+    ("unknown right", "pumgye.validation.unknown_right"),
+    ("duplicate parent", "pumgye.validation.duplicate_parent"),
+    (
+        "assignment must contain 1..8 roles",
+        "pumgye.validation.assignment_size",
+    ),
+    (
+        "guest cannot be combined with roles",
+        "pumgye.validation.guest_combined",
+    ),
+    (
+        "duplicate assigned role",
+        "pumgye.validation.duplicate_assigned_role",
+    ),
+    (
+        "unknown assigned role",
+        "pumgye.validation.unknown_assigned_role",
+    ),
+    ("invalid subject", "pumgye.validation.subject_name"),
+    (
+        "invalid workload subject",
+        "pumgye.validation.workload_subject",
+    ),
+    ("invalid Human subject", "pumgye.validation.human_subject"),
+    (
+        "network has host bits",
+        "pumgye.validation.network_host_bits",
+    ),
+    ("duplicate network", "pumgye.validation.duplicate_network"),
+    (
+        "resource catalog capacity",
+        "pumgye.validation.resource_capacity",
+    ),
+    (
+        "invalid resource metadata",
+        "pumgye.validation.resource_metadata",
+    ),
+    (
+        "resource action capacity",
+        "pumgye.validation.action_capacity",
+    ),
+    (
+        "unknown resource service",
+        "pumgye.validation.resource_service",
+    ),
+    ("unknown resource class", "pumgye.validation.resource_class"),
+    (
+        "invalid resource action",
+        "pumgye.validation.resource_action",
+    ),
+    (
+        "unknown resource permission",
+        "pumgye.validation.resource_permission",
+    ),
+];
+/// Fallback for refusals without a dedicated code (for example Kubernetes mapping).
+pub const VALIDATION_INVALID: &str = "pumgye.validation.invalid";
+/// Document schema (deserialization) refusal.
+pub const VALIDATION_SCHEMA: &str = "pumgye.validation.schema";
+/// A located, coded compile refusal; the code doubles as its message key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PolicyViolation {
+    /// Dotted document path (`services.orders.roles.writer`), `$` for the root.
+    pub path: String,
+    pub code: &'static str,
+}
+impl PolicyViolation {
+    pub fn from_error(error: &anyhow::Error) -> Self {
+        let path = error
+            .chain()
+            .filter_map(|e| e.to_string().strip_prefix("at ").map(str::to_owned))
+            .last()
+            .unwrap_or_else(|| "$".to_owned());
+        let root = error.root_cause().to_string();
+        let code = VALIDATION_CODES
+            .iter()
+            .find(|(text, _)| *text == root)
+            .map_or(VALIDATION_INVALID, |(_, code)| code);
+        Self { path, code }
+    }
+}
 impl Policy {
+    /// Compile, reporting the most specific document path and a registered code.
+    pub fn compile_located(&self) -> std::result::Result<CompiledPolicy, PolicyViolation> {
+        self.compile().map_err(|e| PolicyViolation::from_error(&e))
+    }
     pub fn compile(&self) -> Result<CompiledPolicy> {
         ensure!(
             self.version == 1 && self.services.len() <= 128,
             "invalid version or service count"
         );
-        let classes = vocabulary(&self.information_classes)?;
+        let classes =
+            vocabulary(&self.information_classes).with_context(|| at("information_classes"))?;
         let mut services = HashMap::new();
         let mut total_users = 0usize;
         let mut total_networks = 0usize;
         for (id, service) in &self.services {
+            let compiled = (|| -> Result<CompiledService> {
             ensure!(
                 name(id) && service.roles.len() <= 64,
                 "invalid service or role count"
@@ -366,39 +505,57 @@ impl Policy {
                 total_users <= 65536 && total_networks <= 65536,
                 "policy assignment limit"
             );
-            let permissions = vocabulary(&service.permissions)?;
+            let permissions = vocabulary(&service.permissions)
+                .with_context(|| at(format!("services.{id}.permissions")))?;
             ensure!(!service.roles.contains_key("guest"), "guest is reserved");
             let mut roles = HashMap::from([("guest".to_owned(), Rights::default())]);
             for role in service.roles.keys() {
-                ensure!(name(role), "invalid role name");
-                resolve_role(
-                    role,
-                    service,
-                    &permissions,
-                    &classes,
-                    &mut BTreeSet::new(),
-                    &mut roles,
-                )?;
+                (|| -> Result<()> {
+                    ensure!(name(role), "invalid role name");
+                    resolve_role(
+                        role,
+                        service,
+                        &permissions,
+                        &classes,
+                        &mut BTreeSet::new(),
+                        &mut roles,
+                    )?;
+                    Ok(())
+                })()
+                .with_context(|| at(format!("services.{id}.roles.{role}")))?;
             }
             let mut users = HashMap::new();
             for (subject, ids) in &service.users {
-                ensure!(name(subject), "invalid subject");
-                users.insert(subject.clone(), assignment(ids, &roles)?);
+                let rights = (|| {
+                    ensure!(name(subject), "invalid subject");
+                    assignment(ids, &roles)
+                })()
+                .with_context(|| at(format!("services.{id}.users.{subject}")))?;
+                users.insert(subject.clone(), rights);
             }
             let mut workload_users = HashMap::new();
             for (subject, ids) in &service.workload_users {
-                ensure!(workload_subject(subject), "invalid workload subject");
-                workload_users.insert(subject.clone(), assignment(ids, &roles)?);
+                let rights = (|| {
+                    ensure!(workload_subject(subject), "invalid workload subject");
+                    assignment(ids, &roles)
+                })()
+                .with_context(|| at(format!("services.{id}.workload_users.{subject}")))?;
+                workload_users.insert(subject.clone(), rights);
             }
             let mut human_users = HashMap::new();
             for (subject, ids) in &service.human_users {
-                HumanSubject::parse(subject)?;
-                human_users.insert(subject.clone(), assignment(ids, &roles)?);
+                let rights = (|| {
+                    HumanSubject::parse(subject)?;
+                    assignment(ids, &roles)
+                })()
+                .with_context(|| at(format!("services.{id}.human_users.{subject}")))?;
+                human_users.insert(subject.clone(), rights);
             }
             let mut networks = PrefixTrie::default();
             let mut hosts = HashMap::new();
             let mut network_rules = Vec::with_capacity(service.networks.len());
             for (rule, network) in service.networks.iter().enumerate() {
+                (|| -> Result<()> {
                 let cidr = network.cidr.trunc();
                 ensure!(cidr == network.cidr, "network has host bits");
                 let rights = assignment(&network.roles, &roles)?;
@@ -417,10 +574,11 @@ impl Policy {
                     networks.insert(cidr, rights)
                 };
                 ensure!(previous.is_none(), "duplicate network");
+                Ok(())
+                })()
+                .with_context(|| at(format!("services.{id}.networks[{rule}]")))?;
             }
-            services.insert(
-                id.clone(),
-                CompiledService {
+            Ok(CompiledService {
                     permissions,
                     users,
                     workload_users,
@@ -430,47 +588,52 @@ impl Policy {
                     network_rules,
                     require_guard: service.require_guard,
                     authorization_context: service.authorization_context,
-                },
-            );
+                })
+            })()
+            .with_context(|| at(format!("services.{id}")))?;
+            services.insert(id.clone(), compiled);
         }
         ensure!(self.resources.len() <= 65536, "resource catalog capacity");
         let mut resources = HashMap::new();
         let mut total_actions = 0usize;
         for (id, resource) in &self.resources {
-            ensure!(
-                name(id)
-                    && resource.minimum_aal <= 3
-                    && !resource.actions.is_empty()
-                    && resource.actions.len() <= 64,
-                "invalid resource metadata"
-            );
-            total_actions += resource.actions.len();
-            ensure!(total_actions <= 65536, "resource action capacity");
-            let service = services
-                .get(&resource.service)
-                .ok_or_else(|| anyhow::anyhow!("unknown resource service"))?;
-            let class = *classes
-                .get(&resource.information_class)
-                .ok_or_else(|| anyhow::anyhow!("unknown resource class"))?;
-            let mut actions = HashMap::new();
-            for (action, permission) in &resource.actions {
-                ensure!(name(action), "invalid resource action");
-                actions.insert(
-                    action.clone(),
-                    *service
-                        .permissions
-                        .get(permission)
-                        .ok_or_else(|| anyhow::anyhow!("unknown resource permission"))?,
+            let compiled = (|| -> Result<CompiledResource> {
+                ensure!(
+                    name(id)
+                        && resource.minimum_aal <= 3
+                        && !resource.actions.is_empty()
+                        && resource.actions.len() <= 64,
+                    "invalid resource metadata"
                 );
-            }
-            resources.insert(
-                id.clone(),
-                CompiledResource {
+                total_actions += resource.actions.len();
+                ensure!(total_actions <= 65536, "resource action capacity");
+                let service = services
+                    .get(&resource.service)
+                    .ok_or_else(|| anyhow::anyhow!("unknown resource service"))?;
+                let class = *classes
+                    .get(&resource.information_class)
+                    .ok_or_else(|| anyhow::anyhow!("unknown resource class"))?;
+                let mut actions = HashMap::new();
+                for (action, permission) in &resource.actions {
+                    let bit = (|| {
+                        ensure!(name(action), "invalid resource action");
+                        service
+                            .permissions
+                            .get(permission)
+                            .copied()
+                            .ok_or_else(|| anyhow::anyhow!("unknown resource permission"))
+                    })()
+                    .with_context(|| at(format!("resources.{id}.actions.{action}")))?;
+                    actions.insert(action.clone(), bit);
+                }
+                Ok(CompiledResource {
                     metadata: resource.clone(),
                     actions,
                     class,
-                },
-            );
+                })
+            })()
+            .with_context(|| at(format!("resources.{id}")))?;
+            resources.insert(id.clone(), compiled);
         }
         let mut compiled = CompiledPolicy {
             services,
@@ -479,7 +642,9 @@ impl Policy {
             kubernetes_authorization: Default::default(),
         };
         if let Some(mapping) = &self.kubernetes_authorization {
-            compiled.kubernetes_authorization = mapping.compile(&compiled)?;
+            compiled.kubernetes_authorization = mapping
+                .compile(&compiled)
+                .with_context(|| at("kubernetes_authorization"))?;
         }
         Ok(compiled)
     }

@@ -3,8 +3,8 @@ use pumgye_core::{
     Decision, GuardEvidence, KubernetesApiSubject, Policy, ResourceDecision,
     diff::{Change, ChangeKind, Side, diff},
     explain::{
-        Case, CaseError, DETAIL_CODES, Explanation, REASON_CODES, Snapshot, Stage, StageResult,
-        explain, message_keys,
+        CASE_ERROR_CODES, Case, CaseError, DETAIL_CODES, ERROR_CODES, Explanation, REASON_CODES,
+        Snapshot, Stage, StageResult, explain, message_keys,
     },
 };
 use serde_json::{Value, json};
@@ -779,8 +779,19 @@ fn message_catalogs_cover_exactly_the_registered_keys() {
     let keys = message_keys();
     assert_eq!(
         keys.len(),
-        REASON_CODES.len() * 2 + DETAIL_CODES.len() + Stage::ALL.len()
+        REASON_CODES.len() * 2
+            + DETAIL_CODES.len()
+            + Stage::ALL.len()
+            + ERROR_CODES.len()
+            + CASE_ERROR_CODES.len()
+            + pumgye_core::VALIDATION_CODES.len()
+            + 2
     );
+    // Every registered validator text is an actual compiler refusal.
+    let sources = concat!(include_str!("../src/lib.rs"));
+    for (text, _) in pumgye_core::VALIDATION_CODES {
+        assert!(sources.contains(&format!("\"{text}\"")), "{text}");
+    }
     for catalog in [
         include_str!("../messages/en.json"),
         include_str!("../messages/ko.json"),
@@ -919,4 +930,116 @@ fn what_if_candidate_changes_decision_and_diff_lists_rights() {
         .total,
         0
     );
+}
+
+#[test]
+fn candidate_validation_reports_document_path_and_code() {
+    let located = |doc: Value| {
+        serde_json::from_value::<Policy>(doc)
+            .unwrap()
+            .compile_located()
+            .err()
+            .map(|v| (v.path, v.code))
+    };
+    assert_eq!(located(document()), None);
+    let mut d = document();
+    d["services"]["orders"]["users"]["u_reader"] = json!(["missing"]);
+    assert_eq!(
+        located(d),
+        Some((
+            "services.orders.users.u_reader".into(),
+            "pumgye.validation.unknown_assigned_role"
+        ))
+    );
+    let mut d = document();
+    d["services"]["orders"]["roles"]["writer"]["inherits"] = json!(["auditor", "writer"]);
+    assert_eq!(
+        located(d),
+        Some((
+            "services.orders.roles.writer".into(),
+            "pumgye.validation.role_cycle"
+        ))
+    );
+    let mut d = document();
+    d["services"]["orders"]["networks"][2]["cidr"] = json!("198.51.100.1/24");
+    assert_eq!(
+        located(d),
+        Some((
+            "services.orders.networks[2]".into(),
+            "pumgye.validation.network_host_bits"
+        ))
+    );
+    let mut d = document();
+    d["resources"]["db:orders"]["actions"]["select"] = json!("delete");
+    assert_eq!(
+        located(d),
+        Some((
+            "resources.db:orders.actions.select".into(),
+            "pumgye.validation.resource_permission"
+        ))
+    );
+    let mut d = document();
+    d["services"]["orders"]["human_users"] = json!({"human1:XYZ":["reader"]});
+    assert_eq!(
+        located(d),
+        Some((
+            "services.orders.human_users.human1:XYZ".into(),
+            "pumgye.validation.human_subject"
+        ))
+    );
+    let mut d = document();
+    d["information_classes"] = json!([]);
+    assert_eq!(
+        located(d),
+        Some((
+            "information_classes".into(),
+            "pumgye.validation.vocabulary_size"
+        ))
+    );
+    let mut d = document();
+    d["version"] = json!(2);
+    assert_eq!(
+        located(d),
+        Some(("$".into(), "pumgye.validation.version_or_service_count"))
+    );
+}
+
+#[test]
+fn case_refusals_name_the_offending_field() {
+    let path = |v: Value| {
+        let c = case(v);
+        let e = c.validate().unwrap_err();
+        assert!(CASE_ERROR_CODES.contains(&e.code()));
+        c.error_path(e)
+    };
+    let mut c = perm(
+        "u_reader",
+        "192.0.2.1",
+        "read",
+        "public",
+        1,
+        "enforced_allow",
+    );
+    c["information_class"] = json!("bad class");
+    assert_eq!(path(c), "information_class");
+    let mut c = perm(
+        "u_reader",
+        "192.0.2.1",
+        "read",
+        "public",
+        1,
+        "enforced_allow",
+    );
+    c["aal"] = json!(5);
+    assert_eq!(path(c), "aal");
+    let mut c = perm(
+        "u_reader",
+        "192.0.2.1",
+        "read",
+        "public",
+        1,
+        "enforced_allow",
+    );
+    c.as_object_mut().unwrap().remove("guard");
+    assert_eq!(path(c), "guard");
 }

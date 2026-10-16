@@ -82,6 +82,32 @@ pub const DETAIL_CODES: &[&str] = &[
     "pumgye.detail.not_evaluated",
 ];
 
+/// Registered API error codes (`error.code`); each is its own message key.
+pub const ERROR_CODES: &[&str] = &[
+    "pumgye.error.malformed_request",
+    "pumgye.error.invalid_case",
+    "pumgye.error.invalid_delegated_actor",
+    "pumgye.error.invalid_page",
+    "pumgye.error.invalid_cursor",
+    "pumgye.error.empty_batch",
+    "pumgye.error.revision_conflict",
+    "pumgye.error.payload_too_large",
+    "pumgye.error.batch_too_large",
+    "pumgye.error.candidate_too_large",
+    "pumgye.error.candidate_invalid",
+    "pumgye.error.rate_limited",
+];
+/// Registered case refusal detail codes.
+pub const CASE_ERROR_CODES: &[&str] = &[
+    "pumgye.case.invalid_name",
+    "pumgye.case.invalid_label",
+    "pumgye.case.ambiguous_target",
+    "pumgye.case.missing_network_evidence",
+    "pumgye.case.unexpected_network_evidence",
+    "pumgye.case.assurance_out_of_range",
+    "pumgye.case.unsupported_combination",
+    "pumgye.case.revision_out_of_range",
+];
 /// Every key the en/ko catalogs must define (and nothing else).
 pub fn message_keys() -> Vec<String> {
     let mut keys = Vec::new();
@@ -92,6 +118,11 @@ pub fn message_keys() -> Vec<String> {
     }
     keys.extend(DETAIL_CODES.iter().map(|c| (*c).to_owned()));
     keys.extend(Stage::ALL.iter().map(|s| s.message_key().to_owned()));
+    keys.extend(ERROR_CODES.iter().map(|c| (*c).to_owned()));
+    keys.extend(CASE_ERROR_CODES.iter().map(|c| (*c).to_owned()));
+    keys.extend(crate::VALIDATION_CODES.iter().map(|(_, c)| (*c).to_owned()));
+    keys.push(crate::VALIDATION_INVALID.to_owned());
+    keys.push(crate::VALIDATION_SCHEMA.to_owned());
     keys.sort();
     keys
 }
@@ -356,6 +387,21 @@ pub enum CaseError {
     UnsupportedCombination,
     RevisionOutOfRange,
 }
+impl CaseError {
+    /// Registered detail code (also its message key).
+    pub fn code(self) -> &'static str {
+        match self {
+            CaseError::InvalidName => "pumgye.case.invalid_name",
+            CaseError::InvalidLabel => "pumgye.case.invalid_label",
+            CaseError::AmbiguousTarget => "pumgye.case.ambiguous_target",
+            CaseError::MissingNetworkEvidence => "pumgye.case.missing_network_evidence",
+            CaseError::UnexpectedNetworkEvidence => "pumgye.case.unexpected_network_evidence",
+            CaseError::AssuranceOutOfRange => "pumgye.case.assurance_out_of_range",
+            CaseError::UnsupportedCombination => "pumgye.case.unsupported_combination",
+            CaseError::RevisionOutOfRange => "pumgye.case.revision_out_of_range",
+        }
+    }
+}
 fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -369,6 +415,41 @@ enum Target<'a> {
     Resource { resource: &'a str, action: &'a str },
 }
 impl Case {
+    /// Field path (relative to the case) that a refusal refers to.
+    pub fn error_path(&self, error: CaseError) -> &'static str {
+        match error {
+            CaseError::InvalidName => [
+                ("subject.id", Some(&self.subject.id)),
+                ("service", Some(&self.service)),
+                ("resource", self.resource.as_ref()),
+                ("action", self.action.as_ref()),
+                ("permission", self.permission.as_ref()),
+                ("information_class", self.information_class.as_ref()),
+            ]
+            .into_iter()
+            .find(|(_, v)| v.is_some_and(|v| !identifier(v)))
+            .map_or("subject.id", |(path, _)| path),
+            CaseError::InvalidLabel => "label",
+            CaseError::AmbiguousTarget => "permission",
+            CaseError::MissingNetworkEvidence => {
+                if self.ip.is_none() {
+                    "ip"
+                } else {
+                    "guard"
+                }
+            }
+            CaseError::UnexpectedNetworkEvidence => {
+                if self.ip.is_some() {
+                    "ip"
+                } else {
+                    "guard"
+                }
+            }
+            CaseError::AssuranceOutOfRange => "aal",
+            CaseError::UnsupportedCombination => "subject.kind",
+            CaseError::RevisionOutOfRange => "minimum_revision",
+        }
+    }
     /// Same bounds as the decision APIs: identifier charset, 128 bytes, AAL 0..3.
     pub fn validate(&self) -> Result<(), CaseError> {
         self.target().map(|_| ())
