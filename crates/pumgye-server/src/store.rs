@@ -19,7 +19,8 @@ pub struct AuditRecord {
     pub actor: String,
     pub sha256: String,
 }
-/// Maximum retained read-only simulation audit rows (oldest pruned first).
+/// Maximum retained read-only simulation audit rows (oldest pruned first); rows
+/// older than the configured age bound are also pruned on every insert.
 pub const MAX_SIMULATION_AUDIT_ROWS: i64 = 100_000;
 /// One administrative simulation (explain, batch explain or candidate diff).
 /// Simulations never change policy; this is a separate table from publication audit.
@@ -228,8 +229,22 @@ impl Store {
     }
     /// Append one simulation audit row and prune beyond the retention bound.
     /// Returns the row ID. The policy and publication audit tables are untouched.
-    pub fn record_simulation(&mut self, record: &SimulationRecord) -> Result<u64> {
+    pub fn record_simulation(
+        &mut self,
+        record: &SimulationRecord,
+        max_age_seconds: u64,
+    ) -> Result<u64> {
         let at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        self.record_simulation_at(record, at, max_age_seconds)
+    }
+    /// [`Self::record_simulation`] at an explicit time (tests inject old rows).
+    pub fn record_simulation_at(
+        &mut self,
+        record: &SimulationRecord,
+        at: u64,
+        max_age_seconds: u64,
+    ) -> Result<u64> {
+        ensure!(at <= i64::MAX as u64, "simulation time out of range");
         ensure!(
             record.revision <= i64::MAX as u64,
             "simulation revision out of range"
@@ -255,8 +270,11 @@ impl Store {
         )?;
         let id = transaction.last_insert_rowid();
         transaction.execute(
-            "DELETE FROM simulation_audit WHERE id <= ?1",
-            [id - MAX_SIMULATION_AUDIT_ROWS],
+            "DELETE FROM simulation_audit WHERE id <= ?1 OR at_unix < ?2",
+            params![
+                id - MAX_SIMULATION_AUDIT_ROWS,
+                at.saturating_sub(max_age_seconds) as i64
+            ],
         )?;
         transaction.commit()?;
         Ok(id as u64)
@@ -530,5 +548,50 @@ mod tests {
                 .unwrap(),
             2
         );
+    }
+    #[test]
+    fn simulation_audit_is_trimmed_by_age_and_count_on_insert() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = root.path().join("initial.json");
+        std::fs::write(&initial, r#"{"revision":1,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#).unwrap();
+        let (mut store, _) = Store::open(&root.path().join("p.sqlite3"), Some(&initial)).unwrap();
+        let record = SimulationRecord {
+            id: 0,
+            at_unix: 0,
+            kind: "simulation",
+            actor: "fixture".into(),
+            on_behalf_of: None,
+            operation: "explain".into(),
+            source: "published".into(),
+            revision: 1,
+            candidate_sha256: None,
+            request_sha256: "0".repeat(64),
+            cases: 1,
+            allowed: 1,
+            denied: 0,
+            unavailable: 0,
+            changed: 0,
+        };
+        let day = 86_400;
+        let now = 1_800_000_000;
+        store
+            .record_simulation_at(&record, now - 40 * day, 30 * day)
+            .unwrap();
+        store
+            .record_simulation_at(&record, now - 31 * day, 30 * day)
+            .unwrap();
+        store
+            .record_simulation_at(&record, now - 29 * day, 30 * day)
+            .unwrap();
+        // The row older than 30 days relative to the newest insert is trimmed now.
+        let id = store.record_simulation_at(&record, now, 30 * day).unwrap();
+        let rows = store.simulations_after(0).unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.at_unix).collect::<Vec<_>>(),
+            [now - 29 * day, now]
+        );
+        assert_eq!(rows.last().unwrap().id, id);
+        // Publication audit is untouched by simulation retention.
+        assert_eq!(store.audit_after(0).unwrap().len(), 1);
     }
 }

@@ -134,6 +134,9 @@ struct Args {
     projection_live: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
+    /// Age bound for read-only simulation audit rows (also capped at 100,000 rows).
+    #[arg(long, default_value_t = explain_api::DEFAULT_RETENTION_DAYS, value_parser = clap::value_parser!(u64).range(1..=3650))]
+    simulation_audit_retention_days: u64,
     #[arg(long, default_value = "PUMGYE_DECISION_TOKEN")]
     decision_token_env: String,
 }
@@ -1071,7 +1074,9 @@ async fn main() -> anyhow::Result<()> {
         publications: Arc::new(tokio::sync::Semaphore::new(4)),
         requests: Arc::new(tokio::sync::Semaphore::new(4096)),
         management: Arc::new(tokio::sync::Semaphore::new(4)),
-        simulation_budget: Default::default(),
+        simulation_budget: explain_api::Budget::with_retention_days(
+            args.simulation_audit_retention_days,
+        ),
     });
     #[cfg(feature = "observed-authentication")]
     if args.observed_permits {

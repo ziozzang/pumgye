@@ -44,16 +44,24 @@ pub const CANDIDATE_COST: f64 = 64.0;
 pub struct Budget {
     state: Mutex<(f64, Instant)>,
     pub(crate) simulations: std::sync::atomic::AtomicU64,
+    /// Simulation audit rows older than this are trimmed on insert.
+    pub(crate) retention_seconds: u64,
 }
+/// Default simulation audit age bound.
+pub const DEFAULT_RETENTION_DAYS: u64 = 30;
 impl Default for Budget {
     fn default() -> Self {
-        Self {
-            state: Mutex::new((BUDGET_CAPACITY, Instant::now())),
-            simulations: Default::default(),
-        }
+        Self::with_retention_days(DEFAULT_RETENTION_DAYS)
     }
 }
 impl Budget {
+    pub fn with_retention_days(days: u64) -> Self {
+        Self {
+            state: Mutex::new((BUDGET_CAPACITY, Instant::now())),
+            simulations: Default::default(),
+            retention_seconds: days.saturating_mul(86_400),
+        }
+    }
     fn take(&self, cost: f64) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
@@ -216,31 +224,149 @@ impl Resolved {
         }
     }
 }
+
+/// One located cause of a refusal.
+#[derive(Debug, Serialize)]
+pub(crate) struct ErrorDetail {
+    path: String,
+    code: &'static str,
+    message_key: &'static str,
+}
+fn detail(path: impl Into<String>, code: &'static str) -> ErrorDetail {
+    ErrorDetail {
+        path: path.into(),
+        code,
+        message_key: code,
+    }
+}
+/// Refusal of a simulation request. Coded refusals (400/409/413/422/429) carry a
+/// structured body; authentication, media type and availability stay bare.
+#[derive(Debug)]
+pub(crate) struct ApiError {
+    status: StatusCode,
+    code: Option<&'static str>,
+    details: Vec<ErrorDetail>,
+    current_revision: Option<u64>,
+}
+/// Maximum details reported per refusal.
+pub const MAX_ERROR_DETAILS: usize = 32;
+impl ApiError {
+    fn coded(status: StatusCode, code: &'static str) -> Self {
+        Self {
+            status,
+            code: Some(code),
+            details: Vec::new(),
+            current_revision: None,
+        }
+    }
+    fn with(mut self, detail: ErrorDetail) -> Self {
+        if self.details.len() < MAX_ERROR_DETAILS {
+            self.details.push(detail);
+        }
+        self
+    }
+    fn conflict(path: &str, current: u64) -> Self {
+        let mut error = Self::coded(StatusCode::CONFLICT, "pumgye.error.revision_conflict")
+            .with(detail(path, "pumgye.error.revision_conflict"));
+        error.current_revision = Some(current);
+        error
+    }
+    fn malformed(path: String) -> Self {
+        let path = if path.is_empty() {
+            "$".to_owned()
+        } else {
+            path
+        };
+        Self::coded(StatusCode::BAD_REQUEST, "pumgye.error.malformed_request")
+            .with(detail(path, "pumgye.error.malformed_request"))
+    }
+}
+impl From<StatusCode> for ApiError {
+    fn from(status: StatusCode) -> Self {
+        Self {
+            status,
+            code: None,
+            details: Vec::new(),
+            current_revision: None,
+        }
+    }
+}
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let mut response = match self.code {
+            Some(code) => {
+                let mut error = serde_json::json!({"code": code, "message_key": code});
+                if !self.details.is_empty() {
+                    error["details"] = serde_json::json!(self.details);
+                }
+                if let Some(revision) = self.current_revision {
+                    error["current_revision"] = revision.into();
+                }
+                (self.status, Json(serde_json::json!({ "error": error }))).into_response()
+            }
+            None => self.status.into_response(),
+        };
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
+        }
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
+        response
+    }
+}
+fn join(prefix: &str, path: &str) -> String {
+    match path {
+        "" | "." => prefix.to_owned(),
+        _ if prefix.is_empty() => path.to_owned(),
+        _ if path.starts_with('[') => format!("{prefix}{path}"),
+        _ => format!("{prefix}.{path}"),
+    }
+}
+fn invalid_candidate(path: String, code: &'static str) -> ApiError {
+    ApiError::coded(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "pumgye.error.candidate_invalid",
+    )
+    .with(detail(path, code))
+}
 /// Validate and compile a candidate exactly as publication would, never storing it.
-fn candidate(value: serde_json::Value) -> Result<Candidate, StatusCode> {
-    let policy: Policy =
-        serde_json::from_value(value).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
-    let bytes = serde_json::to_vec(&policy).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+/// `prefix` is the request path of the document, for located refusals.
+fn candidate(value: serde_json::Value, prefix: &str) -> Result<Candidate, ApiError> {
+    let policy: Policy = serde_path_to_error::deserialize(value).map_err(|e| {
+        invalid_candidate(
+            join(prefix, &e.path().to_string()),
+            pumgye_core::VALIDATION_SCHEMA,
+        )
+    })?;
+    let bytes = serde_json::to_vec(&policy).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if bytes.len() > store::MAX_POLICY_BYTES {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        return Err(ApiError::coded(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "pumgye.error.candidate_too_large",
+        )
+        .with(detail(prefix, "pumgye.error.candidate_too_large")));
     }
     let compiled = policy
-        .compile()
-        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+        .compile_located()
+        .map_err(|v| invalid_candidate(join(prefix, &v.path.replace('$', "")), v.code))?;
     Ok(Candidate {
         policy,
         compiled,
         sha256: format!("{:x}", Sha256::digest(&bytes)),
     })
 }
-fn resolve(a: &Authority, selector: Option<Selector>) -> Result<Resolved, StatusCode> {
+fn resolve(a: &Authority, selector: Option<Selector>, prefix: &str) -> Result<Resolved, ApiError> {
     let view = a.view.load_full();
     let serving = a.healthy.load(Ordering::Acquire) && a.source_remaining(&view).is_some();
     let current = view.document.revision;
     let candidate = match selector.unwrap_or(Selector::Published { revision: None }) {
         Selector::Published { revision } => {
             if revision.is_some_and(|r| r != current) {
-                return Err(StatusCode::CONFLICT);
+                return Err(ApiError::conflict(&join(prefix, "revision"), current));
             }
             None
         }
@@ -249,9 +375,9 @@ fn resolve(a: &Authority, selector: Option<Selector>) -> Result<Resolved, Status
             policy,
         } => {
             if base_revision != current {
-                return Err(StatusCode::CONFLICT);
+                return Err(ApiError::conflict(&join(prefix, "base_revision"), current));
             }
-            Some((base_revision, candidate(policy)?))
+            Some((base_revision, candidate(policy, &join(prefix, "policy"))?))
         }
     };
     Ok(Resolved {
@@ -260,7 +386,7 @@ fn resolve(a: &Authority, selector: Option<Selector>) -> Result<Resolved, Status
         candidate,
     })
 }
-fn delegated(value: &Option<String>) -> Result<(), StatusCode> {
+fn delegated(value: &Option<String>) -> Result<(), ApiError> {
     match value {
         Some(v)
             if v.is_empty()
@@ -269,7 +395,14 @@ fn delegated(value: &Option<String>) -> Result<(), StatusCode> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"_.:@-".contains(&b)) =>
         {
-            Err(StatusCode::BAD_REQUEST)
+            Err(ApiError::coded(
+                StatusCode::BAD_REQUEST,
+                "pumgye.error.invalid_delegated_actor",
+            )
+            .with(detail(
+                "on_behalf_of",
+                "pumgye.error.invalid_delegated_actor",
+            )))
         }
         _ => Ok(()),
     }
@@ -281,31 +414,49 @@ fn json_body(headers: &HeaderMap) -> bool {
         .and_then(|v| v.split(';').next())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
 }
-fn refuse(code: StatusCode) -> Response {
-    let mut response = code.into_response();
-    if code == StatusCode::TOO_MANY_REQUESTS {
-        response
-            .headers_mut()
-            .insert(header::RETRY_AFTER, header::HeaderValue::from_static("1"));
-    }
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("no-store"),
-    );
-    response
-}
+type Body = Result<Bytes, axum::extract::rejection::BytesRejection>;
 fn admit<T: for<'de> Deserialize<'de>>(
     a: &Authority,
     headers: &HeaderMap,
-    body: &Bytes,
-) -> Result<T, StatusCode> {
+    body: Body,
+) -> Result<(T, Bytes), ApiError> {
     if !authorized(headers, &a.admin) {
-        return Err(StatusCode::UNAUTHORIZED);
+        return Err(StatusCode::UNAUTHORIZED.into());
     }
     if !json_body(headers) {
-        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE.into());
     }
-    serde_json::from_slice(body).map_err(|_| StatusCode::BAD_REQUEST)
+    let body = body.map_err(|rejection| {
+        if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            ApiError::coded(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "pumgye.error.payload_too_large",
+            )
+        } else {
+            ApiError::from(StatusCode::BAD_REQUEST)
+        }
+    })?;
+    let request =
+        serde_path_to_error::deserialize(&mut serde_json::Deserializer::from_slice(&body))
+            .map_err(|e| ApiError::malformed(join("", &e.path().to_string())))?;
+    Ok((request, body))
+}
+/// Refuse every invalid case with its located field (bounded).
+fn validate_cases<'a>(cases: impl IntoIterator<Item = (String, &'a Case)>) -> Result<(), ApiError> {
+    let mut error = ApiError::coded(StatusCode::BAD_REQUEST, "pumgye.error.invalid_case");
+    for (prefix, case) in cases {
+        if let Err(e) = case.validate() {
+            error = error.with(detail(join(&prefix, case.error_path(e)), e.code()));
+        }
+    }
+    if error.details.is_empty() {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+fn rate_limited() -> ApiError {
+    ApiError::coded(StatusCode::TOO_MANY_REQUESTS, "pumgye.error.rate_limited")
 }
 struct Audit {
     actor: String,
@@ -318,37 +469,40 @@ fn record(
     audit: Audit,
     resolved: &Resolved,
     summary: &Summary,
-) -> Result<u64, StatusCode> {
+) -> Result<u64, ApiError> {
     let label = resolved.label();
     let mut store = a
         .store
         .lock()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .record_simulation(&store::SimulationRecord {
-            id: 0,
-            at_unix: 0,
-            kind: "simulation",
-            actor: audit.actor,
-            on_behalf_of: audit.on_behalf_of,
-            operation: audit.operation.into(),
-            source: label.source.into(),
-            revision: label.base_revision.unwrap_or(label.revision),
-            candidate_sha256: label.candidate_sha256,
-            request_sha256: audit.request_sha256,
-            cases: summary.cases,
-            allowed: summary.allowed,
-            denied: summary.denied,
-            unavailable: summary.unavailable,
-            changed: summary.changed.unwrap_or(0),
-        })
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+        .record_simulation(
+            &store::SimulationRecord {
+                id: 0,
+                at_unix: 0,
+                kind: "simulation",
+                actor: audit.actor,
+                on_behalf_of: audit.on_behalf_of,
+                operation: audit.operation.into(),
+                source: label.source.into(),
+                revision: label.base_revision.unwrap_or(label.revision),
+                candidate_sha256: label.candidate_sha256,
+                request_sha256: audit.request_sha256,
+                cases: summary.cases,
+                allowed: summary.allowed,
+                denied: summary.denied,
+                unavailable: summary.unavailable,
+                changed: summary.changed.unwrap_or(0),
+            },
+            a.simulation_budget.retention_seconds,
+        )
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into())
 }
 fn evaluate(
     resolved: &Resolved,
     cases: &[Case],
     trace: bool,
-) -> Result<(Vec<CaseResult>, Summary), StatusCode> {
+) -> Result<(Vec<CaseResult>, Summary), ApiError> {
     let compare = resolved.candidate.is_some();
     let mut summary = Summary {
         changed: compare.then_some(0),
@@ -356,10 +510,10 @@ fn evaluate(
         deny_to_allow: compare.then_some(0),
         ..Default::default()
     };
+    let refused = |_| ApiError::coded(StatusCode::BAD_REQUEST, "pumgye.error.invalid_case");
     let mut results = Vec::with_capacity(cases.len());
     for case in cases {
-        let explanation =
-            explain(resolved.evaluated(), case, trace).map_err(|_| StatusCode::BAD_REQUEST)?;
+        let explanation = explain(resolved.evaluated(), case, trace).map_err(refused)?;
         summary.cases += 1;
         match (explanation.outcome.decision, explanation.outcome.allow) {
             (None, _) => summary.unavailable += 1,
@@ -368,7 +522,7 @@ fn evaluate(
         }
         let comparison = if compare {
             let published = explain(resolved.published(), case, false)
-                .map_err(|_| StatusCode::BAD_REQUEST)?
+                .map_err(refused)?
                 .outcome;
             let changed = published.decision != explanation.outcome.decision;
             if changed {
@@ -392,14 +546,23 @@ fn evaluate(
     Ok((results, summary))
 }
 async fn blocking<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, StatusCode> + Send + 'static,
-) -> Result<T, StatusCode> {
+    f: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
     tokio::task::spawn_blocking(f)
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .map_err(|_| ApiError::from(StatusCode::SERVICE_UNAVAILABLE))?
 }
-fn finish(value: serde_json::Value) -> Response {
-    ([(header::CACHE_CONTROL, "no-store")], Json(value)).into_response()
+fn finish(value: Result<serde_json::Value, ApiError>) -> Response {
+    match value {
+        Ok(value) => ([(header::CACHE_CONTROL, "no-store")], Json(value)).into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+fn digest(body: &Bytes) -> String {
+    format!("{:x}", Sha256::digest(body))
+}
+fn json(value: serde_json::Value) -> Result<serde_json::Value, ApiError> {
+    Ok(value)
 }
 
 /// `POST /v1/explain`: one case with a full ordered stage trace by default.
@@ -407,15 +570,19 @@ pub(crate) async fn explain_one(
     State(a): State<Arc<Authority>>,
     headers: HeaderMap,
     axum::Extension(peer): axum::Extension<PeerIdentity>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
-    let request: ExplainRequest = match admit(&a, &headers, &body) {
-        Ok(r) => r,
-        Err(code) => return refuse(code),
-    };
-    if delegated(&request.on_behalf_of).is_err() || request.case.validate().is_err() {
-        return refuse(StatusCode::BAD_REQUEST);
-    }
+    finish(explain_one_inner(a, headers, peer, body).await)
+}
+async fn explain_one_inner(
+    a: Arc<Authority>,
+    headers: HeaderMap,
+    peer: PeerIdentity,
+    body: Body,
+) -> Result<serde_json::Value, ApiError> {
+    let (request, body): (ExplainRequest, _) = admit(&a, &headers, body)?;
+    delegated(&request.on_behalf_of)?;
+    validate_cases([("case".to_owned(), &request.case)])?;
     let cost = 1.0
         + if matches!(request.snapshot, Some(Selector::Candidate { .. })) {
             CANDIDATE_COST
@@ -423,42 +590,37 @@ pub(crate) async fn explain_one(
             0.0
         };
     if !a.simulation_budget.take(cost) {
-        return refuse(StatusCode::TOO_MANY_REQUESTS);
+        return Err(rate_limited());
     }
     let audit = Audit {
         actor: peer.0,
         on_behalf_of: request.on_behalf_of,
         operation: "explain",
-        request_sha256: format!("{:x}", Sha256::digest(&body)),
+        request_sha256: digest(&body),
     };
-    let owner = a.clone();
-    let result = blocking(move || {
-        let resolved = resolve(&owner, request.snapshot)?;
+    blocking(move || {
+        let resolved = resolve(&a, request.snapshot, "snapshot")?;
         let (mut results, summary) = evaluate(
             &resolved,
             std::slice::from_ref(&request.case),
             request.trace,
         )?;
-        let audit_id = record(&owner, audit, &resolved, &summary)?;
-        owner
-            .simulation_budget
+        let audit_id = record(&a, audit, &resolved, &summary)?;
+        a.simulation_budget
             .simulations
             .fetch_add(1, Ordering::Relaxed);
-        let result = results.pop().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        serde_json::to_value(serde_json::json!({
+        let result = results
+            .pop()
+            .ok_or(ApiError::from(StatusCode::INTERNAL_SERVER_ERROR))?;
+        json(serde_json::json!({
             "version": EXPLAIN_VERSION,
             "kind": "simulation",
             "audit_id": audit_id,
             "snapshot": resolved.label(),
             "result": result,
         }))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
     })
-    .await;
-    match result {
-        Ok(value) => finish(value),
-        Err(code) => refuse(code),
-    }
+    .await
 }
 
 /// `POST /v1/explain/batch`: up to 256 cases (32 with traces) on one snapshot.
@@ -466,48 +628,63 @@ pub(crate) async fn explain_batch(
     State(a): State<Arc<Authority>>,
     headers: HeaderMap,
     axum::Extension(peer): axum::Extension<PeerIdentity>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
-    let request: BatchRequest = match admit(&a, &headers, &body) {
-        Ok(r) => r,
-        Err(code) => return refuse(code),
-    };
+    finish(explain_batch_inner(a, headers, peer, body).await)
+}
+async fn explain_batch_inner(
+    a: Arc<Authority>,
+    headers: HeaderMap,
+    peer: PeerIdentity,
+    body: Body,
+) -> Result<serde_json::Value, ApiError> {
+    let (request, body): (BatchRequest, _) = admit(&a, &headers, body)?;
     let limit = if request.trace {
         MAX_TRACED_BATCH_CASES
     } else {
         MAX_BATCH_CASES
     };
     if request.cases.len() > limit {
-        return refuse(StatusCode::PAYLOAD_TOO_LARGE);
+        return Err(ApiError::coded(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "pumgye.error.batch_too_large",
+        )
+        .with(detail("cases", "pumgye.error.batch_too_large")));
     }
-    if request.cases.is_empty()
-        || delegated(&request.on_behalf_of).is_err()
-        || request.cases.iter().any(|c| c.validate().is_err())
-    {
-        return refuse(StatusCode::BAD_REQUEST);
+    if request.cases.is_empty() {
+        return Err(
+            ApiError::coded(StatusCode::BAD_REQUEST, "pumgye.error.empty_batch")
+                .with(detail("cases", "pumgye.error.empty_batch")),
+        );
     }
+    delegated(&request.on_behalf_of)?;
+    validate_cases(
+        request
+            .cases
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (format!("cases[{i}]"), c)),
+    )?;
     let candidate = matches!(request.snapshot, Some(Selector::Candidate { .. }));
     let cost = request.cases.len() as f64 * if candidate { 2.0 } else { 1.0 }
         + if candidate { CANDIDATE_COST } else { 0.0 };
     if !a.simulation_budget.take(cost) {
-        return refuse(StatusCode::TOO_MANY_REQUESTS);
+        return Err(rate_limited());
     }
     let audit = Audit {
         actor: peer.0,
         on_behalf_of: request.on_behalf_of,
         operation: "explain_batch",
-        request_sha256: format!("{:x}", Sha256::digest(&body)),
+        request_sha256: digest(&body),
     };
-    let owner = a.clone();
-    let result = blocking(move || {
-        let resolved = resolve(&owner, request.snapshot)?;
+    blocking(move || {
+        let resolved = resolve(&a, request.snapshot, "snapshot")?;
         let (results, summary) = evaluate(&resolved, &request.cases, request.trace)?;
-        let audit_id = record(&owner, audit, &resolved, &summary)?;
-        owner
-            .simulation_budget
+        let audit_id = record(&a, audit, &resolved, &summary)?;
+        a.simulation_budget
             .simulations
             .fetch_add(1, Ordering::Relaxed);
-        serde_json::to_value(serde_json::json!({
+        json(serde_json::json!({
             "version": EXPLAIN_VERSION,
             "kind": "simulation",
             "audit_id": audit_id,
@@ -515,13 +692,8 @@ pub(crate) async fn explain_batch(
             "summary": summary,
             "results": results,
         }))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
     })
-    .await;
-    match result {
-        Ok(value) => finish(value),
-        Err(code) => refuse(code),
-    }
+    .await
 }
 
 /// `POST /v1/explain/diff`: role-expanded rights that change if a candidate is published.
@@ -529,41 +701,50 @@ pub(crate) async fn explain_diff(
     State(a): State<Arc<Authority>>,
     headers: HeaderMap,
     axum::Extension(peer): axum::Extension<PeerIdentity>,
-    body: Bytes,
+    body: Body,
 ) -> Response {
-    let request: DiffRequest = match admit(&a, &headers, &body) {
-        Ok(r) => r,
-        Err(code) => return refuse(code),
+    finish(explain_diff_inner(a, headers, peer, body).await)
+}
+async fn explain_diff_inner(
+    a: Arc<Authority>,
+    headers: HeaderMap,
+    peer: PeerIdentity,
+    body: Body,
+) -> Result<serde_json::Value, ApiError> {
+    let (request, body): (DiffRequest, _) = admit(&a, &headers, body)?;
+    let page = |path| {
+        ApiError::coded(StatusCode::BAD_REQUEST, "pumgye.error.invalid_page")
+            .with(detail(path, "pumgye.error.invalid_page"))
     };
-    if request.limit == 0
-        || request.limit > MAX_DIFF_PAGE
-        || request.cursor > 1 << 24
-        || delegated(&request.on_behalf_of).is_err()
-    {
-        return refuse(StatusCode::BAD_REQUEST);
+    if request.limit == 0 || request.limit > MAX_DIFF_PAGE {
+        return Err(page("limit"));
     }
+    if request.cursor > 1 << 24 {
+        return Err(page("cursor"));
+    }
+    delegated(&request.on_behalf_of)?;
     if !a.simulation_budget.take(CANDIDATE_COST * 2.0) {
-        return refuse(StatusCode::TOO_MANY_REQUESTS);
+        return Err(rate_limited());
     }
     let audit = Audit {
         actor: peer.0,
         on_behalf_of: request.on_behalf_of,
         operation: "diff",
-        request_sha256: format!("{:x}", Sha256::digest(&body)),
+        request_sha256: digest(&body),
     };
-    let owner = a.clone();
-    let result = blocking(move || {
+    blocking(move || {
         let resolved = resolve(
-            &owner,
+            &a,
             Some(Selector::Candidate {
                 base_revision: request.base_revision,
                 policy: request.policy,
             }),
+            "",
         )?;
         let (_, c) = resolved
             .candidate
             .as_ref()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            .ok_or(ApiError::from(StatusCode::INTERNAL_SERVER_ERROR))?;
         let page: DiffPage = diff(
             Side {
                 policy: &resolved.view.document.policy,
@@ -580,12 +761,11 @@ pub(crate) async fn explain_diff(
             changed: Some(page.total as u64),
             ..Default::default()
         };
-        let audit_id = record(&owner, audit, &resolved, &summary)?;
-        owner
-            .simulation_budget
+        let audit_id = record(&a, audit, &resolved, &summary)?;
+        a.simulation_budget
             .simulations
             .fetch_add(1, Ordering::Relaxed);
-        serde_json::to_value(serde_json::json!({
+        json(serde_json::json!({
             "version": EXPLAIN_VERSION,
             "kind": "simulation",
             "audit_id": audit_id,
@@ -594,13 +774,8 @@ pub(crate) async fn explain_diff(
             "next_cursor": page.next_cursor,
             "changes": page.changes,
         }))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
     })
-    .await;
-    match result {
-        Ok(value) => finish(value),
-        Err(code) => refuse(code),
-    }
+    .await
 }
 
 #[derive(Deserialize)]
@@ -613,25 +788,39 @@ pub(crate) struct SimulationCursor {
 pub(crate) async fn simulation_audit(
     State(a): State<Arc<Authority>>,
     headers: HeaderMap,
-    axum::extract::Query(cursor): axum::extract::Query<SimulationCursor>,
-) -> Result<Json<Vec<store::SimulationRecord>>, StatusCode> {
+    cursor: Result<
+        axum::extract::Query<SimulationCursor>,
+        axum::extract::rejection::QueryRejection,
+    >,
+) -> Response {
     if !authorized(&headers, &a.admin) {
-        return Err(StatusCode::UNAUTHORIZED);
+        return ApiError::from(StatusCode::UNAUTHORIZED).into_response();
     }
+    let invalid = || {
+        ApiError::coded(StatusCode::BAD_REQUEST, "pumgye.error.invalid_cursor")
+            .with(detail("after_id", "pumgye.error.invalid_cursor"))
+            .into_response()
+    };
+    let Ok(axum::extract::Query(cursor)) = cursor else {
+        return invalid();
+    };
     if cursor.after_id > i64::MAX as u64 {
-        return Err(StatusCode::BAD_REQUEST);
+        return invalid();
     }
-    blocking(move || {
+    match blocking(move || {
         let store = a
             .store
             .lock()
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
         store
             .simulations_after(cursor.after_id)
-            .map(Json)
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE.into())
     })
     .await
+    {
+        Ok(rows) => ([(header::CACHE_CONTROL, "no-store")], Json(rows)).into_response(),
+        Err(error) => error.into_response(),
+    }
 }
 
 pub(crate) fn routes() -> axum::Router<Arc<Authority>> {
@@ -1325,5 +1514,196 @@ mod tests {
                 .all(|r| r.operation == "diff" && r.changed == 2)
         );
         assert_eq!(a.view.load().document.revision, 1);
+    }
+
+    async fn error(router: &Router, request: Request<Body>) -> (StatusCode, Value) {
+        let (status, body) = call(router, request).await;
+        (status, body["error"].clone())
+    }
+
+    #[tokio::test]
+    async fn coded_refusals_carry_located_actionable_errors() {
+        let (_root, a, router) = owner();
+        let explain = |body: Value| post("/v1/explain", ADMIN, &body);
+        // 409: revision conflict names the field and the current revision.
+        let (status, e) = error(
+            &router,
+            explain(json!({"snapshot":{"source":"published","revision":9},"case":case("u_reader","read","public",1)})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            e,
+            json!({"code":"pumgye.error.revision_conflict","message_key":"pumgye.error.revision_conflict",
+                   "details":[{"path":"snapshot.revision","code":"pumgye.error.revision_conflict","message_key":"pumgye.error.revision_conflict"}],
+                   "current_revision":1})
+        );
+        // 422: the validator's specific failure, located in the request.
+        let mut invalid = candidate();
+        invalid["services"]["orders"]["users"]["u_reader"] = json!(["missing-role"]);
+        let (status, e) = error(
+            &router,
+            explain(json!({"snapshot":{"source":"candidate","base_revision":1,"policy":invalid},"case":case("u_reader","read","public",1)})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(e["code"], "pumgye.error.candidate_invalid");
+        assert_eq!(
+            e["details"],
+            json!([{"path":"snapshot.policy.services.orders.users.u_reader",
+                    "code":"pumgye.validation.unknown_assigned_role","message_key":"pumgye.validation.unknown_assigned_role"}])
+        );
+        let mut schema = candidate();
+        schema["services"]["orders"]["roles"]["reader"]["minimum_aal"] = json!("high");
+        let (status, e) = error(
+            &router,
+            explain(json!({"snapshot":{"source":"candidate","base_revision":1,"policy":schema},"case":case("u_reader","read","public",1)})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(e["details"][0]["code"], "pumgye.validation.schema");
+        assert_eq!(
+            e["details"][0]["path"],
+            "snapshot.policy.services.orders.roles.reader.minimum_aal"
+        );
+        // 400: every invalid batch case is located.
+        let mut bad = vec![case("u_reader", "read", "public", 1); 3];
+        bad[1]["aal"] = json!(9);
+        bad[2]["service"] = json!("no spaces");
+        let (status, e) = error(
+            &router,
+            post("/v1/explain/batch", ADMIN, &json!({"cases":bad})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(e["code"], "pumgye.error.invalid_case");
+        let details: Vec<(String, String)> = e["details"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                (
+                    d["path"].as_str().unwrap().into(),
+                    d["code"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            details,
+            [
+                (
+                    "cases[1].aal".into(),
+                    "pumgye.case.assurance_out_of_range".into()
+                ),
+                ("cases[2].service".into(), "pumgye.case.invalid_name".into())
+            ]
+        );
+        // 400: schema errors in the request itself are located.
+        let mut kind = case("u_reader", "read", "public", 1);
+        kind["subject"]["kind"] = json!("root");
+        let (status, e) = error(&router, explain(json!({"case":kind}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(e["code"], "pumgye.error.malformed_request");
+        assert_eq!(e["details"][0]["path"], "case.subject.kind");
+        let (_, e) = error(
+            &router,
+            explain(json!({"case":case("u_reader","read","public",1),"on_behalf_of":"a b"})),
+        )
+        .await;
+        assert_eq!(e["details"][0]["path"], "on_behalf_of");
+        let (_, e) = error(
+            &router,
+            post("/v1/explain/batch", ADMIN, &json!({"cases":[]})),
+        )
+        .await;
+        assert_eq!(e["code"], "pumgye.error.empty_batch");
+        // 413s are distinguished.
+        let (status, e) = error(
+            &router,
+            post(
+                "/v1/explain/batch",
+                ADMIN,
+                &json!({"cases":vec![case("u_reader","read","public",1); MAX_BATCH_CASES + 1]}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            (status, e["code"].as_str()),
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Some("pumgye.error.batch_too_large")
+            )
+        );
+        let (status, e) = error(
+            &router,
+            explain(json!({"case":case("u_reader","read","public",1),"on_behalf_of":"x".repeat(BODY_LIMIT)})),
+        )
+        .await;
+        assert_eq!(
+            (status, e["code"].as_str()),
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Some("pumgye.error.payload_too_large")
+            )
+        );
+        // Diff refusals.
+        let (status, e) = error(
+            &router,
+            post(
+                "/v1/explain/diff",
+                ADMIN,
+                &json!({"base_revision":4,"policy":candidate()}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(e["details"][0]["path"], "base_revision");
+        assert_eq!(e["current_revision"], 1);
+        let (_, e) = error(
+            &router,
+            post(
+                "/v1/explain/diff",
+                ADMIN,
+                &json!({"base_revision":1,"policy":candidate(),"limit":0}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            (e["code"].as_str(), e["details"][0]["path"].as_str()),
+            (Some("pumgye.error.invalid_page"), Some("limit"))
+        );
+        let (status, e) = error(&router, get("/v1/audit/simulations?after_id=x", ADMIN)).await;
+        assert_eq!(
+            (status, e["code"].as_str()),
+            (StatusCode::BAD_REQUEST, Some("pumgye.error.invalid_cursor"))
+        );
+        // 429 carries a code and Retry-After.
+        a.simulation_budget.drain();
+        let (status, e) = error(
+            &router,
+            explain(json!({"case":case("u_reader","read","public",1)})),
+        )
+        .await;
+        assert_eq!(
+            (status, e["code"].as_str()),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                Some("pumgye.error.rate_limited")
+            )
+        );
+        // Every emitted code is registered in the en/ko catalogs.
+        for code in [
+            "pumgye.error.revision_conflict",
+            "pumgye.error.candidate_invalid",
+            "pumgye.validation.unknown_assigned_role",
+            "pumgye.validation.schema",
+        ] {
+            assert!(pumgye_core::explain::message_keys().contains(&code.to_owned()));
+        }
+        // Authentication and media-type refusals stay bare.
+        assert_eq!(
+            call(&router, post("/v1/explain", DECISION, &json!({}))).await,
+            (StatusCode::UNAUTHORIZED, Value::Null)
+        );
     }
 }
