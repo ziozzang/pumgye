@@ -215,9 +215,28 @@ clearance를 평가하는 반면, v1은 등급을 지연 해석하고 첫 합집
 | 적대적 fixture(헤더를 통한 그룹 위조, 고아, AAL3 충족 불가, 등급 헤더 불일치) | 완료: 어떤 요청에도 그룹 입력이 없고(모르는 필드 거부) projection 위조는 거부, 고아 처리, 낮추지 않는 AAL3 경고, 클라이언트 등급은 권한 경로에서 참고용이며 리소스 경로에서는 받지 않음 |
 | qualification 코퍼스에서 v1/v2 섀도 동등성 | 테스트로 완료, 운영 7일 관찰은 운영 게이트 |
 | `0409a7a` 대비 10 % 이내 성능 | ADR 기준 충족. 현재 v1 대비 단일 경로 +4–11 %, 캐시 상주 교차 혼합 +20–28 %(위 잔여 분석) |
-| Hopae 멤버십 projection·수명 주기 소비 | 문서화된 계약 기준 완료(서명 페이지 단위 테스트), Hopae `feat/groups`와의 실제 상호 운용은 아직 실행하지 않음 |
+| Hopae 멤버십 projection·수명 주기 소비 | 완료: 서명 페이지 단위 테스트와 로컬 상호 운용 도구로 Hopae `integrate/identity-platform`(`60b3a60`) 실제 검증(20/20) |
 | 수문장 `NetworkZone` export | 계약 정의, 수문장 제공 전까지 로컬 CIDR 대체 |
 | 원격 k3s 실제 4개 구성 요소 체인(ADR 0022) | 이 변경에서 실행하지 않음 |
+
+## 로컬 상호 운용 검증(opt-in)
+
+`tools/hopae_v2_interop.py`는 클러스터나 OIDC 제공자 없이 실제 Hopae(`integrate/identity-platform`,
+그룹 + 주체 디렉터리)와 실제 품계를 루프백 프로세스로 실행합니다.
+
+```sh
+python3 tools/hopae_v2_interop.py --hopae <hopae 바이너리> --pumgye target/debug/pumgye [--workdir DIR] [--keep]
+```
+
+Hopae에 projection 키, `human1:` 주체에 필요한 네이티브 Human receipt 발급자(Hopae mTLS gRPC
+리스너 필요), unified 위임 키를 설정하고, Hopae 시나리오 테스트처럼 사람을 SQL로 저장소에 넣은 뒤
+그룹·멤버십·비활성화는 Hopae의 실제 admin API로 수행합니다. 품계의 `--hopae-owner`는 위임 요청에
+서명하고 projection/수명 주기 읽기 경로 4개만 허용하는 루프백 mTLS relay(위 전용 읽기 전용 자격의
+형태)를 가리킵니다. 검사(20): 서명된 snapshot과 feed 소비, 그룹 기반 허용, 명시적 거부 우선,
+feed 제거에 의한 회수, Hopae 접근 불가 시 `max_staleness_secs` 뒤 fail closed와 복구, 비활성화 →
+권한 변경 없는 `subject_disabled`, 저장소 삭제 → 고아 바인딩과 삭제된 주체에 대한 새 바인딩 거부,
+품계 cursor 뒤로 journal 정리 → `410 cursor_expired` → 재snapshot과 수렴. Python 3.11+와
+`cryptography` 패키지가 필요합니다. 마지막 실행: Hopae `60b3a60` 대상 20/20.
 
 ## 제약
 

@@ -16,6 +16,7 @@
   application (pinned keys, strict Ed25519 with domain separation, vocabulary and
   freshness binding, cursor/watermark continuity, 410 resnapshot) and the subject
   lifecycle feed with orphan reconciliation.
+- Opt-in local Hopae interop qualification (`tools/hopae_v2_interop.py`).
 - Shadow evaluation of v2 beside v1 with persisted counters and explanations; the
   zero-unexplained-mismatch cutover gate (`--shadow-window-days`), approved cutover,
   rollback and model history; `--v2-production` reason requirement.

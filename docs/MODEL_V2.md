@@ -288,9 +288,33 @@ or caching per-(principal, service, permission) results, both rejected for P0.
 | Adversarial fixtures (group spoofing via header, orphan, AAL3 unsatisfiable, class header mismatch) | Done: no group input exists on any request shape (unknown fields refused), projection forgeries refused; orphans; AAL3 warning without downgrade; client class is advisory on the permission path and never accepted on resource paths |
 | v1/v2 shadow parity on the qualification corpus | Done in tests; the 7-day production window is an operational gate |
 | Performance within 10 % of `0409a7a` | Met against the ADR floor; versus current v1, single paths +4–11 % and a cache-resident alternating mix +20–28 % (residual analysed above) |
-| Hopae membership projection + lifecycle consumption | Done against the documented contract (unit-tested with signed pages); live interoperability with Hopae `feat/groups` not yet run |
+| Hopae membership projection + lifecycle consumption | Done: unit-tested with signed pages and qualified live against Hopae `integrate/identity-platform` (`60b3a60`) with the local interop tool (20/20) |
 | Sumunjang `NetworkZone` export | Contract defined; local CIDR fallback until Sumunjang ships it |
 | Real four-component chain on the remote k3s (ADR 0022) | Not run in this change |
+
+## Local interoperability qualification (opt-in)
+
+`tools/hopae_v2_interop.py` runs a real Hopae (`integrate/identity-platform`,
+groups + subject directory) and a real Pumgye as loopback processes, without a
+cluster or OIDC provider:
+
+```sh
+python3 tools/hopae_v2_interop.py --hopae <hopae binary> --pumgye target/debug/pumgye [--workdir DIR] [--keep]
+```
+
+It configures Hopae with the projection key, the native Human receipt issuer
+(needed for `human1:` subjects, which requires Hopae's mTLS gRPC listener) and the
+unified delegation key; lays people down in Hopae's store with SQL as Hopae's own
+scenario tests do; creates groups, memberships and disables through Hopae's real
+admin API; and points Pumgye's `--hopae-owner` at a loopback mTLS relay that signs
+delegated requests and admits only the four projection/lifecycle read routes (the
+shape of the dedicated read-only credential above). Checks (20): signed snapshot
+and feed consumed; group-based allow; explicit deny precedence; feed removal
+revokes; Hopae unreachable → fail closed after `max_staleness_secs`, then recovery;
+disable → `subject_disabled` without rights change; store deletion → orphaned
+binding and refusal of new bindings to the deleted principal; journal pruned behind
+Pumgye's cursor → `410 cursor_expired` → resnapshot and convergence. Needs Python
+3.11+ and the `cryptography` package. Last run: 20/20 against Hopae `60b3a60`.
 
 ## Limitations
 
