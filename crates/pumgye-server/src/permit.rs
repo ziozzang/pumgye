@@ -151,7 +151,7 @@ impl Signer {
                 _ => return Err(Refused::InvalidBinding),
             }
             || if kind == hopae_grpc::PrincipalKind::Human {
-                !matches!(identity.aal, 1 | 2)
+                !(1..=3).contains(&identity.aal)
             } else {
                 identity.aal != 0
             }

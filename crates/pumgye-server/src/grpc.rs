@@ -421,6 +421,7 @@ impl pumgye_grpc::v1::human_resource_authorization_server::HumanResourceAuthoriz
             return Err(Status::invalid_argument("invalid resource scope"));
         }
         if !matches!(aal, 1 | 2) {
+            // Adapter-asserted levels: AAL3 is accepted only from Hopae-sealed receipts.
             return Err(Status::invalid_argument("Human requires AAL1 or AAL2"));
         }
         let result = self.0.human_resource_decision(&query);

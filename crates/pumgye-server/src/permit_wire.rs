@@ -139,7 +139,7 @@ fn verify_inner(
                 _ => return Err(Refused),
             }
         || if kind == hopae_grpc::PrincipalKind::Human {
-            !matches!(identity.aal, 1 | 2)
+            !(1..=3).contains(&identity.aal)
         } else {
             identity.aal != 0
         }
@@ -454,7 +454,25 @@ mod tests {
                 .is_err()
         );
         assert!(verify_observed(&signer, &binding.authority_epoch, &input, &wire, 200).is_err());
-        for aal in [0, 3, u32::MAX] {
+        // Hopae seals AAL3 for opted-in applications: a permit may carry it,
+        // but a permit signed for AAL2 never verifies as AAL3.
+        let mut high = input.clone();
+        high.context
+            .as_mut()
+            .unwrap()
+            .identity
+            .as_mut()
+            .unwrap()
+            .aal = 3;
+        assert!(
+            signer
+                .sign_observed_human(&high, binding.clone(), 100, 800)
+                .is_ok()
+        );
+        assert!(
+            verify_observed_human(&signer, &binding.authority_epoch, &high, &wire, 200).is_err()
+        );
+        for aal in [0, 4, u32::MAX] {
             let mut bad = input.clone();
             bad.context.as_mut().unwrap().identity.as_mut().unwrap().aal = aal;
             assert!(

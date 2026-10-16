@@ -113,6 +113,7 @@ pub const ERROR_CODES: &[&str] = &[
     "pumgye.error.rate_limited",
     "pumgye.error.shadow_gate_unsatisfied",
     "pumgye.error.no_v2_document",
+    "pumgye.error.regrant_unknown",
 ];
 /// Registered case refusal detail codes.
 pub const CASE_ERROR_CODES: &[&str] = &[

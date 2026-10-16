@@ -33,6 +33,7 @@ pub const ADMISSION_CODES: &[&str] = &[
     "pumgye.validation.reason_required",
     "pumgye.validation.subject_deleted",
     "pumgye.validation.subject_unresolved",
+    "pumgye.validation.subject_retired",
 ];
 /// Registered converter review / unmigrated codes (also message keys).
 pub const MIGRATION_CODES: &[&str] = &[

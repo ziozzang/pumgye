@@ -429,10 +429,12 @@ impl Runtime {
     #[cfg(test)]
     pub(crate) fn set_projection(&self, projection: hopae_owner::Projection, valid_until: u64) {
         if let Some(view) = self.view.load_full() {
-            view.membership.store(Arc::new(MembershipIndex::build(
+            let index = MembershipIndex::build(
                 &view.compiled,
                 projection.members.iter().map(|(k, v)| (k.as_str(), v)),
-            )));
+            );
+            view.membership
+                .store(Arc::new(self.with_workloads(index, &view.compiled)));
         }
         *self.projection.lock().unwrap() = Some(projection);
         self.membership_valid_until
@@ -498,6 +500,7 @@ impl Runtime {
                 })
             })
             .unwrap_or_default();
+        let membership = self.with_workloads(membership, &compiled);
         let resources_v1 = document
             .policy
             .catalog
@@ -523,6 +526,23 @@ impl Runtime {
             resources_v1,
         }
     }
+    /// Attach the active workload aliases Hopae reported to a membership index.
+    fn with_workloads(&self, index: MembershipIndex, compiled: &CompiledV2) -> MembershipIndex {
+        let workloads = self
+            .lifecycle
+            .lock()
+            .ok()
+            .and_then(|l| l.as_ref().map(|l| l.workloads.clone()))
+            .unwrap_or_default();
+        index.with_workloads(compiled, workloads.active())
+    }
+    fn workloads(&self) -> hopae_owner::Workloads {
+        self.lifecycle
+            .lock()
+            .ok()
+            .and_then(|l| l.as_ref().map(|l| l.workloads.clone()))
+            .unwrap_or_default()
+    }
     fn install_view(&self, view: V2View) {
         self.view.store(Some(Arc::new(view)));
     }
@@ -538,6 +558,24 @@ pub(crate) fn restore(a: &Authority, store: &store::Store) -> anyhow::Result<()>
             .compile(&document)
             .map_err(|v| anyhow::anyhow!("stored v2 policy refused at {}: {}", v.path, v.code))?;
         a.v2.install_view(a.v2.view_for(document, compiled));
+    }
+    // Workload principals are known only from the feed: restore them so aliases
+    // and retirements survive a restart (the lifecycle snapshot keeps them).
+    if let Some(text) = store.load_workloads()? {
+        let workloads: hopae_owner::Workloads = serde_json::from_str(&text)?;
+        if let Ok(mut slot) = a.v2.lifecycle.lock() {
+            *slot = Some(hopae_owner::Lifecycle {
+                workloads,
+                ..Default::default()
+            });
+        }
+        if let Some(view) = a.v2.view.load_full() {
+            let document = view.document.clone();
+            let compiled = a.v2.compile(&document).map_err(|v| {
+                anyhow::anyhow!("stored v2 policy refused at {}: {}", v.path, v.code)
+            })?;
+            a.v2.install_view(a.v2.view_for(document, compiled));
+        }
     }
     let model = store.model()?;
     anyhow::ensure!(
@@ -602,26 +640,44 @@ async fn refresh_owners(
     let mut recompile = false;
     if let Some(config) = &client.lifecycle {
         let current = a.v2.lifecycle.lock().ok().and_then(|l| l.clone());
-        let full = current.is_none()
+        let full = current.as_ref().is_none_or(|c| !c.complete)
             || now.saturating_sub(*last_reconcile) >= config.reconcile_interval_secs;
+        let seed = current
+            .as_ref()
+            .map(|c| c.workloads.clone())
+            .unwrap_or_default();
         let result = match current {
             Some(mut state) if !full => match client.lifecycle_follow(&mut state).await {
-                Err(hopae_owner::Refusal::CursorExpired) => client.lifecycle_snapshot().await,
+                Err(hopae_owner::Refusal::CursorExpired) => {
+                    client.lifecycle_snapshot(seed.clone()).await
+                }
                 r => r.map(|_| state),
             },
-            _ => client.lifecycle_snapshot().await,
+            _ => client.lifecycle_snapshot(seed.clone()).await,
         };
         if let Ok(state) = result {
             if full {
                 *last_reconcile = now;
             }
+            let workloads_changed = state.workloads != seed;
             if let Ok(mut slot) = a.v2.lifecycle.lock() {
                 recompile |= slot
                     .as_ref()
                     .map(hopae_owner::Lifecycle::view)
                     .map(|v| (v.deleted, v.disabled))
                     != Some((state.view().deleted, state.view().disabled));
-                *slot = Some(state);
+                recompile |= workloads_changed;
+                *slot = Some(state.clone());
+            }
+            if workloads_changed {
+                // Workload principals are only in the feed: persist them.
+                if let Ok(text) = serde_json::to_string(&state.workloads) {
+                    let owner = a.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        owner.store.lock().ok().map(|s| s.save_workloads(&text))
+                    })
+                    .await;
+                }
             }
         }
     }
@@ -652,9 +708,12 @@ async fn refresh_owners(
                         .ok()
                         .and_then(|x| x.as_ref().map(|x| x.max_aal))
                         != Some(p.max_aal);
-                let index = MembershipIndex::build(
+                let index = a.v2.with_workloads(
+                    MembershipIndex::build(
+                        &view.compiled,
+                        p.members.iter().map(|(k, v)| (k.as_str(), v)),
+                    ),
                     &view.compiled,
-                    p.members.iter().map(|(k, v)| (k.as_str(), v)),
                 );
                 if let Ok(mut slot) = a.v2.projection.lock() {
                     *slot = Some(p);
@@ -751,6 +810,25 @@ fn admission(
                 "pumgye.validation.reason_required",
             ));
         }
+        // Retired ServiceAccount principals never come back (UIDs are not reused).
+        if let Some(l) = lifecycle.as_ref() {
+            for s in &b.subjects {
+                if let pumgye_core::v2::SubjectRef::Principal {
+                    kind: PrincipalKind::Workload,
+                    reference,
+                } = s
+                    && l.workloads
+                        .principals
+                        .get(reference)
+                        .is_some_and(|w| w.status == "retired")
+                {
+                    return Err(unprocessable(
+                        format!("{prefix}bindings[{i}].subjects"),
+                        "pumgye.validation.subject_retired",
+                    ));
+                }
+            }
+        }
         if let Some(l) = lifecycle.as_ref().filter(|l| l.complete) {
             for s in &b.subjects {
                 if let pumgye_core::v2::SubjectRef::Principal {
@@ -840,7 +918,7 @@ async fn publish_inner(
     peer: PeerIdentity,
     body: Body,
 ) -> Result<Value, ApiError> {
-    let (mut next, _): (DocumentV2, _) = admit(&a, &headers, body)?;
+    let (next, _): (DocumentV2, _) = admit(&a, &headers, body)?;
     if a.kubernetes_owned {
         return Err(StatusCode::CONFLICT.into());
     }
@@ -852,24 +930,57 @@ async fn publish_inner(
         return Err(StatusCode::SERVICE_UNAVAILABLE.into());
     }
     let _guard = a.v2.install.clone().lock_owned().await;
-    blocking(move || {
+    blocking(move || publish_document(&a, expected, next, &peer.0, "policy.")).await
+}
+/// CAS-publish a v2 document (caller holds the install lock): stamp metadata
+/// from the authenticated actor, admit, compile, persist, install, reset shadow.
+fn publish_document(
+    a: &Authority,
+    expected: u64,
+    mut next: DocumentV2,
+    actor: &str,
+    prefix: &str,
+) -> Result<Value, ApiError> {
+    {
         let current = a.v2.view.load_full();
         let current_revision = current.as_ref().map_or(0, |v| v.document.revision);
         if current_revision != expected {
             return Err(ApiError::conflict("revision", current_revision));
         }
-        let revision = next_revision(&a)?;
-        let changed = stamp(current.as_ref().map(|v| &v.document.policy), &mut next.policy, &peer.0, revision, now_unix());
-        admission(&a, &next.policy, &changed, "policy.")?;
+        let revision = next_revision(a)?;
+        let changed = stamp(
+            current.as_ref().map(|v| &v.document.policy),
+            &mut next.policy,
+            actor,
+            revision,
+            now_unix(),
+        );
+        admission(a, &next.policy, &changed, prefix)?;
         next.revision = revision;
-        let compiled = a.v2.compile(&next).map_err(|v| unprocessable(format!("policy.{}", v.path.trim_start_matches('$')).trim_end_matches('.').to_owned(), v.code))?;
+        let compiled = a.v2.compile(&next).map_err(|v| {
+            unprocessable(
+                format!("policy.{}", v.path.trim_start_matches('$'))
+                    .trim_end_matches('.')
+                    .to_owned(),
+                v.code,
+            )
+        })?;
         let text = serde_json::to_string(&next).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         if text.len() > store::MAX_POLICY_BYTES {
-            return Err(ApiError::coded(StatusCode::PAYLOAD_TOO_LARGE, "pumgye.error.candidate_too_large"));
+            return Err(ApiError::coded(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "pumgye.error.candidate_too_large",
+            ));
         }
         {
-            let mut store = a.store.lock().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-            if store.publish_v2(expected, revision, &text, &peer.0, None).is_err() {
+            let mut store = a
+                .store
+                .lock()
+                .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if store
+                .publish_v2(expected, revision, &text, actor, None)
+                .is_err()
+            {
                 a.healthy.store(false, Ordering::Release);
                 return Err(StatusCode::SERVICE_UNAVAILABLE.into());
             }
@@ -877,10 +988,162 @@ async fn publish_inner(
         let warnings = compiled.warnings.clone();
         let orphaned = compiled.orphaned.clone();
         a.v2.install_view(a.v2.view_for(next.clone(), compiled));
-        a.v2.shadow.reset(a.view.load().document.revision, revision, now_unix());
-        Ok(json!({"revision": revision, "policy": next.policy, "warnings": warnings, "orphaned": orphaned}))
-    })
-    .await
+        a.v2.shadow
+            .reset(a.view.load().document.revision, revision, now_unix());
+        Ok(
+            json!({"revision": revision, "policy": next.policy, "warnings": warnings, "orphaned": orphaned}),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kubernetes workload principals: status and legacy re-grants
+// ---------------------------------------------------------------------------
+
+fn fnv_hex(parts: &[&str]) -> String {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for p in parts {
+        for b in p.bytes().chain([0xff]) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{h:016x}")
+}
+/// Report-only proposals: re-grant each binding that names a Pod-bound legacy
+/// workload subject to the ServiceAccount principal Hopae mapped it to
+/// (`workload_legacy_mapped`). Legacy bindings are kept until retired explicitly.
+fn regrant_proposals(
+    policy: &PolicyV2,
+    workloads: &hopae_owner::Workloads,
+) -> Vec<(String, pumgye_core::v2::Binding, Value)> {
+    let existing: std::collections::BTreeSet<&str> =
+        policy.bindings.iter().map(|b| b.id.as_str()).collect();
+    let mut out = Vec::new();
+    for b in &policy.bindings {
+        for s in &b.subjects {
+            let pumgye_core::v2::SubjectRef::Principal {
+                kind: PrincipalKind::Workload,
+                reference,
+            } = s
+            else {
+                continue;
+            };
+            let Some(principal) = workloads.legacy.get(reference) else {
+                continue;
+            };
+            let Some(record) = workloads
+                .principals
+                .get(principal)
+                .filter(|w| w.status == "active")
+            else {
+                continue;
+            };
+            let hash = fnv_hex(&[&b.id, reference, principal]);
+            let id = format!("bnd_rg_{hash}");
+            if existing.contains(id.as_str()) {
+                continue;
+            }
+            let mut proposed = b.clone();
+            proposed.id = id;
+            proposed.subjects = vec![pumgye_core::v2::SubjectRef::Principal {
+                kind: PrincipalKind::Workload,
+                reference: principal.clone(),
+            }];
+            proposed.metadata = pumgye_core::v2::Metadata {
+                source: Some("migrated:legacy-pod".into()),
+                ..Default::default()
+            };
+            let evidence = json!({"legacy_binding": b.id, "legacy_subject": reference, "principal": principal,
+                "spiffe_id": record.spiffe_id, "namespace": record.namespace, "service_account": record.service_account});
+            out.push((format!("rg_{hash}"), proposed, evidence));
+        }
+    }
+    out
+}
+/// `GET /v2/workloads`: principals, legacy mappings and re-grant proposals.
+pub(crate) async fn workloads(State(a): State<Arc<Authority>>, headers: HeaderMap) -> Response {
+    if !authorized(&headers, &a.admin) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let w = a.v2.workloads();
+    let proposals =
+        a.v2.view
+            .load_full()
+            .map_or_else(Vec::new, |v| regrant_proposals(&v.document.policy, &w));
+    (
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({
+            "principals": w.principals.values().collect::<Vec<_>>(),
+            "legacy_mappings": w.legacy,
+            "regrant_proposals": proposals.iter().map(|(id, b, e)| json!({"id": id, "binding": b, "evidence": e})).collect::<Vec<_>>(),
+        })),
+    )
+        .into_response()
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegrantRequest {
+    base_revision: u64,
+    proposals: Vec<String>,
+    reason: String,
+    #[serde(default)]
+    approval_ref: Option<String>,
+}
+/// `POST /v2/workloads/regrants/apply`: explicit, reasoned application of proposals.
+pub(crate) async fn apply_regrants(
+    State(a): State<Arc<Authority>>,
+    headers: HeaderMap,
+    axum::Extension(peer): axum::Extension<PeerIdentity>,
+    body: Body,
+) -> Response {
+    finish(
+        async move {
+            let (r, _): (RegrantRequest, _) = admit(&a, &headers, body)?;
+            reason_ok(&r.reason)?;
+            if r.proposals.is_empty() || r.proposals.len() > 1024 {
+                return Err(ApiError::coded(
+                    StatusCode::BAD_REQUEST,
+                    "pumgye.error.malformed_request",
+                )
+                .with(detail("proposals", "pumgye.error.malformed_request")));
+            }
+            if a.kubernetes_owned {
+                return Err(StatusCode::CONFLICT.into());
+            }
+            let _guard = a.v2.install.clone().lock_owned().await;
+            blocking(move || {
+                let view = a.v2.view.load_full().ok_or_else(|| {
+                    ApiError::coded(StatusCode::CONFLICT, "pumgye.error.no_v2_document")
+                })?;
+                if view.document.revision != r.base_revision {
+                    return Err(ApiError::conflict("base_revision", view.document.revision));
+                }
+                let proposals = regrant_proposals(&view.document.policy, &a.v2.workloads());
+                let mut next = view.document.clone();
+                for (i, id) in r.proposals.iter().enumerate() {
+                    let (_, mut binding, _) = proposals
+                        .iter()
+                        .find(|(pid, _, _)| pid == id)
+                        .cloned()
+                        .ok_or_else(|| {
+                            ApiError::coded(StatusCode::CONFLICT, "pumgye.error.regrant_unknown")
+                                .with(detail(
+                                    format!("proposals[{i}]"),
+                                    "pumgye.error.regrant_unknown",
+                                ))
+                        })?;
+                    binding.metadata.reason = Some(r.reason.clone());
+                    binding.metadata.approval_ref = r.approval_ref.clone();
+                    next.policy.bindings.push(binding);
+                }
+                let expected = next.revision;
+                publish_document(&a, expected, next, &peer.0, "policy.")
+            })
+            .await
+        }
+        .await,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1286,7 +1549,9 @@ fn candidate(a: &Authority, base: u64, value: Value, prefix: &str) -> Result<Can
     Ok(Candidate {
         membership_fresh: compiled.group_vocabulary().is_empty()
             || (projection.is_some() && fresh_now),
-        membership: projection.unwrap_or_default(),
+        membership: a
+            .v2
+            .with_workloads(projection.unwrap_or_default(), &compiled),
         document,
         compiled,
         sha256: format!("{:x}", <sha2::Sha256 as sha2::Digest>::digest(&bytes)),
@@ -1575,7 +1840,19 @@ pub(crate) async fn migration_preview(
                 };
                 let conversion = convert(&v1.document.policy, &ConvertOptions { classify: &classify, workload_mapping: &r.workload_mapping })
                     .map_err(|_| ApiError::coded(StatusCode::UNPROCESSABLE_ENTITY, "pumgye.error.candidate_invalid").with(detail("policy", pumgye_core::VALIDATION_INVALID)))?;
-                Ok(json!({"version": 2, "v1_revision": v1.document.revision, "document": {"revision": 0, "policy": conversion.document}, "report": conversion.report}))
+                // Hopae-observed Pod → ServiceAccount mappings for v1 workload subjects:
+                // a proposal only; pass it back as `workload_mapping` to apply it.
+                let observed = a.v2.workloads();
+                let proposed: BTreeMap<&String, &String> = v1
+                    .document
+                    .policy
+                    .services
+                    .values()
+                    .flat_map(|s| s.workload_users.keys())
+                    .filter_map(|legacy| observed.legacy.get(legacy).map(|p| (legacy, p)))
+                    .collect();
+                Ok(json!({"version": 2, "v1_revision": v1.document.revision, "document": {"revision": 0, "policy": conversion.document},
+                    "report": conversion.report, "observed_workload_mapping": proposed}))
             })
             .await
         }
@@ -1602,6 +1879,11 @@ pub(crate) fn routes() -> axum::Router<Arc<Authority>> {
         .route("/v2/cutover", routing::post(cutover))
         .route("/v2/rollback", routing::post(rollback))
         .route("/v2/model/history", routing::get(history))
+        .route("/v2/workloads", routing::get(workloads))
+        .route(
+            "/v2/workloads/regrants/apply",
+            routing::post(apply_regrants),
+        )
 }
 
 #[cfg(test)]
@@ -2212,5 +2494,255 @@ mod tests {
         restore(&a, &a.store.lock().unwrap()).unwrap();
         assert_eq!(a.v2.view.load().as_ref().unwrap().document.revision, 2);
         assert_eq!(a.v2.shadow.gate(0, now_unix())["mismatches"], 1);
+    }
+
+    const WK: &str = "wk2:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    const WK_OLD: &str = "wk2:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    const WIRE: &str = "s_999999999999999999999999999999999999999999999999";
+    const LEGACY: &str = "s_111111111111111111111111111111111111111111111111";
+    const SPIFFE: &str = "spiffe://cluster.example.test/ns/blue/sa/worker";
+
+    fn workload_lifecycle() -> hopae_owner::Lifecycle {
+        let mut l = hopae_owner::Lifecycle {
+            complete: true,
+            ..Default::default()
+        };
+        l.statuses.insert(H1.into(), "active".into());
+        let w = |principal: &str, status: &str| hopae_owner::Workload {
+            principal: principal.into(),
+            subject_ref: WIRE.into(),
+            spiffe_id: Some(SPIFFE.into()),
+            cluster: "c".into(),
+            namespace: "blue".into(),
+            service_account: "worker".into(),
+            service_account_uid: "uid".into(),
+            status: status.into(),
+            cause: None,
+            replacement: None,
+        };
+        l.workloads.principals.insert(WK.into(), w(WK, "active"));
+        l.workloads.principals.insert(
+            WK_OLD.into(),
+            hopae_owner::Workload {
+                subject_ref: "s_888888888888888888888888888888888888888888888888".into(),
+                ..w(WK_OLD, "retired")
+            },
+        );
+        l.workloads.legacy.insert(LEGACY.into(), WK.into());
+        l
+    }
+    fn workload_policy() -> Value {
+        let mut doc = converted();
+        doc["bindings"] = json!([
+            {"id":"bnd_legacy_pod","effect":"allow","subjects":[{"kind":"workload","ref":LEGACY}],"role":"orders.writer","scope":{"services":["orders"]},"metadata":{"reason":"pod-bound grant"}},
+            {"id":"bnd_by_name","effect":"allow","subjects":[{"kind":"workload","ref":SPIFFE}],"role":"orders.writer","scope":{"services":["orders"]},"metadata":{"reason":"name grant"}},
+        ]);
+        doc
+    }
+    fn explain_case(subject: &str, kind: &str, aal: u8) -> Value {
+        json!({"case":{"subject":{"kind":kind,"id":subject},"service":"orders","resource":"db:orders","action":"select","ip":"192.0.2.1","aal":aal,"guard":"enforced_allow"}})
+    }
+
+    #[tokio::test]
+    async fn workload_principals_aliases_regrants_and_retirement() {
+        let (_root, a, router) = owner();
+        a.v2.set_lifecycle(workload_lifecycle());
+        let (status, body) = publish_v2(&router, 0, &workload_policy()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        // Retired principals cannot be granted again.
+        let mut retired = workload_policy();
+        retired["bindings"].as_array_mut().unwrap().push(json!({"id":"bnd_retired","effect":"allow","subjects":[{"kind":"workload","ref":WK_OLD}],"role":"orders.writer","scope":{"services":["orders"]}}));
+        let (status, body) = publish_v2(&router, 2, &retired).await;
+        assert_eq!(
+            (status, body["error"]["details"][0]["code"].clone()),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                json!("pumgye.validation.subject_retired")
+            )
+        );
+        // The wire subject of the active principal inherits the SPIFFE-name binding.
+        let (_, e) = call(
+            &router,
+            request(
+                "POST",
+                "/v2/explain",
+                ADMIN,
+                Some(&explain_case(WIRE, "workload", 0)),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(e["result"]["outcome"]["decision"], "AssuranceDenied", "{e}");
+        let principal = e["result"]["trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["stage"] == "principal")
+            .unwrap()
+            .clone();
+        assert_eq!(
+            principal["detail"]["workload_alias"],
+            json!({"principal": WK, "spiffe_id": SPIFFE, "bound": true})
+        );
+        // Re-grant proposals from the Hopae legacy mapping are report-only until applied.
+        let (_, w) = call(&router, request("GET", "/v2/workloads", ADMIN, None, None)).await;
+        let proposals = w["regrant_proposals"].as_array().unwrap().clone();
+        assert_eq!(proposals.len(), 1, "{w}");
+        assert_eq!(proposals[0]["evidence"]["legacy_subject"], LEGACY);
+        assert_eq!(
+            proposals[0]["binding"]["subjects"],
+            json!([{"kind":"workload","ref":WK}])
+        );
+        assert_eq!(
+            a.v2.view
+                .load()
+                .as_ref()
+                .unwrap()
+                .document
+                .policy
+                .bindings
+                .len(),
+            2,
+            "nothing applied yet"
+        );
+        let apply = |base: u64, reason: &str| json!({"base_revision": base, "proposals": [proposals[0]["id"]], "reason": reason, "approval_ref": "CHG-7"});
+        assert_eq!(
+            call(
+                &router,
+                request(
+                    "POST",
+                    "/v2/workloads/regrants/apply",
+                    ADMIN,
+                    Some(&apply(2, "")),
+                    None
+                )
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                &router,
+                request(
+                    "POST",
+                    "/v2/workloads/regrants/apply",
+                    ADMIN,
+                    Some(&apply(1, "migrate pods")),
+                    None
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        let (status, body) = call(
+            &router,
+            request(
+                "POST",
+                "/v2/workloads/regrants/apply",
+                ADMIN,
+                Some(&apply(2, "migrate pods")),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let added = body["policy"]["bindings"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(added["metadata"]["reason"], "migrate pods");
+        assert_eq!(added["metadata"]["approval_ref"], "CHG-7");
+        assert_eq!(added["metadata"]["source"], "migrated:legacy-pod");
+        assert_eq!(added["metadata"]["granted_by"], "mtls:publisher");
+        let (_, w) = call(&router, request("GET", "/v2/workloads", ADMIN, None, None)).await;
+        assert_eq!(
+            w["regrant_proposals"],
+            json!([]),
+            "applied proposals disappear"
+        );
+        // Retiring the active principal orphans its pinned binding; the name binding remains.
+        let mut l = workload_lifecycle();
+        l.workloads.principals.get_mut(WK).unwrap().status = "retired".into();
+        a.v2.set_lifecycle(l);
+        let document = a.v2.view.load().as_ref().unwrap().document.clone();
+        let compiled = a.v2.compile(&document).unwrap();
+        a.v2.install_view(a.v2.view_for(document, compiled));
+        let (_, status) = call(&router, request("GET", "/v2/status", ADMIN, None, None)).await;
+        assert!(
+            status["v2"]["orphaned_bindings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b.as_str().unwrap().starts_with("bnd_rg_")),
+            "{status}"
+        );
+        let (_, e) = call(
+            &router,
+            request(
+                "POST",
+                "/v2/explain",
+                ADMIN,
+                Some(&explain_case(SPIFFE, "workload", 0)),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(
+            e["result"]["outcome"]["deciding_stage"], "assurance",
+            "name binding still applies: {e}"
+        );
+    }
+
+    #[tokio::test]
+    async fn aal3_simulation_requires_and_reports_level_three() {
+        let (_root, a, router) = owner();
+        let mut lifecycle = hopae_owner::Lifecycle {
+            complete: true,
+            ..Default::default()
+        };
+        lifecycle.statuses.insert(H1.into(), "active".into());
+        a.v2.set_lifecycle(lifecycle);
+        let mut doc = converted();
+        doc["catalog"]["resources"]["db:orders"]["minimum_aal"] = json!(3);
+        doc["bindings"] = json!([{"id":"bnd_h1","effect":"allow","subjects":[{"kind":"human","ref":H1}],"role":"orders.writer","scope":{"services":["orders"]}}]);
+        let (status, body) = publish_v2(&router, 0, &doc).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, e) = call(
+            &router,
+            request(
+                "POST",
+                "/v2/explain",
+                ADMIN,
+                Some(&explain_case(H1, "human", 2)),
+                None,
+            ),
+        )
+        .await;
+        assert_eq!(e["result"]["outcome"]["decision"], "AssuranceDenied");
+        assert_eq!(e["result"]["obligations"]["required_aal"], 3);
+        let (_, e) = call(
+            &router,
+            request(
+                "POST",
+                "/v2/explain",
+                ADMIN,
+                Some(&explain_case(H1, "human", 3)),
+                None,
+            ),
+        )
+        .await;
+        let assurance = e["result"]["trace"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["stage"] == "assurance")
+            .unwrap()
+            .clone();
+        assert_eq!(assurance["detail"], json!({"presented": 3, "required": 3}));
+        assert_eq!(e["result"]["outcome"]["decision"], "Allow");
     }
 }
