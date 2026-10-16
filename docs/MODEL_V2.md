@@ -375,6 +375,44 @@ unpushed merge of Hopae `feat/scoped-service-credentials` (`b318922`) and
 `feat/k8s-workload-identity` (`c6fb27a`); `--skip-workloads` for builds without
 workload identity.
 
+## Hopae dependencies
+
+Version 2 consumes these Hopae capabilities (Hopae PR numbers in `ziozzang/hopae`):
+
+| Capability | Hopae source | Used for |
+| --- | --- | --- |
+| Signed membership projection, groups | #5 `feat/groups` (in `integrate/identity-platform`) | group bindings |
+| Subject directory, lifecycle feed and reconcile snapshot | #4 `feat/subject-resolve` | orphans, admission |
+| Route-scoped read-only service credentials (`hsc1`, preset `pumgye-v2`) | #10 `feat/scoped-service-credentials` | the owner client's authentication |
+| Kubernetes workload identity (`wk2:`, SPIFFE, `include_workloads`) | #9 `feat/k8s-workload-identity` | workload principals and re-grants |
+| AAL3 sealed in receipts for opted-in applications | ADR-0018 (`feat/admin-api-gaps`) | `SealedAssurance` |
+
+**Needed from Hopae: a workload snapshot.** Workload principals appear only in the
+lifecycle feed (`workload_observed` is emitted once per Hopae process). After a
+`410 cursor_expired` or a Pumgye database loss, principals reported before the new
+watermark are recovered only when a new Hopae process authenticates them again.
+Pumgye persists what it has seen and drains the feed before each reconcile snapshot,
+but a complete recovery needs Hopae to list current workload principals (for
+example `include_workloads` on `/v1/subjects/lifecycle/snapshot`, with
+`principal`, `subject_ref`, `spiffe_id` and `status`). Until then, keep the feed's
+retention above the longest Pumgye outage.
+
+**Merging Hopae #9 and #10.** The two branches conflict only in additive lists.
+The local resolution used for the interop qualification (not pushed) kept both
+sides:
+
+- `src/event/types.rs`: `EventKind` gains `AdminServiceCredential` (#10) **and**
+  `WorkloadPrincipalObserved`, `WorkloadPrincipalRetired`,
+  `WorkloadLegacySubjectMapped`, `WorkloadKeysRotated`, `WorkloadRevocationStale`
+  (#9); `EventKind::ALL` becomes `[EventKind; 57]` (51 + 1 + 5); the other conflicting
+  hunks (the `ALL` entries, the wire names, the required/diagnostic classification)
+  are the union of both sides in the same order.
+- `src/telemetry/counters.rs`: keep `ADMIN_SERVICE_CREDENTIALS_TOTAL` and every
+  `WORKLOAD_*` constant.
+- `CHANGELOG.md`, `docs/THREAT_MODEL.md`, `docs/ko/THREAT_MODEL.md`: keep both entry
+  sets (TM-70..TM-74 from #9, TM-75..TM-77 from #10).
+- Migrations do not conflict (`0015_service_credentials.sql` is the only 0015).
+
 ## Limitations
 
 - JIT access requests, access reviews, who-can/what-can and PPG2 are P1/P2.

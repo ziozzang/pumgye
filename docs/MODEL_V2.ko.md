@@ -282,6 +282,38 @@ snapshot과 feed 소비, 그룹 허용, 명시적 거부 우선, feed 제거 회
 `feat/k8s-workload-identity`(`c6fb27a`)의 로컬 병합(푸시하지 않음) 대상 31/31. workload 신원이 없는
 빌드는 `--skip-workloads`를 사용합니다.
 
+## Hopae 의존성
+
+버전 2는 다음 Hopae 기능을 사용합니다(`ziozzang/hopae` PR 번호).
+
+| 기능 | Hopae 출처 | 용도 |
+| --- | --- | --- |
+| 서명 멤버십 projection, 그룹 | #5 `feat/groups`(`integrate/identity-platform` 포함) | 그룹 바인딩 |
+| 주체 디렉터리, 수명 주기 feed와 reconcile snapshot | #4 `feat/subject-resolve` | 고아, 게시 검사 |
+| 경로 범위 읽기 전용 서비스 자격(`hsc1`, preset `pumgye-v2`) | #10 `feat/scoped-service-credentials` | owner 클라이언트 인증 |
+| Kubernetes workload 신원(`wk2:`, SPIFFE, `include_workloads`) | #9 `feat/k8s-workload-identity` | workload 주체와 재부여 |
+| opt-in 애플리케이션 receipt의 AAL3 봉인 | ADR-0018(`feat/admin-api-gaps`) | `SealedAssurance` |
+
+**Hopae에 필요한 것: workload snapshot.** workload 주체는 수명 주기 feed에만 나타납니다
+(`workload_observed`는 Hopae 프로세스당 한 번). `410 cursor_expired`나 품계 DB 손실 뒤에는 새
+watermark 이전에 보고된 주체가 새 Hopae 프로세스가 다시 인증할 때만 복구됩니다. 품계는 본 것을
+저장하고 매 reconcile snapshot 전에 feed를 비우지만, 완전한 복구에는 Hopae가 현재 workload 주체를
+나열해야 합니다(예: `/v1/subjects/lifecycle/snapshot`의 `include_workloads`, `principal`·
+`subject_ref`·`spiffe_id`·`status`). 그전까지는 feed 보존 기간을 품계의 최장 중단 시간보다 길게 두세요.
+
+**Hopae #9와 #10 병합.** 두 브랜치는 추가 목록에서만 충돌합니다. 상호 운용 검증에 쓴 로컬 해결(푸시하지
+않음)은 양쪽을 모두 유지했습니다.
+
+- `src/event/types.rs`: `EventKind`에 `AdminServiceCredential`(#10)과 `WorkloadPrincipalObserved`,
+  `WorkloadPrincipalRetired`, `WorkloadLegacySubjectMapped`, `WorkloadKeysRotated`,
+  `WorkloadRevocationStale`(#9)을 모두 추가하고 `EventKind::ALL`은 `[EventKind; 57]`(51 + 1 + 5)이
+  됩니다. 나머지 충돌 hunk(`ALL` 항목, wire 이름, required/diagnostic 분류)는 같은 순서로 양쪽의
+  합집합입니다.
+- `src/telemetry/counters.rs`: `ADMIN_SERVICE_CREDENTIALS_TOTAL`과 모든 `WORKLOAD_*` 상수를 유지합니다.
+- `CHANGELOG.md`, `docs/THREAT_MODEL.md`, `docs/ko/THREAT_MODEL.md`: 양쪽 항목을 모두 유지합니다
+  (#9의 TM-70..TM-74, #10의 TM-75..TM-77).
+- 마이그레이션은 충돌하지 않습니다(`0015_service_credentials.sql`이 유일한 0015).
+
 ## 제약
 
 - JIT 접근 요청, 접근 검토, who-can/what-can, PPG2는 P1/P2입니다.
