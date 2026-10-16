@@ -126,3 +126,48 @@ Clippy·실제 네 서버 native/gRPC 영속 요청 체인이 통과했습니다
 버전 1·2 게시는 하나의 리비전 순서와 하나의 감사(`document: v1|v2`)를 공유하므로 v1
 `PUT /v1/policy`도 다음 전역 리비전을 발급합니다. 승인된 컷오버 전까지 판정은 v1이 합니다.
 [MODEL_V2.ko.md](MODEL_V2.ko.md)를 참조하세요.
+
+## TLS 인증서 교체 (미릴리스)
+
+품계는 재시작하지 않고 mTLS 인증서를 다시 읽으므로 cert-manager 갱신을 그대로
+따라갑니다. `--tls-reload-interval-secs`초마다(기본 10초, 범위 1–3600) 각 TLS
+사용처의 인증서·키·CA 파일을 읽어 내용의 SHA-256 다이제스트를 비교합니다.
+호스트의 inotify 감시 개수가 부족하므로 inotify는 쓰지 않습니다. 내용이 바뀌면
+새 rustls 설정을 만들어 원자적으로 교체합니다.
+
+다시 읽는 대상:
+
+- 리스너: HTTP(`http listener`), PPG1(`ppg1 listener`), gRPC(`grpc listener`),
+  SAR(`sar listener`). 새 핸드셰이크부터 새 인증서와 CA를 씁니다. 이미 맺은
+  연결은 닫힐 때까지 수락 당시 설정을 그대로 씁니다. gRPC TLS를 교체할 수 있도록
+  tonic이 아니라 품계의 acceptor가 종료합니다.
+- 외부로 나가는 mTLS 클라이언트:
+  - 수문장/호패 live 클라이언트: `route_live`, `projection_live`,
+    `network_live`, `authentication_live`. 재적재되는 tonic 커넥터를 쓰므로 새
+    HTTP/2 연결은 현재 클라이언트 인증서와 CA를 쓰고, 기존 채널은 연결을
+    유지합니다.
+  - 호패 소유자 클라이언트(`hopae_owner client`). 새 인증서로 HTTP 클라이언트를
+    다시 만듭니다.
+
+새 인증서가 유효하지 않으면(PEM 파싱 실패, 인증서와 맞지 않는 키) 이전 설정을 계속
+씁니다. 이때 해당 리스너나 클라이언트는 `failing: true`와 `last_error`를 보고하고,
+`GET /v1/status`의 `tls_reload_failing`이 `true`가 됩니다. 이 필드에 경보를 거십시오.
+거부한 파일 내용은 한 번만 로그에 남기고, 파일이 다시 바뀔 때까지 재시도하지
+않습니다. 지금 쓰는 인증서로 되돌려도 경보가 풀립니다. 원자적이지 않은 쓰기
+도중처럼 파일을 잠시 읽을 수 없으면 계속 서비스하고 다음 폴링에서 다시
+확인합니다.
+
+`GET /v1/status`의 `tls`는 리스너와 클라이언트마다 항목 하나씩을 담은 목록입니다.
+각 항목에는 `name`, `leaf.serial`(16진수), `leaf.sha256`(DER 지문), `loaded_at`,
+`reloads`, `failures`, `failing`, `last_error`가 있습니다. 변경이 있을 때마다 stderr에
+JSON 한 줄을 남깁니다.
+
+```json
+{"event":"tls_reloaded","name":"grpc listener","serial":"1002","sha256":"…"}
+{"event":"tls_reload_refused","name":"grpc listener","error":"…","serving_serial":"1001"}
+```
+
+제약: `observed-*` 기능의 외부 클라이언트는 호패 gRPC SDK에 고정된 PEM 바이트를
+넘기므로 인증서를 교체한 뒤에도 재시작해야 합니다. Kubernetes API 클라이언트는
+CA만 쓰며, CA는 시작할 때 읽습니다. 새 인증서가 반영되기까지 최대 폴링 주기
+한 번만큼 걸립니다.

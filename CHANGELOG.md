@@ -4,6 +4,11 @@
 
 ### Added
 
+- TLS hot reload (`--tls-reload-interval-secs`, default 10 s, content polling,
+  no inotify) for the HTTP, PPG1, gRPC and SAR listeners, the Sumunjang/Hopae
+  live clients and the Hopae owner client. Invalid material keeps the previous
+  configuration and raises `tls_reload_failing` in `/v1/status`. See
+  `docs/SERVER.md`.
 - Policy model version 2 (Hangang ADR 0021 P0): Hopae-owned principals and
   GroupRefs, global role templates with per-service permission maps, allow and
   explicit-deny bindings with validity windows and server-stamped metadata,

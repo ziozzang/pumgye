@@ -141,3 +141,51 @@ read-only `simulation`. See [the explain contract](EXPLAIN.md).
 publications share one revision sequence and one audit (`document: v1|v2`); the v1
 `PUT /v1/policy` therefore issues the next global revision. Decisions stay on v1 until
 an approved cutover. See [MODEL_V2.md](MODEL_V2.md).
+
+## TLS certificate rotation (unreleased)
+
+Pumgye reloads mTLS material without a restart, so it keeps up with cert-manager
+renewals. Every `--tls-reload-interval-secs` seconds (default 10, range 1–3600)
+it reads the certificate, key and CA files of each TLS user and compares a
+SHA-256 digest of their contents. It does not use inotify, because host inotify
+watches are scarce. When the contents change, it builds a new rustls
+configuration and swaps it in atomically.
+
+Reloaded:
+
+- Listeners: HTTP (`http listener`), PPG1 (`ppg1 listener`), gRPC
+  (`grpc listener`) and SAR (`sar listener`). New handshakes use the new
+  certificate and CA. Established connections keep the configuration they were
+  accepted with until they close. gRPC TLS is terminated by Pumgye's own
+  acceptor, not by tonic, so that it can be swapped.
+- Outbound mTLS clients:
+  - Sumunjang/Hopae live clients: `route_live`, `projection_live`,
+    `network_live` and `authentication_live`. They use a reloading tonic
+    connector, so new HTTP/2 connections use the current client certificate and
+    CA, and existing channels keep their connection.
+  - The Hopae owner client (`hopae_owner client`). Its HTTP client is rebuilt
+    from the new material.
+
+When new material is invalid (unparsable PEM, or a key that doesn't match the
+certificate), the previous configuration stays in service. The
+listener or client then reports `failing: true` and `last_error`, and
+`GET /v1/status` sets `tls_reload_failing: true`. Alert on that field. Pumgye
+logs each rejected file content once and doesn't retry it until the files
+change again. Reverting to the served material also clears the alert. If files
+can't be read briefly, for example during a non-atomic write, Pumgye keeps
+serving and checks again on the next poll.
+
+`GET /v1/status` includes `tls`, a list with one entry per listener or client:
+`name`, `leaf.serial` (hex), `leaf.sha256` (DER fingerprint), `loaded_at`,
+`reloads`, `failures`, `failing` and `last_error`. Pumgye logs each change to
+stderr as a JSON line:
+
+```json
+{"event":"tls_reloaded","name":"grpc listener","serial":"1002","sha256":"…"}
+{"event":"tls_reload_refused","name":"grpc listener","error":"…","serving_serial":"1001"}
+```
+
+Limitations: the outbound clients of the `observed-*` features use the Hopae
+gRPC SDK with fixed PEM bytes, so they still need a restart after rotation. The
+Kubernetes API client uses only a CA, which is read at startup. The longest
+delay before new material is used is one polling interval.
