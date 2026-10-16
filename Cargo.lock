@@ -1313,6 +1313,7 @@ dependencies = [
  "httparse",
  "hyper-util",
  "libc",
+ "pin-project-lite",
  "prost",
  "pumgye-core",
  "pumgye-grpc",

@@ -158,7 +158,12 @@ impl Service {
         ingress: Ingress,
         caller: &(dyn Fn() -> bool + Sync),
     ) -> Result<ObservedProjectionPermitReply, Status> {
-        let (permit, observation) = self.run(input, None, caller, ingress).await?;
+        let result = self.run(input, None, caller, ingress).await;
+        crate::metrics::METRICS.observed_permit(
+            crate::metrics::PermitKind::Human,
+            result.as_ref().err().map(Status::code),
+        );
+        let (permit, observation) = result?;
         Ok(ObservedProjectionPermitReply {
             permit: Some(permit),
             observation: Some(observation),

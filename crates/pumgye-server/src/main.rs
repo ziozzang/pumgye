@@ -135,6 +135,11 @@ struct Args {
     projection_live: Option<PathBuf>,
     #[arg(long, default_value = "PUMGYE_ADMIN_TOKEN")]
     admin_token_env: String,
+    /// Environment variable holding an optional read-only `/metrics` scrape
+    /// credential (distinct from the admin and decision credentials). Unset:
+    /// only the admin credential can scrape.
+    #[arg(long, default_value = "PUMGYE_METRICS_TOKEN")]
+    metrics_token_env: String,
     /// Age bound for read-only simulation audit rows (also capped at 100,000 rows).
     #[arg(long, default_value_t = explain_api::DEFAULT_RETENTION_DAYS, value_parser = clap::value_parser!(u64).range(1..=3650))]
     simulation_audit_retention_days: u64,
@@ -194,6 +199,7 @@ struct Document {
 #[cfg(feature = "observed-authentication")]
 mod observed_native;
 mod sar_wire;
+use pumgye_server::metrics::{self, METRICS};
 mod source_lifetime;
 struct View {
     document: Document,
@@ -221,6 +227,8 @@ struct Authority {
     store: std::sync::Mutex<store::Store>,
     admin: String,
     decision: String,
+    /// Optional read-only scrape credential for `/metrics` (admin also works).
+    metrics_token: Option<String>,
     queries: AtomicU64,
     healthy: AtomicBool,
     kubernetes_owned: bool,
@@ -364,6 +372,10 @@ impl Authority {
             Some(decision),
         );
         self.queries.fetch_add(1, Ordering::Relaxed);
+        METRICS.resource_decision(
+            metrics::Context::HumanResource,
+            decision.filter(|_| revision >= q.minimum_revision),
+        );
         if !active() || !self.v2_current(authoritative_v2.as_ref()) || revision < q.minimum_revision
         {
             return None;
@@ -385,13 +397,20 @@ impl Authority {
         workload: bool,
         operation: impl FnOnce(u64, &pumgye_core::Resource) -> T,
     ) -> Result<T, Option<(u64, pumgye_core::ResourceDecision)>> {
+        let context = if workload {
+            metrics::Context::WorkloadResource
+        } else {
+            metrics::Context::Resource
+        };
         if !q.valid() || (workload && q.aal != 0) {
+            METRICS.resource_decision(context, None);
             return Err(None);
         }
         let view = self.view.load();
         let active =
             || self.healthy.load(Ordering::Acquire) && self.source_remaining(&view).is_some();
         if !active() {
+            METRICS.resource_decision(context, None);
             return Err(None);
         }
         let decision = if workload {
@@ -422,6 +441,7 @@ impl Authority {
         let (revision, decision, authoritative_v2) =
             self.select_resource(q, kind, view.document.revision, Some(decision));
         self.queries.fetch_add(1, Ordering::Relaxed);
+        METRICS.resource_decision(context, decision.filter(|_| revision >= q.minimum_revision));
         let current = || {
             active()
                 && Arc::ptr_eq(&view, &self.view.load())
@@ -591,6 +611,7 @@ impl Authority {
             decision = None;
         }
         self.queries.fetch_add(1, Ordering::Relaxed);
+        METRICS.decision(metrics::Context::Permission, decision);
         let refusal = |decision| pumgye_protocol::Reply {
             request_id: q.request_id,
             revision,
@@ -629,6 +650,10 @@ async fn request_gate(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let path = request.uri().path();
+    let decision_path = matches!(
+        path,
+        "/v1/decision" | "/v1/resource/decision" | "/v1/resource/authenticated-decision"
+    );
     let administrative = matches!(path, "/v1/policy" | "/v1/status" | "/v1/audit")
         || explain_api::ADMIN_PATHS.contains(&path)
         || path.starts_with("/v2/");
@@ -640,10 +665,19 @@ async fn request_gate(
     if expected.is_some_and(|token| !authorized(request.headers(), token)) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    if path == "/metrics"
+        && !authorized(request.headers(), &a.admin)
+        && !a
+            .metrics_token
+            .as_deref()
+            .is_some_and(|token| authorized(request.headers(), token))
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     let Ok(_request) = a.requests.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let _management = if administrative {
+    let _management = if administrative || path == "/metrics" {
         match a.management.clone().try_acquire_owned() {
             Ok(p) => Some(p),
             Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
@@ -651,10 +685,16 @@ async fn request_gate(
     } else {
         None
     };
-    match tokio::time::timeout(std::time::Duration::from_secs(5), next.run(request)).await {
-        Ok(response) => response,
-        Err(_) => StatusCode::GATEWAY_TIMEOUT.into_response(),
+    let started = std::time::Instant::now();
+    let response =
+        match tokio::time::timeout(std::time::Duration::from_secs(5), next.run(request)).await {
+            Ok(response) => response,
+            Err(_) => StatusCode::GATEWAY_TIMEOUT.into_response(),
+        };
+    if decision_path {
+        METRICS.observe(metrics::Transport::Http, started);
     }
+    response
 }
 
 async fn read(
@@ -670,6 +710,30 @@ async fn read(
     Ok(Json(a.view.load().document.clone()))
 }
 async fn publish(
+    state: State<Arc<Authority>>,
+    headers: HeaderMap,
+    peer: axum::Extension<PeerIdentity>,
+    next: Json<Document>,
+) -> Result<Json<Document>, StatusCode> {
+    let result = publish_v1(state, headers, peer, next).await;
+    record_publication(metrics::Model::V1, result.as_ref().err().copied());
+    result
+}
+/// Count a publication outcome; 401/412/428/503 are not publications.
+fn record_publication(model: metrics::Model, refusal: Option<StatusCode>) {
+    let outcome = match refusal {
+        None => metrics::Publication::Applied,
+        Some(StatusCode::CONFLICT) => metrics::Publication::Conflict,
+        Some(
+            StatusCode::BAD_REQUEST
+            | StatusCode::UNPROCESSABLE_ENTITY
+            | StatusCode::PAYLOAD_TOO_LARGE,
+        ) => metrics::Publication::Rejected,
+        Some(_) => return,
+    };
+    METRICS.publication(model, outcome);
+}
+async fn publish_v1(
     State(a): State<Arc<Authority>>,
     headers: HeaderMap,
     axum::Extension(peer): axum::Extension<PeerIdentity>,
@@ -787,6 +851,75 @@ fn readiness_router(a: Arc<Authority>) -> Router {
         .with_state(a)
 }
 
+/// Prometheus scrape (`/metrics`, admin or metrics credential, HTTPS listener).
+async fn prometheus(State(a): State<Arc<Authority>>) -> impl IntoResponse {
+    use pumgye_server::metrics::{header, sample};
+    let now = model_v2::now_unix();
+    let mut out = String::with_capacity(16 * 1024);
+    metrics::render(&mut out, now);
+    let view = a.view.load();
+    header(
+        &mut out,
+        "pumgye_policy_revision",
+        "gauge",
+        "Current policy revision per model (0 = no v2 document).",
+    );
+    sample(
+        &mut out,
+        "pumgye_policy_revision",
+        "model=\"v1\"",
+        view.document.revision,
+    );
+    sample(
+        &mut out,
+        "pumgye_policy_revision",
+        "model=\"v2\"",
+        a.v2.view.load().as_ref().map_or(0, |v| v.document.revision),
+    );
+    header(
+        &mut out,
+        "pumgye_policy_v2_authoritative",
+        "gauge",
+        "1 when policy model v2 is authoritative.",
+    );
+    sample(
+        &mut out,
+        "pumgye_policy_v2_authoritative",
+        "",
+        u8::from(a.v2.v2_authoritative()),
+    );
+    header(
+        &mut out,
+        "pumgye_available",
+        "gauge",
+        "1 when the authority can decide (healthy and source fresh).",
+    );
+    sample(&mut out, "pumgye_available", "", u8::from(a.available()));
+    a.v2.shadow.render_metrics(&mut out);
+    let rows = {
+        let a = a.clone();
+        tokio::task::spawn_blocking(move || a.store.lock().ok()?.simulation_rows().ok())
+            .await
+            .ok()
+            .flatten()
+    };
+    if let Some(rows) = rows {
+        header(
+            &mut out,
+            "pumgye_simulation_audit_rows",
+            "gauge",
+            "Retained simulation audit rows.",
+        );
+        sample(&mut out, "pumgye_simulation_audit_rows", "", rows);
+    }
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, metrics::CONTENT_TYPE),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        out,
+    )
+}
 async fn status(State(a): State<Arc<Authority>>) -> Json<serde_json::Value> {
     let view = a.view.load();
     let remaining = a
@@ -1090,6 +1223,16 @@ async fn main() -> anyhow::Result<()> {
                 .all(|b| (0x21..=0x7e).contains(&b)),
         "distinct bounded administrator and decision credentials are required"
     );
+    let metrics_token = std::env::var(&args.metrics_token_env).ok();
+    anyhow::ensure!(
+        metrics_token.as_ref().is_none_or(|t| {
+            (16..=4096).contains(&t.len())
+                && *t != admin
+                && *t != decision
+                && t.bytes().all(|b| (0x21..=0x7e).contains(&b))
+        }),
+        "the metrics credential must be bounded and distinct from the administrator and decision credentials"
+    );
     let (http_tls, native_tls) = if let (Some(cert), Some(key), Some(ca)) =
         (&args.tls_cert, &args.tls_key, &args.client_ca)
     {
@@ -1283,6 +1426,7 @@ async fn main() -> anyhow::Result<()> {
         }),
         store: std::sync::Mutex::new(store),
         admin,
+        metrics_token,
         decision,
         queries: AtomicU64::new(0),
         healthy: AtomicBool::new(true),
@@ -1451,6 +1595,7 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/v1/policy", get(read).put(publish))
         .route("/v1/status", get(status))
+        .route("/metrics", get(prometheus))
         .route("/v1/audit", get(audit_records))
         .route("/v1/resource/decision", resource_route())
         .route(
@@ -1904,6 +2049,101 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn metrics_scrape_requires_metrics_or_admin_credential_and_counts_decisions() {
+        use tower::ServiceExt;
+        let root = tempfile::tempdir().unwrap();
+        let mut owner = authority(root.path());
+        Arc::get_mut(&mut owner).unwrap().metrics_token = Some("fixture-metrics-credential".into());
+        let document: Document =
+            serde_json::from_str(include_str!("../../../examples/resource-catalog.json")).unwrap();
+        owner.view.store(Arc::new(View {
+            compiled: document.policy.compile().unwrap(),
+            document: Document {
+                revision: 1,
+                ..document
+            },
+            source_lifetime: None,
+        }));
+        let router = Router::new()
+            .route("/v1/resource/decision", resource_route())
+            .route("/v1/status", get(status))
+            .route("/metrics", get(prometheus))
+            .layer(axum::middleware::from_fn_with_state(
+                owner.clone(),
+                request_gate,
+            ))
+            .with_state(owner.clone());
+        let call = |method: &str, uri: &str, token: &str, body: String| {
+            axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(axum::body::Body::from(body))
+                .unwrap()
+        };
+        let before = METRICS.decisions_for(metrics::Context::Resource, "allow");
+        let query = serde_json::json!({"service_id":"orders","resource":"db:orders","action":"select","subject":"fixture","ip":"192.0.2.9","aal":2,"guard":"enforced_allow"});
+        let response = router
+            .clone()
+            .oneshot(call(
+                "POST",
+                "/v1/resource/decision",
+                &owner.decision,
+                query.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(METRICS.decisions_for(metrics::Context::Resource, "allow") > before);
+        for (token, expected) in [
+            ("", StatusCode::UNAUTHORIZED),
+            (owner.decision.as_str(), StatusCode::UNAUTHORIZED),
+            ("fixture-metrics-credential", StatusCode::OK),
+            (owner.admin.as_str(), StatusCode::OK),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(call("GET", "/metrics", token, String::new()))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{token}");
+            if expected == StatusCode::OK {
+                assert!(
+                    response.headers()["content-type"]
+                        .to_str()
+                        .unwrap()
+                        .starts_with("text/plain; version=0.0.4")
+                );
+                let text = String::from_utf8(
+                    axum::body::to_bytes(response.into_body(), 1 << 20)
+                        .await
+                        .unwrap()
+                        .to_vec(),
+                )
+                .unwrap();
+                assert!(text.contains("pumgye_policy_revision{model=\"v1\"} 1"));
+                assert!(text.contains("pumgye_request_duration_seconds_count{transport=\"http\"}"));
+                assert!(text.contains("pumgye_shadow_mismatches_total{explained=\"false\"}"));
+                assert!(text.contains("pumgye_simulation_audit_rows 0"));
+                assert!(!text.contains("fixture"), "no subject labels");
+            }
+        }
+        // The scrape credential is read-only: it opens no administrative API.
+        let response = router
+            .clone()
+            .oneshot(call(
+                "GET",
+                "/v1/status",
+                "fixture-metrics-credential",
+                String::new(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
     pub(super) fn authority(root: &std::path::Path) -> Arc<Authority> {
         let initial = root.join("initial.json");
         std::fs::write(&initial,r#"{"revision":0,"policy":{"version":1,"information_classes":["public"],"services":{}}}"#).unwrap();
@@ -1933,6 +2173,7 @@ mod tests {
             }),
             store: std::sync::Mutex::new(store),
             admin: "fixture-admin-credential".into(),
+            metrics_token: None,
             decision: "fixture-decision-credential".into(),
             queries: AtomicU64::new(0),
             healthy: AtomicBool::new(true),

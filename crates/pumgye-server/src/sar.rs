@@ -158,12 +158,15 @@ impl Server {
                 return Err(io_error());
             };
             tls.get_mut().0.change(Mode::Budget(budget.clone()))?;
+            let started = std::time::Instant::now();
             let close = tokio::time::timeout(
                 Duration::from_secs(1),
                 self.operation(tls, first, budget, n == 4095),
             )
             .await
             .map_err(|_| io_error())??;
+            pumgye_server::metrics::METRICS
+                .observe(pumgye_server::metrics::Transport::Sar, started);
             if close {
                 return Ok(());
             }

@@ -51,6 +51,9 @@ fn now() -> u64 {
 pub struct LeafInfo {
     pub serial: String,
     pub sha256: String,
+    /// `notAfter` as Unix seconds (`None` if unparsable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_after: Option<u64>,
 }
 fn der_item(input: &[u8]) -> Option<(u8, &[u8], &[u8])> {
     let (&tag, rest) = input.split_first()?;
@@ -77,11 +80,54 @@ pub fn leaf_info(pem: &[u8]) -> Option<LeafInfo> {
     if tag == 0xa0 {
         (tag, value, rest) = der_item(rest)?;
     }
-    let _ = rest;
-    (tag == 0x02).then(|| LeafInfo {
+    if tag != 0x02 {
+        return None;
+    }
+    Some(LeafInfo {
         serial: value.iter().map(|b| format!("{b:02x}")).collect(),
         sha256: format!("{:x}", Sha256::digest(der.as_ref())),
+        not_after: not_after(rest),
     })
+}
+/// tbs fields after the serial: signature, issuer, validity { notBefore, notAfter }.
+fn not_after(rest: &[u8]) -> Option<u64> {
+    let (_, _, rest) = der_item(rest)?;
+    let (_, _, rest) = der_item(rest)?;
+    let (tag, validity, _) = der_item(rest)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (_, _, validity) = der_item(validity)?;
+    let (tag, time, _) = der_item(validity)?;
+    let text = std::str::from_utf8(time).ok()?.strip_suffix('Z')?;
+    let (year, text) = match (tag, text.len()) {
+        (0x17, 12) => {
+            let yy: i64 = text[..2].parse().ok()?;
+            (if yy < 50 { 2000 + yy } else { 1900 + yy }, &text[2..])
+        }
+        (0x18, 14) => (text[..4].parse().ok()?, &text[4..]),
+        _ => return None,
+    };
+    let field = |i: usize| text.get(i..i + 2)?.parse::<i64>().ok();
+    let (month, day, hour, minute, second) =
+        (field(0)?, field(2)?, field(4)?, field(6)?, field(8)?);
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+    {
+        return None;
+    }
+    // Days from civil (proleptic Gregorian), Howard Hinnant's algorithm.
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    u64::try_from(days * 86_400 + hour * 3600 + minute * 60 + second).ok()
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -518,6 +564,9 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert_eq!(reload.status().leaf.serial, "1a2b");
+        // notAfter is parsed for the expiry metric (test leaves are valid ~1 day).
+        let expiry = reload.status().leaf.not_after.unwrap() as i64 - now() as i64;
+        assert!((80_000..=90_000).contains(&expiry), "{expiry}");
         let before = reload.current();
         assert!(!reload.poll(), "unchanged files are not reloaded");
         pki.leaf("server", "3c4d");

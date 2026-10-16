@@ -139,7 +139,11 @@ impl Collector {
             return Ok(client.clone());
         }
         // Do not retain a previous trust pool across changed or invalid material.
-        self.pool = None;
+        // CA and token are re-read on every relist; a changed digest rebuilds the
+        // client (rotation without restart).
+        if self.pool.take().is_some() {
+            pumgye_server::metrics::METRICS.kubernetes_credential_reload();
+        }
         let client = Client::builder()
             .https_only(true)
             .tls_built_in_root_certs(false)
@@ -434,6 +438,119 @@ mod tests {
         let absent = directory.path().join("absent-credential");
         assert!(collector.refresh(&absent, &absent, 100).await.is_err());
         assert!(collector.view.load_full().is_none());
+    }
+    /// The CA and token files are re-read on every relist: a rotated CA (with
+    /// a server certificate from the new CA) and a rotated token are used by
+    /// the next refresh without restarting; stale CA material fails closed.
+    #[tokio::test]
+    async fn relist_rereads_rotated_ca_and_token() {
+        use crate::transport::reload_tests::{ca, leaf};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let root = tempfile::tempdir().unwrap();
+        let (one, two) = (root.path().join("one"), root.path().join("two"));
+        for (dir, name) in [(&one, "kube-ca-1"), (&two, "kube-ca-2")] {
+            std::fs::create_dir(dir).unwrap();
+            ca(dir, name);
+            leaf(dir, "server", "0a01");
+        }
+        let server_config = |dir: &std::path::Path| {
+            let certs =
+                rustls_pemfile::certs(&mut &std::fs::read(dir.join("server.pem")).unwrap()[..])
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+            let key = rustls_pemfile::private_key(
+                &mut &std::fs::read(dir.join("server.key")).unwrap()[..],
+            )
+            .unwrap()
+            .unwrap();
+            Arc::new(
+                rustls::ServerConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(certs, key)
+                .unwrap(),
+            )
+        };
+        let serving = Arc::new(arc_swap::ArcSwap::new(server_config(&one)));
+        let expected = Arc::new(std::sync::Mutex::new(String::from("token-one-0123456789")));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        {
+            let (serving, expected) = (serving.clone(), expected.clone());
+            tokio::spawn(async move {
+                loop {
+                    let (tcp, _) = listener.accept().await.unwrap();
+                    let acceptor = tokio_rustls::TlsAcceptor::from(serving.load_full());
+                    let expected = expected.lock().unwrap().clone();
+                    tokio::spawn(async move {
+                        let Ok(mut tls) = acceptor.accept(tcp).await else {
+                            return;
+                        };
+                        let mut request = Vec::new();
+                        let mut buf = [0; 1024];
+                        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            match tls.read(&mut buf).await {
+                                Ok(0) | Err(_) => return,
+                                Ok(n) => request.extend_from_slice(&buf[..n]),
+                            }
+                        }
+                        let text = String::from_utf8_lossy(&request).to_lowercase();
+                        let kind = [
+                            "clusterrolebindings",
+                            "clusterroles",
+                            "rolebindings",
+                            "roles",
+                        ]
+                        .into_iter()
+                        .zip(["ClusterRoleBinding", "ClusterRole", "RoleBinding", "Role"])
+                        .find(|(r, _)| text.contains(&format!("/{r}?")))
+                        .map(|(_, k)| k)
+                        .unwrap();
+                        let (status, body) = if text.contains(&format!(
+                            "authorization: bearer {}",
+                            expected.to_lowercase()
+                        )) {
+                            ("200 OK", serde_json::json!({"apiVersion":"rbac.authorization.k8s.io/v1","kind":format!("{kind}List"),"metadata":{"resourceVersion":"1"},"items":[]}).to_string())
+                        } else {
+                            ("401 Unauthorized", String::new())
+                        };
+                        let _ = tls
+                            .write_all(
+                                format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len())
+                                    .as_bytes(),
+                            )
+                            .await;
+                        let _ = tls.shutdown().await;
+                    });
+                }
+            });
+        }
+        let ca_file = root.path().join("ca.crt");
+        let token_file = root.path().join("token");
+        std::fs::copy(one.join("ca.pem"), &ca_file).unwrap();
+        std::fs::write(&token_file, "token-one-0123456789\n").unwrap();
+        let mut collector = Collector::new(
+            &format!("https://localhost:{port}/"),
+            None,
+            "example".into(),
+        )
+        .unwrap();
+        collector.refresh(&ca_file, &token_file, 1).await.unwrap();
+        let reloads = pumgye_server::metrics::METRICS.kubernetes_credential_reloads();
+        // The server rotates to a certificate from a new CA: the old trust fails closed.
+        serving.store(server_config(&two));
+        assert!(collector.refresh(&ca_file, &token_file, 2).await.is_err());
+        assert!(collector.fresh(2).is_none());
+        // cert-manager/projected-volume rotation of CA and token: no restart.
+        std::fs::copy(two.join("ca.pem"), &ca_file).unwrap();
+        *expected.lock().unwrap() = "token-two-0123456789".into();
+        std::fs::write(&token_file, "token-two-0123456789\n").unwrap();
+        collector.refresh(&ca_file, &token_file, 3).await.unwrap();
+        assert!(collector.fresh(3).is_some());
+        assert!(pumgye_server::metrics::METRICS.kubernetes_credential_reloads() > reloads);
     }
     #[test]
     fn refuses_untrusted_origins_and_namespaces() {

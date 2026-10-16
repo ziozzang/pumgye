@@ -158,8 +158,10 @@ async fn native_session<S: AsyncRead + AsyncWrite + Unpin>(
             "invalid native frame size"
         );
         timeout(Duration::from_secs(5), reader.read_exact(&mut query[..len])).await??;
+        let started = std::time::Instant::now();
         let q = pumgye_protocol::Query::decode(&query[..len])?;
         let reply = a.evaluate(&q).encode();
+        pumgye_server::metrics::METRICS.observe(pumgye_server::metrics::Transport::Ppg1, started);
         replies[pending..pending + reply.len()].copy_from_slice(&reply);
         pending += reply.len();
         if reader.buffer().is_empty() || pending == replies.len() {
@@ -262,12 +264,35 @@ mod tests {
 }
 
 #[cfg(test)]
-mod reload_tests {
+pub(crate) mod reload_tests {
     use super::*;
     use std::path::Path;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    fn openssl(args: &[&str], dir: &Path) {
+    /// A fresh EC P-256 test CA (`ca.pem`, `ca.key`) in `dir`.
+    pub(crate) fn ca(dir: &Path, name: &str) {
+        openssl(
+            &[
+                "req",
+                "-x509",
+                "-newkey",
+                "ec",
+                "-pkeyopt",
+                "ec_paramgen_curve:P-256",
+                "-nodes",
+                "-keyout",
+                "ca.key",
+                "-out",
+                "ca.pem",
+                "-days",
+                "2",
+                "-subj",
+                &format!("/CN={name}"),
+            ],
+            dir,
+        );
+    }
+    pub(crate) fn openssl(args: &[&str], dir: &Path) {
         let out = std::process::Command::new("openssl")
             .args(args)
             .current_dir(dir)
@@ -279,7 +304,7 @@ mod reload_tests {
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    fn leaf(dir: &Path, name: &str, serial: &str) {
+    pub(crate) fn leaf(dir: &Path, name: &str, serial: &str) {
         std::fs::write(
             dir.join("ext.cnf"),
             "subjectAltName=DNS:localhost,IP:127.0.0.1\nextendedKeyUsage=serverAuth,clientAuth\n",

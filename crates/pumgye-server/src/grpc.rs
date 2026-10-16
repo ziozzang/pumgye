@@ -648,6 +648,55 @@ impl pumgye_grpc::v1::human_observed_projection_permits_server::HumanObservedPro
             .map(Response::new)
     }
 }
+/// gRPC request latency (`pumgye_request_duration_seconds{transport="grpc"}`);
+/// a stack future, no per-request allocation.
+#[derive(Clone)]
+struct Timed<S>(S);
+#[derive(Clone, Copy)]
+struct TimedLayer;
+impl<S> tower::Layer<S> for TimedLayer {
+    type Service = Timed<S>;
+    fn layer(&self, inner: S) -> Timed<S> {
+        Timed(inner)
+    }
+}
+pin_project_lite::pin_project! {
+    struct TimedFuture<F> {
+        #[pin]
+        inner: F,
+        started: std::time::Instant,
+    }
+}
+impl<F: std::future::Future> std::future::Future for TimedFuture<F> {
+    type Output = F::Output;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<F::Output> {
+        let this = self.project();
+        let output = std::task::ready!(this.inner.poll(cx));
+        pumgye_server::metrics::METRICS
+            .observe(pumgye_server::metrics::Transport::Grpc, *this.started);
+        std::task::Poll::Ready(output)
+    }
+}
+impl<S: tower::Service<R>, R> tower::Service<R> for Timed<S> {
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = TimedFuture<S::Future>;
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), S::Error>> {
+        self.0.poll_ready(cx)
+    }
+    fn call(&mut self, request: R) -> Self::Future {
+        TimedFuture {
+            started: std::time::Instant::now(),
+            inner: self.0.call(request),
+        }
+    }
+}
 pub async fn serve(
     listener: TcpListener,
     tls: Arc<pumgye_server::tls_reload::Reloading<rustls::ServerConfig>>,
@@ -679,6 +728,7 @@ pub async fn serve(
     let incoming = tokio_stream::wrappers::ReceiverStream::new(incoming);
     let ingress = Arc::new(tokio::sync::Semaphore::new(UNARY_INGRESS_SLOTS));
     let server = tonic::transport::Server::builder()
+        .layer(TimedLayer)
         .concurrency_limit_per_connection(64)
         .max_concurrent_streams(Some(64))
         .http2_max_header_list_size(Some(8192))
