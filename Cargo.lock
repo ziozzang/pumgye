@@ -679,19 +679,23 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 [[package]]
 name = "hopae-grpc"
 version = "0.0.3"
-source = "git+https://github.com/ziozzang/hopae?rev=e1dd9728e184eb4975fbe1ce8dae0505571f4ff1#e1dd9728e184eb4975fbe1ce8dae0505571f4ff1"
+source = "git+https://github.com/ziozzang/hopae?rev=74bb8298dc605cdea9ab8c854cef597e90db0949#74bb8298dc605cdea9ab8c854cef597e90db0949"
 dependencies = [
  "ed25519-dalek",
  "hangang-runtime",
+ "hyper-util",
  "prost",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "subtle",
  "tokio",
+ "tokio-rustls",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower-service",
 ]
 
 [[package]]
@@ -1313,6 +1317,7 @@ dependencies = [
  "httparse",
  "hyper-util",
  "libc",
+ "pin-project-lite",
  "prost",
  "pumgye-core",
  "pumgye-grpc",

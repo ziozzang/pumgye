@@ -301,6 +301,16 @@ watermark 이전에 보고된 주체가 새 Hopae 프로세스가 다시 인증�
 나열해야 합니다(예: `/v1/subjects/lifecycle/snapshot`의 `include_workloads`, `principal`·
 `subject_ref`·`spiffe_id`·`status`). 그전까지는 feed 보존 기간을 품계의 최장 중단 시간보다 길게 두세요.
 
+**호패 SDK의 재적재 TLS (ziozzang/hopae#15).** 이제 `hopae-grpc`는
+`ReloadableEndpointConfig`를 받습니다. 이 구성의
+`Arc<dyn Fn() -> Arc<rustls::ClientConfig>>`는 새 연결을 만들 때마다 읽습니다.
+`EndpointConfig` PEM 생성자는 이전과 같이 동작합니다. 품계의 `observed-*` 소유자는
+`tls_reload::Reloading<ClientConfig>`를 넘기므로 인증서를 교체한 뒤에 재시작할 필요가
+없습니다.
+
+품계는 `hopae-grpc`를 #15 커밋(`74bb829`, #14 `feat/live-reload` 기반)에 고정합니다.
+#14와 #15가 병합되면 고정을 병합된 `integrate/identity-platform` 리비전으로 옮기십시오.
+
 **Hopae #9와 #10 병합.** 두 브랜치는 추가 목록에서만 충돌합니다. 상호 운용 검증에 쓴 로컬 해결(푸시하지
 않음)은 양쪽을 모두 유지했습니다.
 

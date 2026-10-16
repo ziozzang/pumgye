@@ -5,8 +5,12 @@ pub mod authentication_config;
 pub mod authorization;
 /// Hopae membership projection and subject lifecycle owners (policy model v2).
 pub mod hopae_owner;
+/// Prometheus `/metrics` counters (allocation-free recording).
+pub mod metrics;
 pub mod permit;
 pub mod permit_config;
+/// Polling TLS certificate/key/CA reload for listeners and outbound clients.
+pub mod tls_reload;
 
 pub mod authentication_live;
 

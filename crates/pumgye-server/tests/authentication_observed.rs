@@ -288,7 +288,8 @@ async fn native_observed_wrapper_digest_identity_and_lifecycle() {
                     certificate: &cert,
                     private_key: &key,
                     caller_key: CALLER,
-                },
+                }
+                .into(),
             },
             Arc::new(hangang_runtime::time::ReceiverClock::new([7; 16]).unwrap()),
             ClockRates::new(50, 50).unwrap(),

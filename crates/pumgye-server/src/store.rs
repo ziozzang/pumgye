@@ -298,7 +298,17 @@ impl Store {
             ],
         )?;
         transaction.commit()?;
+        pumgye_server::metrics::METRICS.simulation_row();
         Ok(id as u64)
+    }
+    /// Retained simulation audit rows (bounded by count and age).
+    pub fn simulation_rows(&self) -> Result<u64> {
+        Ok(self
+            .connection
+            .query_row("SELECT COUNT(*) FROM simulation_audit", [], |r| {
+                r.get::<_, i64>(0)
+            })?
+            .max(0) as u64)
     }
     pub fn simulations_after(&self, after: u64) -> Result<Vec<SimulationRecord>> {
         ensure!(after <= i64::MAX as u64, "invalid audit cursor");
