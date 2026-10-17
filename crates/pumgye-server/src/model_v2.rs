@@ -1077,13 +1077,19 @@ pub(crate) async fn workloads(State(a): State<Arc<Authority>>, headers: HeaderMa
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let w = a.v2.workloads();
-    let proposals =
-        a.v2.view
-            .load_full()
-            .map_or_else(Vec::new, |v| regrant_proposals(&v.document.policy, &w));
+    let view = a.v2.view.load_full();
+    let proposals = view
+        .as_ref()
+        .map_or_else(Vec::new, |v| regrant_proposals(&v.document.policy, &w));
     (
         [(header::CACHE_CONTROL, "no-store")],
         Json(json!({
+            // CAS base for `POST /v2/workloads/regrants/apply` (`base_revision`):
+            // the version 2 document the proposals were computed from (null
+            // without one). `model` is the model serving decisions.
+            "policy_revision": view.as_ref().map(|v| v.document.revision),
+            "model": if a.v2.v2_authoritative() { "v2" } else { "v1" },
+            "v1_revision": a.view.load().document.revision,
             "principals": w.principals.values().collect::<Vec<_>>(),
             "legacy_mappings": w.legacy,
             "regrant_proposals": proposals.iter().map(|(id, b, e)| json!({"id": id, "binding": b, "evidence": e})).collect::<Vec<_>>(),
@@ -2598,6 +2604,12 @@ mod tests {
         let (_, w) = call(&router, request("GET", "/v2/workloads", ADMIN, None, None)).await;
         let proposals = w["regrant_proposals"].as_array().unwrap().clone();
         assert_eq!(proposals.len(), 1, "{w}");
+        // The CAS base comes with the listing (no GET /v2/policy needed).
+        let (_, policy) = call(&router, request("GET", "/v2/policy", ADMIN, None, None)).await;
+        assert_eq!(w["policy_revision"], policy["revision"], "{w}");
+        assert!(w["policy_revision"].is_u64());
+        assert!(matches!(w["model"].as_str(), Some("v1" | "v2")));
+        assert!(w["v1_revision"].is_u64());
         assert_eq!(proposals[0]["evidence"]["legacy_subject"], LEGACY);
         assert_eq!(
             proposals[0]["binding"]["subjects"],
