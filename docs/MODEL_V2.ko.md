@@ -124,7 +124,14 @@ Hopae는 Kubernetes workload를 **ServiceAccount**로 인증합니다(Hopae `doc
   적용됩니다. 폐기된 주체와 그 wire 주체는 바인딩을 고아로 만들고, 폐기된 주체에 대한 새 바인딩 게시는
   거부됩니다(`pumgye.validation.subject_retired`). explain은 별칭을 보여 줍니다.
 - Pod 기반 권한 이전: `GET /v2/workloads`는 주체, Hopae 레거시 매핑, **보고 전용 재부여 제안**(매핑된
-  레거시 주체를 지정한 각 바인딩을 ServiceAccount 주체로 옮긴 사본)을 나열하고,
+  레거시 주체를 지정한 각 바인딩을 ServiceAccount 주체로 옮긴 사본)을 나열합니다. 응답에는
+  다음 값도 들어 있어 따로 `GET /v2/policy`를 부를 필요가 없습니다.
+  - `policy_revision`: 제안을 계산한 v2 문서 리비전이며, 보낼 `base_revision` 값입니다(v2 문서가
+    없으면 null).
+  - `model`: 판정을 내리는 모델(`v1` 또는 `v2`).
+  - `v1_revision`.
+
+  그리고
   `POST /v2/workloads/regrants/apply {base_revision, proposals, reason, approval_ref?}`는 선택한 제안을
   CAS 게시로 적용합니다(`source: migrated:legacy-pod`, 행위자 기록). 레거시 바인딩은 명시적으로
   폐기할 때까지 남습니다. 이전 미리보기도 v1 `workload_users`의 관측된 매핑을 보고합니다.

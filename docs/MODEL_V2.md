@@ -187,7 +187,15 @@ accepted with a deprecation warning.
   (`pumgye.validation.subject_retired`). Explain shows the alias.
 - Migration from Pod-bound grants: `GET /v2/workloads` lists principals, Hopae's
   legacy mappings and **report-only re-grant proposals** (a copy of each binding that
-  names a mapped legacy subject, targeted at the ServiceAccount principal);
+  names a mapped legacy subject, targeted at the ServiceAccount principal). The
+  response also carries:
+  - `policy_revision`: the version 2 document revision the proposals were
+    computed from, which is the `base_revision` to send (null without a v2
+    document)
+  - `model`: the model serving decisions (`v1` or `v2`)
+  - `v1_revision`
+
+  So a caller needs no separate `GET /v2/policy`.
   `POST /v2/workloads/regrants/apply {base_revision, proposals, reason, approval_ref?}`
   applies chosen proposals as a CAS publication (`source: migrated:legacy-pod`,
   stamped actor). Legacy bindings stay until retired explicitly. The migration

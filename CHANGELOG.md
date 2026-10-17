@@ -4,6 +4,9 @@
 
 ### Added
 
+- `GET /v2/workloads` returns `policy_revision` (the v2 document revision,
+  i.e. the CAS base for `POST /v2/workloads/regrants/apply`), `model` (`v1`
+  or `v2`, serving) and `v1_revision`.
 - Policy model version 2 (Hangang ADR 0021 P0): Hopae-owned principals and
   GroupRefs, global role templates with per-service permission maps, allow and
   explicit-deny bindings with validity windows and server-stamped metadata,
